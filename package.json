@@ -1,0 +1,67 @@
+{
+  "name": "@ni-c/imap-mcp",
+  "version": "0.1.0",
+  "mcpName": "io.github.ni-c/imap-mcp",
+  "description": "MCP server for IMAP mailboxes: read, search, organise and draft mail \u2014 it cannot send",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "imap",
+    "email",
+    "mail",
+    "mailbox",
+    "read-only"
+  ],
+  "license": "MIT",
+  "author": "Willi Thiel",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ni-c/imap-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ni-c/imap-mcp/issues"
+  },
+  "homepage": "https://imap-mcp.ni-c.de",
+  "funding": "https://github.com/sponsors/ni-c",
+  "type": "module",
+  "bin": {
+    "imap-mcp": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "prepublishOnly": "npm run lint && npm run build && npm test",
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "verify:live": "node scripts/verify-live.mjs",
+    "assets": "node scripts/gen-assets.mjs",
+    "assets:check": "node scripts/gen-assets.mjs --check"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "imapflow": "^1.7.6",
+    "mailparser": "^3.9.16",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@resvg/resvg-js": "^2.6.2",
+    "@types/mailparser": "^3.4.6",
+    "@types/node": "^26.3.0",
+    "@vitest/coverage-v8": "4.1.11",
+    "eslint": "^10.9.1",
+    "prettier": "^3.9.6",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.68.0",
+    "vitest": "^4.1.11"
+  }
+}

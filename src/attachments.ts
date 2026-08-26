@@ -1,0 +1,336 @@
+import type { MessageStructureObject } from 'imapflow';
+
+import { stripInvisible } from './analyze.js';
+
+/** How deep the MIME tree is walked. Forwarded mail nests; a loop does not. */
+const MAX_DEPTH = 5;
+/** Upper bound on how many parts one listing may describe. */
+const MAX_ATTACHMENTS = 50;
+const MAX_FILENAME_LENGTH = 120;
+
+/**
+ * Extensions that are executable somewhere. The list is long on purpose: this
+ * is a refusal list applied on top of the content-type allowlist, and the cost
+ * of an extra entry is one unusual attachment that has to be fetched by other
+ * means.
+ */
+const EXECUTABLE_EXTENSIONS = new Set([
+  'ade',
+  'adp',
+  'app',
+  'appimage',
+  'application',
+  'appref-ms',
+  'asp',
+  'aspx',
+  'bas',
+  'bat',
+  'cer',
+  'chm',
+  'cmd',
+  'com',
+  'cpl',
+  'crt',
+  'csh',
+  'deb',
+  'dll',
+  'dmg',
+  'exe',
+  'fxp',
+  'gadget',
+  'hlp',
+  'hta',
+  'inf',
+  'ins',
+  'iso',
+  'isp',
+  'its',
+  'jar',
+  'js',
+  'jse',
+  'ksh',
+  'lnk',
+  'mad',
+  'maf',
+  'mag',
+  'mam',
+  'maq',
+  'mar',
+  'mas',
+  'mat',
+  'mau',
+  'mav',
+  'maw',
+  'mda',
+  'mdb',
+  'mde',
+  'mdt',
+  'mdw',
+  'mdz',
+  'msc',
+  'msh',
+  'msh1',
+  'msh2',
+  'mshxml',
+  'msi',
+  'msp',
+  'mst',
+  'ops',
+  'pcd',
+  'pif',
+  'pkg',
+  'pl',
+  'plg',
+  'prf',
+  'prg',
+  'ps1',
+  'ps2',
+  'psc1',
+  'psc2',
+  'py',
+  'pyc',
+  'pyo',
+  'rb',
+  'reg',
+  'rpm',
+  'scf',
+  'scr',
+  'sct',
+  'sh',
+  'shb',
+  'shs',
+  'url',
+  'vb',
+  'vbe',
+  'vbs',
+  'vsmacros',
+  'vsw',
+  'ws',
+  'wsc',
+  'wsf',
+  'wsh',
+  'xll',
+]);
+
+/**
+ * A filename ending in something that looks like a document extension followed
+ * by an executable one — `invoice.pdf.exe`. Mail clients that hide known
+ * extensions render it as `invoice.pdf`.
+ */
+const DOUBLE_EXTENSION_BAIT =
+  /\.(pdf|docx?|xlsx?|pptx?|txt|csv|jpe?g|png|gif|zip|rtf|odt|ods)\.[a-z0-9]{1,5}$/i;
+
+export interface AttachmentCandidate {
+  partId: string;
+  filename: string;
+  contentType: string;
+  /** Size as declared by the server; not yet verified against the bytes. */
+  size: number | undefined;
+  disposition: string | undefined;
+  /** True when nothing in the *declaration* disqualifies it. */
+  allowed: boolean;
+  /** Why it was refused, or what looks off about it. */
+  notes: string[];
+}
+
+export interface AttachmentPolicy {
+  allowedTypes: string[];
+  maxBytes: number;
+}
+
+/**
+ * Strips a filename down to something safe to print and to reason about.
+ *
+ * The name is never used to open a file — nothing here writes to disk — but it
+ * does reach the model, and a name carrying directional overrides or path
+ * separators is trying to be read as something it is not.
+ */
+export function sanitizeFilename(raw: string | undefined): string {
+  if (raw === undefined || raw.trim() === '') return '(unnamed)';
+  const cleaned = stripInvisible(raw.normalize('NFKC'))
+    .replace(/[/\\]/g, '_')
+    .replace(/^\.+/, '')
+    .trim();
+  if (cleaned === '') return '(unnamed)';
+  return cleaned.length > MAX_FILENAME_LENGTH
+    ? `${cleaned.slice(0, MAX_FILENAME_LENGTH)}…`
+    : cleaned;
+}
+
+export function extensionOf(filename: string): string {
+  const match = /\.([A-Za-z0-9]{1,10})$/.exec(filename);
+  return match?.[1]?.toLowerCase() ?? '';
+}
+
+/**
+ * Walks the MIME tree and returns every part that is an attachment.
+ *
+ * Parts inside a forwarded `message/rfc822` are included: an attachment that
+ * arrives one level deeper is exactly as dangerous, and a listing that stops at
+ * the outer envelope would report "no attachments" for the most common way of
+ * passing a file along.
+ */
+export function collectAttachments(
+  structure: MessageStructureObject | undefined
+): AttachmentCandidate[] {
+  const found: AttachmentCandidate[] = [];
+  walk(structure, 0, found);
+  return found.slice(0, MAX_ATTACHMENTS);
+}
+
+function walk(
+  node: MessageStructureObject | undefined,
+  depth: number,
+  found: AttachmentCandidate[]
+): void {
+  if (
+    node === undefined ||
+    depth > MAX_DEPTH ||
+    found.length >= MAX_ATTACHMENTS
+  )
+    return;
+
+  if (node.childNodes !== undefined && node.childNodes.length > 0) {
+    for (const child of node.childNodes) walk(child, depth + 1, found);
+    return;
+  }
+
+  const type = (node.type ?? 'application/octet-stream').toLowerCase();
+  const disposition = node.disposition?.toLowerCase();
+  const declaredName =
+    node.dispositionParameters?.filename ?? node.parameters?.name;
+
+  // A part is an attachment when it says so, or when it carries a filename, or
+  // when it is simply not one of the two body types. Inline images count: they
+  // are still bytes from a stranger.
+  const isBody =
+    (type === 'text/plain' || type === 'text/html') &&
+    disposition !== 'attachment' &&
+    declaredName === undefined;
+  if (isBody || node.part === undefined) return;
+
+  const filename = sanitizeFilename(declaredName);
+  const notes: string[] = [];
+  if (declaredName !== undefined && DOUBLE_EXTENSION_BAIT.test(declaredName)) {
+    notes.push(
+      'filename has a double extension — it renders as a document but is not one'
+    );
+  }
+  found.push({
+    partId: node.part,
+    filename,
+    contentType: type,
+    size: node.size,
+    disposition,
+    allowed: true,
+    notes,
+  });
+}
+
+/**
+ * Applies the declaration-level policy.
+ *
+ * Everything checked here comes from the sender, so a pass means only "nothing
+ * in what it claims about itself disqualifies it". The bytes are checked
+ * separately in {@link sniffContent} when they are actually fetched.
+ */
+export function checkPolicy(
+  candidate: AttachmentCandidate,
+  policy: AttachmentPolicy
+): AttachmentCandidate {
+  const notes = [...candidate.notes];
+  let allowed = true;
+
+  const extension = extensionOf(candidate.filename);
+  if (extension !== '' && EXECUTABLE_EXTENSIONS.has(extension)) {
+    allowed = false;
+    notes.push(`refused: .${extension} is an executable file type`);
+  }
+  if (!policy.allowedTypes.includes(candidate.contentType)) {
+    allowed = false;
+    notes.push(
+      `refused: content type ${candidate.contentType} is not in the allowlist (IMAP_ATTACHMENT_TYPES)`
+    );
+  }
+  if (candidate.size !== undefined && candidate.size > policy.maxBytes) {
+    allowed = false;
+    notes.push(
+      `refused: declared size ${candidate.size} exceeds IMAP_MAX_ATTACHMENT_BYTES (${policy.maxBytes})`
+    );
+  }
+
+  return { ...candidate, allowed, notes };
+}
+
+export interface ContentVerdict {
+  executable: boolean;
+  detectedType: string | undefined;
+}
+
+/**
+ * Identifies content by its leading bytes.
+ *
+ * The declared content type is a claim by the sender; this is the only check
+ * that looks at what was actually sent. An executable renamed to `.txt` and
+ * declared as `text/plain` passes every other gate and fails here.
+ */
+export function sniffContent(buffer: Buffer): ContentVerdict {
+  const byte = (i: number): number => buffer[i] ?? -1;
+
+  if (byte(0) === 0x4d && byte(1) === 0x5a) {
+    return { executable: true, detectedType: 'application/x-msdownload' };
+  }
+  if (
+    byte(0) === 0x7f &&
+    byte(1) === 0x45 &&
+    byte(2) === 0x4c &&
+    byte(3) === 0x46
+  ) {
+    return { executable: true, detectedType: 'application/x-elf' };
+  }
+  // `>>> 0` is load-bearing: JS bitwise operators produce a *signed* 32-bit
+  // result, so without it 0xfeedface arrives as a negative number and none of
+  // the Mach-O comparisons below can ever match.
+  const magic32 =
+    ((byte(0) << 24) | (byte(1) << 16) | (byte(2) << 8) | byte(3)) >>> 0;
+  if (
+    magic32 === 0xfeedface ||
+    magic32 === 0xfeedfacf ||
+    magic32 === 0xcafebabe
+  ) {
+    return { executable: true, detectedType: 'application/x-mach-binary' };
+  }
+  if (byte(0) === 0x23 && byte(1) === 0x21) {
+    return { executable: true, detectedType: 'text/x-shellscript' };
+  }
+
+  const starts = (signature: number[]): boolean =>
+    signature.every((value, index) => byte(index) === value);
+
+  if (starts([0x25, 0x50, 0x44, 0x46])) {
+    return { executable: false, detectedType: 'application/pdf' };
+  }
+  if (starts([0x89, 0x50, 0x4e, 0x47])) {
+    return { executable: false, detectedType: 'image/png' };
+  }
+  if (starts([0xff, 0xd8, 0xff])) {
+    return { executable: false, detectedType: 'image/jpeg' };
+  }
+  if (starts([0x47, 0x49, 0x46, 0x38])) {
+    return { executable: false, detectedType: 'image/gif' };
+  }
+  if (
+    starts([0x52, 0x49, 0x46, 0x46]) &&
+    byte(8) === 0x57 &&
+    byte(9) === 0x45 &&
+    byte(10) === 0x42 &&
+    byte(11) === 0x50
+  ) {
+    return { executable: false, detectedType: 'image/webp' };
+  }
+  if (starts([0x50, 0x4b, 0x03, 0x04])) {
+    // Also every modern Office and OpenDocument file.
+    return { executable: false, detectedType: 'application/zip' };
+  }
+  return { executable: false, detectedType: undefined };
+}
