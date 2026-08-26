@@ -41,7 +41,9 @@
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "assets": "node scripts/gen-assets.mjs",
+    "assets:check": "node scripts/gen-assets.mjs --check"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
@@ -51,6 +53,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@resvg/resvg-js": "^2.6.2",
     "@types/mailparser": "^3.4.6",
     "@types/node": "^26.3.0",
     "@vitest/coverage-v8": "4.1.11",

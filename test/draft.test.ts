@@ -161,7 +161,7 @@ describe('encodeHeaderValue', () => {
 });
 
 describe('save_draft', () => {
-  const writeConfig = { allowWrite: true };
+  const writeConfig = { readOnly: false };
 
   it('appends to the folder the server flags as Drafts', async () => {
     const harness = await connect({ config: writeConfig });
@@ -199,7 +199,7 @@ describe('save_draft', () => {
   it('honours IMAP_DRAFTS_MAILBOX over the special-use flag', async () => {
     const harness = await connect({
       config: {
-        allowWrite: true,
+        readOnly: false,
         imap: { draftsMailbox: 'Archive' } as never,
       },
     });
@@ -267,7 +267,7 @@ describe('save_draft', () => {
     await harness.close();
   });
 
-  it('is not registered without IMAP_ALLOW_WRITE', async () => {
+  it('is not registered without IMAP_READ_ONLY', async () => {
     const harness = await connect();
     const { tools } = await harness.client.listTools();
     expect(tools.map((tool) => tool.name)).not.toContain('save_draft');

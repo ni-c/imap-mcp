@@ -10,7 +10,7 @@ function mailboxes() {
   ];
 }
 
-const writeConfig = { allowWrite: true };
+const writeConfig = { readOnly: false };
 
 describe('delete_messages with elicitation', () => {
   it('asks the user and deletes once they accept', async () => {

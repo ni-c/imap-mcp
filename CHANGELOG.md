@@ -16,6 +16,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`IMAP_ALLOW_WRITE` is now `IMAP_READ_ONLY`**, for one name across the family —
+  but **not** one default. Everywhere else `<PREFIX>_READ_ONLY` defaults to
+  `false`; here it defaults to `true`, because the variable it replaces was
+  opt-in and a rename that quietly flipped that would have handed write access to
+  every installation that upgraded without reading this file. Only the literal
+  string `false` turns it off, so a typo fails closed.
+
+  An installation that still sets `IMAP_ALLOW_WRITE` **refuses to start**, with a
+  message naming the replacement. Silently ignoring a removed security variable
+  is worse than refusing: whoever set it once believes it is still in force.
+
+### Added
+
+- `IMAP_ALLOW_TOOLS` and `IMAP_DENY_TOOLS` choose which of the eleven tools are
+  registered. Both take comma-separated tool names or a prefix with a trailing
+  `*`, the allow list decides what is in and the deny list is subtracted from it,
+  and `IMAP_ALLOW_TOOLS=essential` selects a curated six — `list_mailboxes`,
+  `list_new_messages`, `list_messages`, `get_message`, `set_message_flags` and
+  `move_messages`. Four of those are read tools, so the preset stays a working
+  combination under the read-only default. Nothing changes for an installation
+  that sets neither.
+
+  A filtered tool is not registered at all, so it is absent from `tools/list` and
+  answers `tools/call` with "tool not found" — the same cut `IMAP_READ_ONLY`
+  already makes, not a second, weaker one. It covers **tools**: the attachment
+  resources are not filtered.
+
+  An entry that matches no tool **stops the server at startup**, naming the entry
+  and listing the real names. Under the read-only default, an exact write-tool
+  name in the allow list is refused with a message naming `IMAP_READ_ONLY`
+  instead of calling the tool unknown — which matters more here than elsewhere,
+  because read-only is the default rather than something you remember switching
+  on.
+
+- A documentation site at [imap-mcp.ni-c.de](https://imap-mcp.ni-c.de), an
+  architecture diagram generated from a single source, `server.json` registry
+  metadata, and CI and docs workflows. The workflows ship **disabled**: this
+  repository is private and its Actions minutes are worth keeping, so
+  `npm run lint && npm run build && npm run test:coverage` locally is the whole
+  of the verification until they are switched on.
+
+### Changed
+
 - The SPF/DKIM/DMARC verdicts are now read from the topmost
   `Authentication-Results` header only and come with the authserv-id and a
   `forgeable` flag, so a header the sender wrote themselves cannot present a

@@ -96,7 +96,7 @@ export function registerReadTools(
                   keyword: config.imap.seenKeyword,
                   storable: client.keywordSupported(permanentFlags),
                 },
-          write_tools_enabled: config.allowWrite,
+          write_tools_enabled: !config.readOnly,
           // This server cannot send mail at all — see SECURITY.md on why that
           // is a design decision rather than a missing feature.
           can_send_mail: false,

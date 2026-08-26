@@ -5,6 +5,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Config } from './config.js';
 import { ConfirmationStore } from './confirm.js';
 import { ImapClient, type ImapClientFactory } from './imap.js';
+import { buildToolFilter, installToolFilter } from './tool-filter.js';
 import { registerAttachmentResources } from './resources.js';
 import { registerReadTools } from './tools/read.js';
 import { registerWriteTools } from './tools/write.js';
@@ -36,6 +37,10 @@ export interface ServerDeps {
 }
 
 export function createServer(config: Config, deps: ServerDeps = {}): McpServer {
+  // Before anything is built: an unusable tool list should fail on the way in,
+  // not leave a server running with tools quietly missing.
+  const filter = buildToolFilter(config);
+
   const client =
     deps.imapFactory === undefined
       ? new ImapClient(config)
@@ -54,13 +59,17 @@ export function createServer(config: Config, deps: ServerDeps = {}): McpServer {
     { instructions: INSTRUCTIONS }
   );
 
+  // Wraps server.registerTool, so it has to sit before the first register call.
+  // It covers tools only: the attachment resources below are not filtered.
+  installToolFilter(server, filter);
+
   registerReadTools(server, client, config);
   registerAttachmentResources(server, client, config);
 
   // The write and send groups are not registered at all when they are off.
   // Rejecting them at call time would still advertise capabilities the server
   // refuses to provide, and a tool the model can see is a tool it will try.
-  if (config.allowWrite) {
+  if (!config.readOnly) {
     registerWriteTools(server, client, config, confirmations);
   }
 

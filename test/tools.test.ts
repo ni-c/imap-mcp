@@ -33,8 +33,8 @@ describe('tool registration', () => {
     await harness.close();
   });
 
-  it('adds the write tools with IMAP_ALLOW_WRITE', async () => {
-    const harness = await connect({ config: { allowWrite: true } });
+  it('adds the write tools with IMAP_READ_ONLY', async () => {
+    const harness = await connect({ config: { readOnly: false } });
     expect(await toolNames(harness.client)).toEqual(
       [...READ_TOOLS, ...WRITE_TOOLS].sort()
     );
@@ -42,7 +42,7 @@ describe('tool registration', () => {
   });
 
   it('registers 11 tools when writing is enabled, and never a sending one', async () => {
-    const harness = await connect({ config: { allowWrite: true } });
+    const harness = await connect({ config: { readOnly: false } });
     const names = await toolNames(harness.client);
     expect(names).toHaveLength(11);
     // The load-bearing property of this server: it has no way to send mail, so
@@ -62,7 +62,7 @@ describe('tool registration', () => {
   });
 
   it('marks reads read-only and deletes destructive', async () => {
-    const harness = await connect({ config: { allowWrite: true } });
+    const harness = await connect({ config: { readOnly: false } });
     const { tools } = await harness.client.listTools();
     const byName = new Map(tools.map((tool) => [tool.name, tool]));
     for (const name of ['list_messages', 'get_message', 'get_attachments']) {
@@ -122,7 +122,7 @@ describe('tool registration', () => {
 
 describe('get_server_info', () => {
   it('reports the account setup and the tool groups', async () => {
-    const harness = await connect({ config: { allowWrite: true } });
+    const harness = await connect({ config: { readOnly: false } });
     const info = jsonOf(await call(harness.client, 'get_server_info')) as {
       mailbox: string;
       capabilities: string[];
@@ -328,7 +328,7 @@ describe('list_new_messages', () => {
   });
 
   it('works with write tools disabled — tagging is the server’s own bookkeeping', async () => {
-    const harness = await connect({ config: { allowWrite: false } });
+    const harness = await connect({ config: { readOnly: true } });
     expect(
       (await call(harness.client, 'list_new_messages')).isError
     ).toBeUndefined();

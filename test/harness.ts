@@ -30,7 +30,10 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
       maxDownloadBytes: 25 * 1024 * 1024,
       ...(overrides.imap ?? {}),
     },
-    allowWrite: overrides.allowWrite ?? false,
+    // Mirrors the real default: read-only unless the test says otherwise.
+    readOnly: overrides.readOnly ?? true,
+    allowTools: overrides.allowTools,
+    denyTools: overrides.denyTools,
   };
 }
 

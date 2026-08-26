@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { call, connect, jsonOf, textOf, tokenOf } from './harness.js';
 import { message } from './fake-imap.js';
 
-const writeConfig = { allowWrite: true };
+const writeConfig = { readOnly: false };
 
 describe('set_message_flags', () => {
   it('adds and removes flags', async () => {

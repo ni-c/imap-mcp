@@ -1,0 +1,155 @@
+# Template — before applying:
+#   * resolve every action SHA LIVE (SKILL.md Phase 4), keep the "# vX.Y.Z" comment
+#   * adjust the Node matrix to the two current LTS lines — LTS, not newest.
+#     Group by major, or you get two releases of the same line:
+#       curl -s https://nodejs.org/dist/index.json | jq -r '
+#         [.[] | select(.lts != false)]
+#         | map(.version | ltrimstr("v") | split(".")[0] | tonumber)
+#         | unique | reverse | .[0:2] | @json'
+#     ([24, 22] on 2026-08-15; 26 existed but was not LTS)
+#   * check the current Trivy release and update the `version:` pin
+#   * replace imap-mcp
+# Careful: the metadata-action `tags:` block contains docker's own {{version}},
+# {{major}}, {{minor}} and {{is_default_branch}} — those stay as they are.
+# Drop the container-scan and publish jobs only if the project has no Dockerfile.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  schedule:
+    # Weekly, so the audit job also runs in quiet weeks.
+    - cron: '0 6 * * 1'
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [22, 24]
+    steps:
+      - uses: actions/checkout@RESOLVE_SHA # v7.0.1
+      - uses: actions/setup-node@RESOLVE_SHA # v7.0.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - run: npm test
+        if: matrix.node-version != 24
+      - run: npm run test:coverage
+        if: matrix.node-version == 24
+      # The diagram is rendered into four copies from one source; fail if any of
+      # them was edited by hand. Only the PNG's dimensions are checked, not its
+      # bytes — fonts rasterise differently here than on a workstation.
+      - run: npm run assets:check
+        if: matrix.node-version == 24
+      - uses: actions/upload-artifact@RESOLVE_SHA # v7.0.1
+        if: matrix.node-version == 24
+        with:
+          name: coverage
+          path: coverage/
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@RESOLVE_SHA # v7.0.1
+      - uses: actions/setup-node@RESOLVE_SHA # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      # --ignore-scripts: an audit must not execute the code it is auditing.
+      - run: npm ci --ignore-scripts
+      - run: npm audit --audit-level=high
+
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@RESOLVE_SHA # v7.0.1
+      # init and analyze must always move together — see the dependabot codeql group.
+      - uses: github/codeql-action/init@RESOLVE_SHA # v4.37.6
+        with:
+          languages: javascript-typescript
+      - uses: github/codeql-action/analyze@RESOLVE_SHA # v4.37.6
+
+  container-scan:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            tag: amd64
+          - platform: linux/arm64
+            tag: arm64
+    steps:
+      - uses: actions/checkout@RESOLVE_SHA # v7.0.1
+      - uses: docker/setup-qemu-action@RESOLVE_SHA # v4.2.0
+      - uses: docker/setup-buildx-action@RESOLVE_SHA # v4.2.0
+      - uses: docker/build-push-action@RESOLVE_SHA # v7.3.0
+        with:
+          context: .
+          load: true
+          platforms: ${{ matrix.platform }}
+          tags: 'imap-mcp:audit-${{ matrix.tag }}'
+          cache-from: type=gha,scope=scan-${{ matrix.tag }}
+          cache-to: type=gha,mode=max,scope=scan-${{ matrix.tag }}
+      - uses: aquasecurity/trivy-action@RESOLVE_SHA # v0.36.0
+        with:
+          # Pin Trivy itself: the action's default has been a release that was
+          # withdrawn upstream, and the installer then dies after "found version".
+          version: v0.73.0
+          image-ref: 'imap-mcp:audit-${{ matrix.tag }}'
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+
+  publish:
+    needs: [test, codeql, container-scan]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@RESOLVE_SHA # v7.0.1
+      - uses: docker/setup-qemu-action@RESOLVE_SHA # v4.2.0
+      - uses: docker/setup-buildx-action@RESOLVE_SHA # v4.2.0
+      - uses: docker/login-action@RESOLVE_SHA # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@RESOLVE_SHA # v6.2.0
+        with:
+          images: ghcr.io/ni-c/imap-mcp
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - uses: docker/build-push-action@RESOLVE_SHA # v7.3.0
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
