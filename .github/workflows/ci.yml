@@ -11,7 +11,6 @@
 #   * replace imap-mcp
 # Careful: the metadata-action `tags:` block contains docker's own {{version}},
 # {{major}}, {{minor}} and {{is_default_branch}} — those stay as they are.
-# Drop the container-scan and publish jobs only if the project has no Dockerfile.
 name: CI
 
 on:
@@ -37,8 +36,8 @@ jobs:
       matrix:
         node-version: [22, 24]
     steps:
-      - uses: actions/checkout@RESOLVE_SHA # v7.0.1
-      - uses: actions/setup-node@RESOLVE_SHA # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
@@ -54,7 +53,7 @@ jobs:
       # bytes — fonts rasterise differently here than on a workstation.
       - run: npm run assets:check
         if: matrix.node-version == 24
-      - uses: actions/upload-artifact@RESOLVE_SHA # v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: matrix.node-version == 24
         with:
           name: coverage
@@ -63,8 +62,8 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@RESOLVE_SHA # v7.0.1
-      - uses: actions/setup-node@RESOLVE_SHA # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: npm
@@ -78,78 +77,9 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@RESOLVE_SHA # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # init and analyze must always move together — see the dependabot codeql group.
-      - uses: github/codeql-action/init@RESOLVE_SHA # v4.37.6
+      - uses: github/codeql-action/init@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.6
         with:
           languages: javascript-typescript
-      - uses: github/codeql-action/analyze@RESOLVE_SHA # v4.37.6
-
-  container-scan:
-    needs: test
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - platform: linux/amd64
-            tag: amd64
-          - platform: linux/arm64
-            tag: arm64
-    steps:
-      - uses: actions/checkout@RESOLVE_SHA # v7.0.1
-      - uses: docker/setup-qemu-action@RESOLVE_SHA # v4.2.0
-      - uses: docker/setup-buildx-action@RESOLVE_SHA # v4.2.0
-      - uses: docker/build-push-action@RESOLVE_SHA # v7.3.0
-        with:
-          context: .
-          load: true
-          platforms: ${{ matrix.platform }}
-          tags: 'imap-mcp:audit-${{ matrix.tag }}'
-          cache-from: type=gha,scope=scan-${{ matrix.tag }}
-          cache-to: type=gha,mode=max,scope=scan-${{ matrix.tag }}
-      - uses: aquasecurity/trivy-action@RESOLVE_SHA # v0.36.0
-        with:
-          # Pin Trivy itself: the action's default has been a release that was
-          # withdrawn upstream, and the installer then dies after "found version".
-          version: v0.73.0
-          image-ref: 'imap-mcp:audit-${{ matrix.tag }}'
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: '1'
-
-  publish:
-    needs: [test, codeql, container-scan]
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@RESOLVE_SHA # v7.0.1
-      - uses: docker/setup-qemu-action@RESOLVE_SHA # v4.2.0
-      - uses: docker/setup-buildx-action@RESOLVE_SHA # v4.2.0
-      - uses: docker/login-action@RESOLVE_SHA # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@RESOLVE_SHA # v6.2.0
-        with:
-          images: ghcr.io/ni-c/imap-mcp
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-      - uses: docker/build-push-action@RESOLVE_SHA # v7.3.0
-        with:
-          context: .
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          sbom: true
-          provenance: mode=max
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - uses: github/codeql-action/analyze@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.6
