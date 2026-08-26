@@ -1,0 +1,92 @@
+# Template — before applying:
+#   * resolve every action SHA LIVE (SKILL.md Phase 4), keep the "# vX.Y.Z" comment
+#   * adjust the Node matrix to the two current LTS lines — LTS, not newest.
+#     Group by major, or you get two releases of the same line:
+#       curl -s https://nodejs.org/dist/index.json | jq -r '
+#         [.[] | select(.lts != false)]
+#         | map(.version | ltrimstr("v") | split(".")[0] | tonumber)
+#         | unique | reverse | .[0:2] | @json'
+#     ([24, 22] on 2026-08-15; 26 existed but was not LTS)
+#   * check the current Trivy release and update the `version:` pin
+#   * replace imap-mcp
+# Careful: the metadata-action `tags:` block contains docker's own {{version}},
+# {{major}}, {{minor}} and {{is_default_branch}} — those stay as they are.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  schedule:
+    # Weekly, so the audit job also runs in quiet weeks.
+    - cron: '0 6 * * 1'
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [22, 24]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - run: npm test
+        if: matrix.node-version != 24
+      - run: npm run test:coverage
+        if: matrix.node-version == 24
+      # The diagram is rendered into four copies from one source; fail if any of
+      # them was edited by hand. Only the PNG's dimensions are checked, not its
+      # bytes — fonts rasterise differently here than on a workstation.
+      - run: npm run assets:check
+        if: matrix.node-version == 24
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: matrix.node-version == 24
+        with:
+          name: coverage
+          path: coverage/
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      # --ignore-scripts: an audit must not execute the code it is auditing.
+      - run: npm ci --ignore-scripts
+      - run: npm audit --audit-level=high
+
+  codeql:
+    # Code scanning needs GitHub Advanced Security, which a private repository
+    # on the Free plan does not have: the analysis runs fine and then the SARIF
+    # upload fails with "Resource not accessible by integration". Skipping it
+    # while private states that precondition instead of leaving a job that can
+    # never pass. It starts working by itself the day this repository is made
+    # public — nothing to remember.
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # init and analyze must always move together — see the dependabot codeql group.
+      - uses: github/codeql-action/init@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.6
+        with:
+          languages: javascript-typescript
+      - uses: github/codeql-action/analyze@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.6

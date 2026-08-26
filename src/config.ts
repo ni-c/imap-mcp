@@ -31,7 +31,26 @@ export interface ImapConfig {
 
 export interface Config {
   imap: ImapConfig;
-  allowWrite: boolean;
+  /**
+   * When true — the default — the mailbox write tools are not registered.
+   *
+   * Note the default, which is the opposite of every other server in this
+   * family. This variable replaced `IMAP_ALLOW_WRITE`, and that one was opt-in:
+   * setting nothing meant no write access to a mailbox. Renaming it without
+   * keeping that default would have handed write access to every installation
+   * that upgraded without reading the changelog. The name is now shared with
+   * the rest of the family; the default deliberately is not.
+   */
+  readOnly: boolean;
+  /**
+   * Raw value of `IMAP_ALLOW_TOOLS` — comma-separated tool names, `list_*`
+   * prefixes, or `essential`. Kept unparsed on purpose: this file is a mirror
+   * of the environment, and the names can only be checked against the tool
+   * catalogue, which `buildToolFilter` does.
+   */
+  allowTools: string | undefined;
+  /** Raw value of `IMAP_DENY_TOOLS`, same shape, subtracted from the above. */
+  denyTools: string | undefined;
 }
 
 export const DEFAULT_ATTACHMENT_TYPES = [
@@ -68,8 +87,9 @@ export function missingConfigMessage(missing: string[]): string {
     `missing required environment variable(s): ${missing.join(', ')}\n` +
     'Required: IMAP_HOST (e.g. imap.example.net), IMAP_USER, IMAP_PASSWORD\n' +
     'Optional: IMAP_PORT, IMAP_TLS (implicit|starttls|none), IMAP_MAILBOX, ' +
-    'IMAP_SEEN_KEYWORD, IMAP_ALLOW_WRITE=true to expose the mailbox write ' +
-    'tools, IMAP_DOWNLOAD_DIR to allow saving attachments to disk, ' +
+    'IMAP_SEEN_KEYWORD, IMAP_READ_ONLY=false to expose the mailbox write ' +
+    'tools (it defaults to true), IMAP_ALLOW_TOOLS / IMAP_DENY_TOOLS to narrow ' +
+    'the tool list, IMAP_DOWNLOAD_DIR to allow saving attachments to disk, ' +
     'IMAP_INSECURE_TLS=true to accept self-signed certificates'
   );
 }
@@ -143,8 +163,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         'IMAP_MAX_DOWNLOAD_BYTES'
       ),
     },
-    allowWrite: env.IMAP_ALLOW_WRITE === 'true',
+    // Defaults to true, unlike the rest of the family — see the field comment.
+    readOnly: env.IMAP_READ_ONLY !== 'false',
+    allowTools: env.IMAP_ALLOW_TOOLS,
+    denyTools: env.IMAP_DENY_TOOLS,
   };
+
+  // Silently ignoring a removed security variable is the worst of the options:
+  // whoever set it once believes it is still in force. IMAP_ALLOW_WRITE=true
+  // used to be the only way to reach the write tools, so an installation that
+  // still sets it is one that wants them — and would otherwise get a read-only
+  // server without being told why.
+  if (env.IMAP_ALLOW_WRITE !== undefined) {
+    console.error(
+      'imap-mcp: IMAP_ALLOW_WRITE has been replaced by IMAP_READ_ONLY. Set ' +
+        'IMAP_READ_ONLY=false for the write tools, or unset IMAP_ALLOW_WRITE ' +
+        'to keep the read-only default.'
+    );
+    process.exit(1);
+  }
 
   const missing = missingConfigKeys(config);
   if (missing.length > 0) {

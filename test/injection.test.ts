@@ -215,7 +215,7 @@ describe('injection corpus', () => {
 
       it('never reaches a confirmation prompt', async () => {
         const harness = await connect({
-          config: { allowWrite: true },
+          config: { readOnly: false },
           mailboxes: mailboxes(),
         });
         await call(harness.client, 'get_message', { uid: 42 });
@@ -298,7 +298,7 @@ describe('framing properties', () => {
 
   it('the confirmation for a bulk delete quotes no message text at all', async () => {
     const harness = await connect({
-      config: { allowWrite: true },
+      config: { readOnly: false },
       mailboxes: [
         {
           path: 'INBOX',

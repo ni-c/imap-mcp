@@ -359,7 +359,7 @@ export class ImapClient {
    * Adds the bookkeeping keyword to the given UIDs.
    *
    * This is the one write the server performs on its own initiative, and it
-   * stays available with IMAP_ALLOW_WRITE unset: without it `list_new_messages`
+   * stays available under the default IMAP_READ_ONLY: without it `list_new_messages`
    * would return the same mail forever. It touches no flag a human interacts
    * with — `\Seen` in particular is left alone.
    */

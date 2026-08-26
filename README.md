@@ -1,12 +1,26 @@
 # imap-mcp
 
-A [Model Context Protocol](https://modelcontextprotocol.io) server for ordinary mailboxes.
-It speaks IMAP, so it works with any provider rather than one vendor's API: read and search
-mail, organise it, save attachments, and draft replies.
+[![CI](https://img.shields.io/github/actions/workflow/status/ni-c/imap-mcp/ci.yml?branch=main&label=CI)](https://github.com/ni-c/imap-mcp/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/%40ni-c%2Fimap-mcp)](https://www.npmjs.com/package/@ni-c/imap-mcp)
+[![npm downloads](https://img.shields.io/npm/dm/%40ni-c%2Fimap-mcp)](https://www.npmjs.com/package/@ni-c/imap-mcp)
+[![node](https://img.shields.io/node/v/%40ni-c%2Fimap-mcp)](https://nodejs.org)
+[![license](https://img.shields.io/npm/l/%40ni-c%2Fimap-mcp)](LICENSE)
+[![docs](https://img.shields.io/badge/docs-imap--mcp.ni--c.de-informational)](https://imap-mcp.ni-c.de)
+[![sponsor](https://img.shields.io/badge/sponsor-ni--c-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/ni-c)
 
-Eleven tools, not fifty. A mail account is a workflow, not an API surface, and a model picks
-the right tool far more reliably from a short list — so related operations are folded into one
-tool with a mode rather than split across many.
+A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server for any IMAP
+mailbox. It speaks IMAP rather than one vendor's API, so it works with whatever provider you
+already have.
+
+Lets MCP clients like Claude Code, Claude Desktop or Codex read and search your mail, organise
+it into folders, save attachments and draft replies — with every message fenced as untrusted
+content, and the write tools off unless you turn them on.
+
+Eleven tools, not fifty: a mail account is a workflow, not an API surface, so related
+operations are folded into one tool with a mode rather than split across many. And eleven is
+the ceiling, not the floor — `IMAP_ALLOW_TOOLS=essential` registers a curated six instead, and
+under the read-only default that narrows to four. See
+[choosing which tools load](#choosing-which-tools-load).
 
 ## What makes it different
 
@@ -21,7 +35,8 @@ message can make this server post anything anywhere.
 
 **Writes are off until you turn them on.** With only `IMAP_HOST`, `IMAP_USER` and
 `IMAP_PASSWORD` set, the server registers six read tools and nothing else. The mailbox tools
-appear with `IMAP_ALLOW_WRITE=true`. Tools that are off are not registered at all — a
+appear with `IMAP_READ_ONLY=false` — note the default is `true`, the opposite of the other
+servers in this family, because this one reaches a mailbox. Tools that are off are not registered at all — a
 capability the model cannot see is one it cannot be talked into using.
 
 **Mail is treated as hostile input, because it is.** Anyone in the world can put text in your
@@ -64,7 +79,9 @@ not, they fall back to a two-call token — and say so, rather than implying som
 | `IMAP_PORT`                 | no       | `993` / `143` | Defaults by TLS mode                                 |
 | `IMAP_TLS`                  | no       | `implicit`    | `implicit`, `starttls` or `none`                     |
 | `IMAP_MAILBOX`              | no       | `INBOX`       | Mailbox the message tools default to                 |
-| `IMAP_ALLOW_WRITE`          | no       | `false`       | Exactly `true` registers the five mailbox tools      |
+| `IMAP_READ_ONLY`            | no       | **`true`**    | Exactly `false` registers the five mailbox tools     |
+| `IMAP_ALLOW_TOOLS`          | no       | —             | Tool names, `list_*` prefixes or `essential`         |
+| `IMAP_DENY_TOOLS`           | no       | —             | Same syntax; subtracted from the allow list          |
 | `IMAP_SEEN_KEYWORD`         | no       | `AiSeen`      | Keyword for new-mail tracking; empty turns it off    |
 | `IMAP_DRAFTS_MAILBOX`       | no       | auto          | Overrides the folder found via the `\Drafts` flag    |
 | `IMAP_MAX_MESSAGES`         | no       | `100`         | Default page size                                    |
@@ -75,6 +92,36 @@ not, they fall back to a two-call token — and say so, rather than implying som
 | `IMAP_INSECURE_TLS`         | no       | `false`       | Exactly `true` accepts a self-signed certificate     |
 
 Booleans are compared against the literal string `true`; `1`, `yes` and `True` are not true.
+`IMAP_READ_ONLY` is the mirror image: only the literal `false` turns it off, so a typo leaves
+the write tools unregistered.
+
+> **`IMAP_ALLOW_WRITE` is gone.** It has been replaced by `IMAP_READ_ONLY`, and an installation
+> that still sets it **refuses to start**. Silently ignoring a removed security variable is the
+> worst of the options: whoever set it once believes it is still in force. The default is
+> unchanged — writes are still off unless you ask for them.
+
+### Choosing which tools load
+
+`IMAP_ALLOW_TOOLS` and `IMAP_DENY_TOOLS` take comma-separated tool names; a trailing `*`
+matches a whole family. `essential` is a curated preset of six — `list_mailboxes`,
+`list_new_messages`, `list_messages`, `get_message`, `set_message_flags` and `move_messages`.
+Four of those are read tools, so it stays useful under the read-only default.
+
+```sh
+IMAP_ALLOW_TOOLS=essential
+IMAP_ALLOW_TOOLS=list_new_messages,get_message,move_messages
+IMAP_DENY_TOOLS=delete_messages
+```
+
+An entry that matches no tool aborts startup and names it, so a typo cannot silently hide a
+tool — an absent tool is not something anyone traces back to an environment variable. A
+filtered tool is never registered, so it is absent from `tools/list` and unknown to
+`tools/call` alike, exactly like a write tool under `IMAP_READ_ONLY`.
+
+It covers **tools**. The attachment resources this server also exposes are not filtered.
+
+If you run several of these servers at once, [mcp-hub](https://mcp-hub.ni-c.de) is the other
+answer — its `/hub` endpoint replaces every server's tools with six meta-tools.
 The password is deleted from the process environment as soon as it is read, so it is not
 visible to child processes or in `/proc/<pid>/environ`.
 
@@ -97,7 +144,7 @@ tools, and every call then fails with setup instructions instead of reaching a s
 | `get_message`       | Headers and body, fenced untrusted, plus the security assessment; `include_thread`       |
 | `get_attachments`   | Without `part_id` lists them, with `part_id` reads or saves one                          |
 
-**Mailbox** — needs `IMAP_ALLOW_WRITE=true`
+**Mailbox** — needs `IMAP_READ_ONLY=false`
 
 | Tool                | Confirmation                                        |
 | ------------------- | --------------------------------------------------- |
@@ -120,6 +167,11 @@ No sending, no SMTP, no raw IMAP passthrough, no `APPEND` of arbitrary MIME, no 
 composition, no OAuth2. The first is the whole security argument (see `SECURITY.md`); the
 second would make every guard here optional; the last is planned but needs a test account
 before it ships.
+
+And one thing the tool filter does not cover: **attachment resources**. `IMAP_ALLOW_TOOLS`
+narrows `tools/list`, not `resources/list`, so a server with a narrow allow list still serves
+those. `IMAP_DOWNLOAD_DIR` and the content-type allowlist are what constrain them — worth
+knowing before concluding that a filtered install reaches less of the mailbox than it does.
 
 ## Safety
 

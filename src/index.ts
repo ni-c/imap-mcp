@@ -3,6 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 
 import { loadConfig } from './config.js';
 import { createServer } from './server.js';
+import { ToolFilterError } from './tool-filter.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -12,12 +13,22 @@ async function main(): Promise<void> {
       'imap-mcp: IMAP_INSECURE_TLS=true — certificate validation is disabled for the mail connections'
     );
   }
-  if (!config.allowWrite) {
+  if (config.readOnly) {
     console.error(
-      'imap-mcp: IMAP_ALLOW_WRITE is not "true" — the mailbox write tools are not registered'
+      'imap-mcp: IMAP_READ_ONLY is not "false" — the mailbox write tools are not registered'
     );
   }
-  const server = createServer(config);
+  let server;
+  try {
+    server = createServer(config);
+  } catch (error) {
+    // A bad tool list is operator feedback, not a crash.
+    if (error instanceof ToolFilterError) {
+      console.error(`imap-mcp: ${error.message}`);
+      process.exit(1);
+    }
+    throw error;
+  }
   // stdout belongs to the protocol; everything human-readable goes to stderr.
   await server.connect(new StdioServerTransport());
   console.error(

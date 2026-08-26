@@ -28,7 +28,9 @@ describe('loadConfig', () => {
     expect(config.imap.mailbox).toBe('INBOX');
     expect(config.imap.seenKeyword).toBe('AiSeen');
     expect(config.imap.maxMessages).toBe(100);
-    expect(config.allowWrite).toBe(false);
+    // Read-only unless explicitly turned off — the opposite default from the
+    // rest of the family, and deliberately so: this reaches a mailbox.
+    expect(config.readOnly).toBe(true);
     expect(config.imap.downloadDir).toBeUndefined();
   });
 
@@ -65,13 +67,30 @@ describe('loadConfig', () => {
     expect(loadConfig(env({ IMAP_TLS: 'none' })).imap.port).toBe(143);
   });
 
-  it('compares booleans against the literal string true', () => {
-    expect(loadConfig(env({ IMAP_ALLOW_WRITE: 'true' })).allowWrite).toBe(true);
-    expect(loadConfig(env({ IMAP_ALLOW_WRITE: 'True' })).allowWrite).toBe(
-      false
+  it('only the literal string false turns read-only off', () => {
+    // Fails closed: anything that is not exactly "false" leaves the write
+    // tools unregistered, so a typo cannot hand out mailbox writes.
+    expect(loadConfig(env({ IMAP_READ_ONLY: 'false' })).readOnly).toBe(false);
+    expect(loadConfig(env({ IMAP_READ_ONLY: 'False' })).readOnly).toBe(true);
+    expect(loadConfig(env({ IMAP_READ_ONLY: '0' })).readOnly).toBe(true);
+    expect(loadConfig(env({ IMAP_READ_ONLY: 'no' })).readOnly).toBe(true);
+    expect(loadConfig(env({})).readOnly).toBe(true);
+  });
+
+  it('refuses to start when the removed IMAP_ALLOW_WRITE is still set', () => {
+    // Ignoring it would be the worst option: whoever set it once believes it
+    // is still in force, and would get a read-only server without being told.
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('exit');
+    }) as never);
+    expect(() => loadConfig(env({ IMAP_ALLOW_WRITE: 'true' }))).toThrow('exit');
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(errors.mock.calls.flat().join(' ')).toContain('IMAP_READ_ONLY');
+    // Even the harmless-looking value is refused: it says the same thing.
+    expect(() => loadConfig(env({ IMAP_ALLOW_WRITE: 'false' }))).toThrow(
+      'exit'
     );
-    expect(loadConfig(env({ IMAP_ALLOW_WRITE: '1' })).allowWrite).toBe(false);
-    expect(loadConfig(env({ IMAP_ALLOW_WRITE: 'yes' })).allowWrite).toBe(false);
   });
 
   it('warns about cleartext to a remote host but keeps going', () => {
@@ -129,7 +148,7 @@ describe('missingConfigMessage', () => {
   it('names the variables and the optional ones', () => {
     const message = missingConfigMessage(['IMAP_HOST']);
     expect(message).toContain('IMAP_HOST');
-    expect(message).toContain('IMAP_ALLOW_WRITE');
+    expect(message).toContain('IMAP_READ_ONLY');
     expect(message).toContain('IMAP_DOWNLOAD_DIR');
   });
 });
