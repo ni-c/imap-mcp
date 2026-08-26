@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   assess,
+  defuseAutoFetch,
   detectScriptMix,
   detectSuspicious,
   htmlToText,
@@ -37,6 +38,47 @@ describe('htmlToText', () => {
     expect(htmlToText('<p>a &amp; b &lt;c&gt; &quot;d&quot;</p>')).toContain(
       'a & b <c> "d"'
     );
+  });
+
+  it('stays fast on crafted HTML full of unclosed tags', () => {
+    // Unbounded scans for a closing tag that never comes are quadratic; the
+    // bounded windows keep this pathological 1 MB input in linear territory.
+    const hostile =
+      '<div style="display:none">'.repeat(20_000) +
+      '<script>'.repeat(20_000) +
+      'tail';
+    const start = performance.now();
+    htmlToText(hostile);
+    expect(performance.now() - start).toBeLessThan(5_000);
+  });
+});
+
+describe('defuseAutoFetch', () => {
+  it('defuses an inline image', () => {
+    const text = defuseAutoFetch('before ![alt](https://evil.example/x) after');
+    expect(text).not.toContain('![');
+    expect(text).toContain('https://evil.example/x');
+  });
+
+  it('defuses a reference-style image', () => {
+    const text = defuseAutoFetch(
+      '![tracking][img1]\n\n[img1]: https://evil.example/x'
+    );
+    expect(text).not.toContain('![');
+    // The definition line may stay: without a usage it renders as nothing.
+    expect(text).toContain('ref="img1"');
+  });
+
+  it('defuses a shortcut-reference image', () => {
+    const text = defuseAutoFetch(
+      'see ![logo] here\n\n[logo]: https://evil.example/x'
+    );
+    expect(text).not.toContain('![');
+  });
+
+  it('leaves ordinary links alone — they fetch nothing on their own', () => {
+    const text = 'a [link](https://example.net) and [another][ref]';
+    expect(defuseAutoFetch(text)).toBe(text);
   });
 });
 
@@ -121,9 +163,15 @@ describe('detectScriptMix', () => {
 
 describe('parseAuthResults', () => {
   it('reads the three verdicts', () => {
-    expect(
-      parseAuthResults('mx.example.net; spf=pass; dkim=fail; dmarc=none')
-    ).toEqual({ spf: 'pass', dkim: 'fail', dmarc: 'none' });
+    const auth = parseAuthResults(
+      'mx.example.net; spf=pass; dkim=fail; dmarc=none',
+      'example.net'
+    );
+    expect(auth.spf).toBe('pass');
+    expect(auth.dkim).toBe('fail');
+    expect(auth.dmarc).toBe('none');
+    expect(auth.authservId).toBe('mx.example.net');
+    expect(auth.forgeable).toBe(false);
   });
 
   it('reports unknown when the header is absent', () => {
@@ -131,7 +179,46 @@ describe('parseAuthResults', () => {
       spf: 'unknown',
       dkim: 'unknown',
       dmarc: 'unknown',
+      authservId: undefined,
+      forgeable: true,
     });
+  });
+
+  it('ignores a forged header sitting below the receiving server’s own', () => {
+    // The receiving server prepends its header; the sender's forged copy comes
+    // later in the joined string and must not override the real verdicts.
+    const auth = parseAuthResults(
+      'mx.example.net; spf=fail; dkim=fail; dmarc=fail\n' +
+        'evil.example.org; spf=pass; dkim=pass; dmarc=pass',
+      'example.net'
+    );
+    expect(auth.spf).toBe('fail');
+    expect(auth.forgeable).toBe(false);
+  });
+
+  it('flags verdicts as forgeable when the authserv-id is unrelated to the account', () => {
+    // Only a forged header present: the verdicts still get reported, but the
+    // flag says a sender could have written them.
+    const auth = parseAuthResults(
+      'evil.example.org; spf=pass; dkim=pass; dmarc=pass',
+      'example.net'
+    );
+    expect(auth.spf).toBe('pass');
+    expect(auth.authservId).toBe('evil.example.org');
+    expect(auth.forgeable).toBe(true);
+  });
+
+  it('treats a subdomain of the account domain as the provider’s own', () => {
+    expect(
+      parseAuthResults('spam-filter.example.net; spf=pass', 'example.net')
+        .forgeable
+    ).toBe(false);
+  });
+
+  it('flags verdicts as forgeable when no account domain is known', () => {
+    expect(
+      parseAuthResults('mx.example.net; spf=pass', undefined).forgeable
+    ).toBe(true);
   });
 });
 

@@ -14,6 +14,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The SPF/DKIM/DMARC verdicts are now read from the topmost
+  `Authentication-Results` header only and come with the authserv-id and a
+  `forgeable` flag, so a header the sender wrote themselves cannot present a
+  forged "pass" as the receiving server's verdict.
+- Thread subjects and sender names in the `get_message` metadata block are now
+  named as sender-chosen in its caveat, and the injection-shape detection runs
+  over the metadata block too, not only over the message body.
+- `get_attachments` no longer advertises `readOnlyHint: true` when
+  `IMAP_DOWNLOAD_DIR` is set — with a download directory configured it can
+  create files, and clients that auto-approve read-only tools should ask.
+- Reference- and shortcut-style markdown images (`![alt][id]`, `![id]`) are
+  defused alongside the inline form.
+- The HTML-stripping passes use bounded scan windows, so crafted HTML full of
+  unclosed tags can no longer burn minutes of CPU; hidden elements larger than
+  the window are left to the fencing, which was always the real defence.
+- A long `References` chain in a draft is folded across lines instead of
+  emitting a header line beyond the RFC 5322 998-octet limit.
+- Confirmation tokens are compared in constant time.
+- `IMAP_HOST` no longer accepts a colon outside an IPv6 address, matching what
+  the error message always said.
+- The inline image result uses the allowlist-checked declared content type
+  rather than the unchecked one from the download metadata.
+
 ## [0.1.0] - 2026-08-24
 
 ### Added

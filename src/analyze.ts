@@ -86,8 +86,46 @@ export interface SecurityAssessment {
   suspicious: string[];
   /** Mixed-script words, a homoglyph-spoofing signal. Capped for brevity. */
   scriptMix: string[];
-  auth: { spf: string; dkim: string; dmarc: string };
+  auth: {
+    spf: string;
+    dkim: string;
+    dmarc: string;
+    /** authserv-id of the header the verdicts were read from. */
+    authservId: string | undefined;
+    /**
+     * True when the header could not be attributed to the account's own
+     * provider — in which case the sender may have written it.
+     */
+    forgeable: boolean;
+  };
 }
+
+/**
+ * Cap on the HTML handed to the removal regexes, and on the span a single one
+ * of them may swallow. Both exist for the same reason: an unbounded `[\s\S]*?`
+ * scanning for a closing tag that never comes is quadratic, and a crafted
+ * 2 MB body full of unclosed tags turns that into minutes of CPU. Bounding the
+ * scan makes the worst case a nuisance instead of a hang, at the cost that a
+ * hidden element larger than the bound is no longer removed — which is why
+ * this pass is best effort and the fencing in {@link wrapUntrusted} is what
+ * actually carries the weight.
+ */
+const MAX_HTML_CHARS = 512_000;
+const MAX_REMOVED_BLOCK_CHARS = 50_000;
+const MAX_HIDDEN_ELEMENT_CHARS = 10_000;
+
+const HTML_COMMENT = new RegExp(
+  `<!--[\\s\\S]{0,${MAX_REMOVED_BLOCK_CHARS}}?-->`,
+  'g'
+);
+const NON_CONTENT_ELEMENT = new RegExp(
+  `<(script|style|head|title|noscript|template)\\b[\\s\\S]{0,${MAX_REMOVED_BLOCK_CHARS}}?<\\/\\1>`,
+  'gi'
+);
+const HIDDEN_ELEMENT = new RegExp(
+  `<([a-z0-9]+)\\b[^>]*style\\s*=\\s*("|')[^"']*(display\\s*:\\s*none|visibility\\s*:\\s*hidden|opacity\\s*:\\s*0|font-size\\s*:\\s*0)[^"']*\\2[^>]*>[\\s\\S]{0,${MAX_HIDDEN_ELEMENT_CHARS}}?<\\/\\1>`,
+  'gi'
+);
 
 /**
  * Extracts readable text from HTML.
@@ -95,19 +133,16 @@ export interface SecurityAssessment {
  * Deliberately not `mailparser`'s own `text` fallback: that keeps content the
  * recipient never sees. Anything hidden by inline CSS is a place to park an
  * instruction meant only for the model, so those elements are dropped before
- * the tags are stripped.
+ * the tags are stripped. Best effort, not a guarantee: nested same-name tags
+ * end the non-greedy match early, and elements hidden via a stylesheet class
+ * are not recognised at all.
  */
 export function htmlToText(html: string): string {
   return html
-    .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(
-      /<(script|style|head|title|noscript|template)\b[\s\S]*?<\/\1>/gi,
-      ' '
-    )
-    .replace(
-      /<([a-z0-9]+)\b[^>]*style\s*=\s*("|')[^"']*(display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0|font-size\s*:\s*0)[^"']*\2[^>]*>[\s\S]*?<\/\1>/gi,
-      ' '
-    )
+    .slice(0, MAX_HTML_CHARS)
+    .replace(HTML_COMMENT, ' ')
+    .replace(NON_CONTENT_ELEMENT, ' ')
+    .replace(HIDDEN_ELEMENT, ' ')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/(p|div|tr|li|h[1-6])>/gi, '\n')
     .replace(/<[^>]+>/g, ' ')
@@ -176,30 +211,64 @@ export function detectScriptMix(text: string): string[] {
 }
 
 /**
- * Reads the receiving server's own SPF/DKIM/DMARC verdict out of the
- * `Authentication-Results` header. Server-side metadata, so it is reported as
- * trusted — unlike everything else in the message.
+ * Reads the SPF/DKIM/DMARC verdict out of the `Authentication-Results` header.
+ *
+ * The header is not inherently trustworthy: a sender can include one of their
+ * own, and only a receiving server that filters inbound copies guarantees the
+ * verdicts are its own. Two defences against that here. Only the *topmost*
+ * header is read — a receiving server that does add its own prepends it, so a
+ * forged copy further down is ignored. And the authserv-id is compared against
+ * the account's own domain; when they are unrelated (or no domain is known)
+ * the verdicts are reported with `forgeable: true`, because "pass, says a
+ * header anyone could have written" must not read like "pass".
  */
 export function parseAuthResults(
-  header: string | undefined
+  header: string | undefined,
+  accountDomain?: string
 ): SecurityAssessment['auth'] {
+  // headerValue joins multiple instances with \n, topmost first.
+  const topmost = header?.split('\n')[0];
   const read = (name: string): string => {
-    if (header === undefined) return 'unknown';
-    const match = new RegExp(`\\b${name}=([a-z]+)`, 'i').exec(header);
+    if (topmost === undefined) return 'unknown';
+    const match = new RegExp(`\\b${name}=([a-z]+)`, 'i').exec(topmost);
     return match?.[1]?.toLowerCase() ?? 'unknown';
   };
-  return { spf: read('spf'), dkim: read('dkim'), dmarc: read('dmarc') };
+  const authservId = /^\s*([A-Za-z0-9._-]+)/.exec(topmost ?? '')?.[1];
+  return {
+    spf: read('spf'),
+    dkim: read('dkim'),
+    dmarc: read('dmarc'),
+    authservId,
+    forgeable:
+      authservId === undefined ||
+      accountDomain === undefined ||
+      !domainsRelated(authservId, accountDomain),
+  };
+}
+
+/**
+ * Whether two hostnames share their last two labels — `mx.example.net` and
+ * `example.net` do. A heuristic, and a conservative one: providers that
+ * authenticate under a different domain than their mailboxes (gmail.com vs
+ * mx.google.com) come out as unrelated, which errs towards warning rather
+ * than towards trusting a header a sender may have written.
+ */
+function domainsRelated(a: string, b: string): boolean {
+  const tail = (host: string): string =>
+    host.toLowerCase().split('.').slice(-2).join('.');
+  return tail(a) === tail(b);
 }
 
 /** Runs every signal over the rendered text plus the headers. */
 export function assess(
   text: string,
-  authHeader: string | undefined
+  authHeader: string | undefined,
+  accountDomain?: string
 ): SecurityAssessment {
   return {
     suspicious: detectSuspicious(text),
     scriptMix: detectScriptMix(text),
-    auth: parseAuthResults(authHeader),
+    auth: parseAuthResults(authHeader, accountDomain),
   };
 }
 
@@ -214,10 +283,29 @@ export function assess(
  * where it pointed.
  */
 export function defuseAutoFetch(text: string): string {
-  return text.replace(
-    /!\[([^\]]{0,200})\]\(([^)\s]{1,2000})(?:\s+"[^"]*")?\)/g,
-    (_match, alt: string, url: string) =>
-      `[inline image removed — not fetched. alt="${alt}" src=${url}]`
+  return (
+    text
+      .replace(
+        /!\[([^\]]{0,200})\]\(([^)\s]{1,2000})(?:\s+"[^"]*")?\)/g,
+        (_match, alt: string, url: string) =>
+          `[inline image removed — not fetched. alt="${alt}" src=${url}]`
+      )
+      // Reference style: ![alt][id] with the URL defined elsewhere as
+      // [id]: url. Defusing the usage is enough — a definition without a
+      // usage renders as nothing — and it leaves ordinary [text][id] links
+      // alone, which are click-only and fetch nothing on their own.
+      .replace(
+        /!\[([^\]]{0,200})\]\s{0,3}\[([^\]]{0,200})\]/g,
+        (_match, alt: string, ref: string) =>
+          `[inline image removed — not fetched. alt="${alt}" ref="${ref}"]`
+      )
+      // Shortcut reference: ![id] alone. Everything with a (...) or [...] after
+      // it was handled above, so what is left is exactly this form.
+      .replace(
+        /!\[([^\]]{1,200})\]/g,
+        (_match, alt: string) =>
+          `[inline image removed — not fetched. alt="${alt}"]`
+      )
   );
 }
 

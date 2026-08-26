@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
 const TOKEN_TTL_MS = 5 * 60 * 1000;
 /** Bounds the map so a loop of refused calls cannot grow it without limit. */
@@ -39,7 +39,15 @@ export class ConfirmationStore {
   consume(resource: string, token: string | undefined): boolean {
     const entry = this.pending.get(resource);
     if (entry === undefined || token === undefined) return false;
-    if (token !== entry.token || Date.now() >= entry.expiresAt) return false;
+    const supplied = Buffer.from(token);
+    const expected = Buffer.from(entry.token);
+    // Constant-time comparison. Guessing 128 random bits through a timing
+    // side channel is not a realistic attack on a local tool, but the safe
+    // comparison costs one line and removes the question.
+    const matches =
+      supplied.length === expected.length &&
+      timingSafeEqual(supplied, expected);
+    if (!matches || Date.now() >= entry.expiresAt) return false;
     this.pending.delete(resource);
     return true;
   }

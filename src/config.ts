@@ -226,7 +226,12 @@ function parseTypes(raw: string | undefined): string[] {
  * a typo.
  */
 function assertSafeHost(value: string, name: string): void {
-  if (!/^[A-Za-z0-9._:[\]-]+$/.test(value)) {
+  // A hostname or IPv4 address — or an IPv6 address, which is the only place
+  // a colon is legal. Allowing ":" everywhere would silently accept
+  // "imap.example.net:993", which the error message promises to reject.
+  const hostname = /^[A-Za-z0-9._-]+$/.test(value);
+  const ipv6 = /^\[?[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*\]?$/.test(value);
+  if (!hostname && !ipv6) {
     console.error(
       `imap-mcp: ${name} must be a plain hostname or IP address without ` +
         'scheme, port, credentials or whitespace'

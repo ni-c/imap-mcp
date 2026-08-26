@@ -107,7 +107,8 @@ export interface RenderedMessage {
  */
 export async function renderMessage(
   uid: number,
-  source: Buffer
+  source: Buffer,
+  accountDomain?: string
 ): Promise<RenderedMessage> {
   const parsed: ParsedMail = await simpleParser(source, {
     // Attachments are fetched deliberately, one at a time, through the policy
@@ -120,7 +121,8 @@ export async function renderMessage(
   const text = sanitizeText(body);
   const security = assess(
     `${parsed.subject ?? ''}\n${text}`,
-    headerValue(parsed, 'authentication-results')
+    headerValue(parsed, 'authentication-results'),
+    accountDomain
   );
 
   const content = [

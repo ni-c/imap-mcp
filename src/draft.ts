@@ -59,7 +59,7 @@ export function buildDraft(input: DraftInput): Buffer {
     headers.push(['In-Reply-To', input.thread.messageId]);
   }
   if (input.thread !== undefined && input.thread.references.length > 0) {
-    headers.push(['References', input.thread.references.join(' ')]);
+    headers.push(['References', foldReferences(input.thread.references)]);
   }
 
   headers.push(['MIME-Version', '1.0']);
@@ -78,6 +78,34 @@ export function buildDraft(input: DraftInput): Buffer {
     .replace(/(.{76})/g, '$1\r\n');
 
   return Buffer.from(`${lines.join('\r\n')}\r\n\r\n${encoded}\r\n`, 'utf-8');
+}
+
+/** Keep every folded header line under the RFC 5322 hard limit of 998 octets. */
+const MAX_HEADER_LINE = 900;
+
+/**
+ * Joins the References chain, folding onto continuation lines as needed.
+ *
+ * Twenty Message-IDs of up to 257 characters each on a single line would pass
+ * 5 kB — five times the 998-octet line limit, which some servers answer by
+ * refusing the APPEND and others by mangling the header. Folding (CRLF
+ * followed by a space) is how RFC 5322 says a long header is written.
+ */
+function foldReferences(references: string[]): string {
+  const lines: string[] = [];
+  let line = '';
+  for (const reference of references) {
+    if (line === '') {
+      line = reference;
+    } else if (line.length + 1 + reference.length > MAX_HEADER_LINE) {
+      lines.push(line);
+      line = reference;
+    } else {
+      line = `${line} ${reference}`;
+    }
+  }
+  if (line !== '') lines.push(line);
+  return lines.join('\r\n ');
 }
 
 /**

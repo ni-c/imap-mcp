@@ -58,8 +58,21 @@ block, because without one the last instruction-shaped sentence in the model's c
 attacker's.
 
 Before that, the text is normalised: hidden HTML elements are dropped, zero-width and
-directional-override characters removed, and markdown image syntax defused so a rendering
-client cannot be induced to fetch a URL carrying data in its query string.
+directional-override characters removed, and markdown image syntax — inline, reference and
+shortcut style — defused so a rendering client cannot be induced to fetch a URL carrying data
+in its query string.
+
+The hidden-HTML pass is best effort, deliberately so. It is regex-based with bounded scan
+windows (an unbounded scan over crafted HTML is a CPU-exhaustion primitive), which means an
+element hidden inside a nested same-name tag, hidden via a stylesheet class, or larger than the
+window survives it. That is acceptable because nothing downstream trusts the stripping: whatever
+gets through still arrives inside the fence, marked line by line as untrusted.
+
+The SPF/DKIM/DMARC verdicts are read from the topmost `Authentication-Results` header only —
+a receiving server that adds one prepends it — and come with the authserv-id and a `forgeable`
+flag. Senders can include such a header themselves, and not every receiving server filters
+inbound copies; when the authserv-id cannot be related to the account's own domain, the flag
+says so rather than letting a forged "pass" read like the real thing.
 
 The injection patterns the server recognises are reported as a **signal**, never used to drop a
 message silently. A filter that appeared to work would be an argument for trusting whatever got

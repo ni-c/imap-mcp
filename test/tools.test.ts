@@ -78,6 +78,18 @@ describe('tool registration', () => {
     await harness.close();
   });
 
+  it('stops calling get_attachments read-only once it can write to disk', async () => {
+    // With a download directory configured the tool creates files, and a
+    // client that auto-approves read-only tools must not auto-approve that.
+    const harness = await connect({
+      config: { imap: { downloadDir: '/tmp/attachments' } as never },
+    });
+    const { tools } = await harness.client.listTools();
+    const tool = tools.find((entry) => entry.name === 'get_attachments');
+    expect(tool?.annotations?.readOnlyHint).toBe(false);
+    await harness.close();
+  });
+
   it('lists its tools without credentials but fails every call', async () => {
     const harness = await connect({
       config: {

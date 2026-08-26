@@ -9,6 +9,10 @@
  * Deliberately no subjects, senders or bodies. An audit line that quotes the
  * mail would put attacker-chosen text into the operator's log viewer, and the
  * facts needed to undo something are the UIDs and the folder, not the prose.
+ * The one exception is the path of a saved attachment: its filename was chosen
+ * by the sender, but it has been through sanitizeFilename — no control or
+ * invisible characters, no separators — and without it the line could not say
+ * which file to go and delete.
  */
 export function audit(
   operation: string,

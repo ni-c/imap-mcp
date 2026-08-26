@@ -28,14 +28,17 @@ capability the model cannot see is one it cannot be talked into using.
 inbox. Message bodies are fenced between markers carrying a per-call random nonce, _and_ every
 line inside them is prefixed with that nonce, so the "this is data" signal does not stop at the
 edges of a long forwarded thread. A reminder follows the block, because otherwise the last
-instruction-shaped sentence in the model's context is the attacker's. Hidden HTML, zero-width
-characters and directional overrides are stripped before the model sees anything, and markdown
-image syntax is defused so a rendering client cannot be made to fetch a tracking URL.
+instruction-shaped sentence in the model's context is the attacker's. Zero-width characters and
+directional overrides are stripped before the model sees anything, hidden HTML elements are
+dropped on a best-effort basis (the fencing, not the stripping, is what carries the weight), and
+markdown image syntax — inline and reference style — is defused so a rendering client cannot be
+made to fetch a tracking URL.
 
-Alongside the message you get a server-side assessment: the SPF/DKIM/DMARC verdicts, which
-prompt-injection shapes matched, and which words mix Latin with Cyrillic or Greek letters. When
-something matches, the warning is the first thing in the result rather than a field buried in
-JSON.
+Alongside the message you get a server-side assessment: the SPF/DKIM/DMARC verdicts with the
+authserv-id they came from (and a `forgeable` flag when that header cannot be attributed to your
+own provider — senders can write one too), which prompt-injection shapes matched, and which
+words mix Latin with Cyrillic or Greek letters. When something matches, the warning is the first
+thing in the result rather than a field buried in JSON.
 
 **"New mail" that actually works.** The server tags messages it has handed over with a custom
 IMAP keyword (`AiSeen` by default), so `list_new_messages` returns each message once. The human

@@ -82,6 +82,25 @@ describe('buildDraft', () => {
     expect(headers).toContain('References: <1@example.net> <3@example.net>');
   });
 
+  it('folds a long References chain inside the line-length limit', () => {
+    const references = Array.from(
+      { length: 20 },
+      (_, i) => `<${'x'.repeat(240)}-${i}@example.net>`
+    );
+    const draft = buildDraft({
+      ...base,
+      thread: { messageId: references[19] as string, references },
+    });
+    for (const line of draft.toString('utf-8').split('\r\n')) {
+      expect(line.length).toBeLessThanOrEqual(998);
+    }
+    // Folding must not lose a reference.
+    const unfolded = headersOf(draft).replace(/\r\n[ \t]/g, ' ');
+    for (const reference of references) {
+      expect(unfolded).toContain(reference);
+    }
+  });
+
   it('refuses to build without a sender', () => {
     expect(() => buildDraft({ ...base, from: undefined })).toThrow(
       ToolInputError
