@@ -72,6 +72,13 @@ jobs:
       - run: npm audit --audit-level=high
 
   codeql:
+    # Code scanning needs GitHub Advanced Security, which a private repository
+    # on the Free plan does not have: the analysis runs fine and then the SARIF
+    # upload fails with "Resource not accessible by integration". Skipping it
+    # while private states that precondition instead of leaving a job that can
+    # never pass. It starts working by itself the day this repository is made
+    # public — nothing to remember.
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
