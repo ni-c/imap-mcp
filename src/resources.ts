@@ -75,7 +75,12 @@ export function registerAttachmentResources(
           .map((entry) =>
             checkPolicy(entry, {
               allowedTypes: config.imap.allowedAttachmentTypes,
-              maxBytes: config.imap.maxDownloadBytes,
+              // The inline budget, not the disk one. The bytes come back
+              // base64-encoded in a JSON-RPC response — that is context, and
+              // maxDownloadBytes exists to bound what may be written to a file.
+              // Using it here allowed ~34 MB of base64 in one response, where
+              // get_attachments caps the same attachment at 1 MB.
+              maxBytes: config.imap.maxAttachmentBytes,
             })
           )
           .find((entry) => entry.partId === partId);
@@ -93,14 +98,17 @@ export function registerAttachmentResources(
         const { content } = await withTimeout(
           connection.download(String(uid), partId, {
             uid: true,
-            maxBytes: config.imap.maxDownloadBytes,
+            maxBytes: config.imap.maxAttachmentBytes,
           }),
           'FETCH'
         );
-        const buffer = await readCapped(content, config.imap.maxDownloadBytes);
+        const buffer = await readCapped(
+          content,
+          config.imap.maxAttachmentBytes
+        );
         if (buffer === undefined) {
           throw new ToolInputError(
-            `imap-mcp: the attachment exceeds IMAP_MAX_DOWNLOAD_BYTES (${config.imap.maxDownloadBytes}).`
+            `imap-mcp: the attachment exceeds IMAP_MAX_ATTACHMENT_BYTES (${config.imap.maxAttachmentBytes}). Save it with get_attachments in "file" mode instead.`
           );
         }
         if (sniffContent(buffer).executable) {

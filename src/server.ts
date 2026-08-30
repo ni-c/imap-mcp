@@ -60,11 +60,17 @@ export function createServer(config: Config, deps: ServerDeps = {}): McpServer {
   );
 
   // Wraps server.registerTool, so it has to sit before the first register call.
-  // It covers tools only: the attachment resources below are not filtered.
   installToolFilter(server, filter);
 
   registerReadTools(server, client, config);
-  registerAttachmentResources(server, client, config);
+  // The attachment resources are the same door as get_attachments, so the
+  // filter has to close both. It used to cover tools only, which meant
+  // IMAP_DENY_TOOLS=get_attachments removed the tool from tools/list and left
+  // imap://message/{uid}/part/{partId} fully live — a narrowing that looked
+  // complete and was not.
+  if (!filter.active || filter.selected.has('get_attachments')) {
+    registerAttachmentResources(server, client, config);
+  }
 
   // The write and send groups are not registered at all when they are off.
   // Rejecting them at call time would still advertise capabilities the server

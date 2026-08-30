@@ -23,6 +23,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
       mailbox: 'INBOX',
       seenKeyword: 'AiSeen',
       draftsMailbox: undefined,
+      trustedAuthservId: undefined,
       maxMessages: 100,
       maxAttachmentBytes: 1024 * 1024,
       allowedAttachmentTypes: DEFAULT_ATTACHMENT_TYPES,

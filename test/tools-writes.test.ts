@@ -375,3 +375,31 @@ describe('manage_mailbox', () => {
     await harness.close();
   });
 });
+
+describe('argument stripping', () => {
+  it('drops fields the schema does not declare before they reach IMAP', async () => {
+    // The MCP SDK builds a z.object, which strips unknown keys by default. That
+    // is the whole defence, and it rests on a library default nothing here
+    // asserts — a future .passthrough(), or a zod config change, would flip it
+    // silently and hand extra arguments to imapflow.
+    const harness = await connect({ config: writeConfig });
+    await call(harness.client, 'set_message_flags', {
+      uids: [2],
+      add: ['\\Seen'],
+      // None of these are declared by the tool.
+      mailbox_override: 'Trash',
+      maxBytes: 99,
+      uid: false,
+      silent: true,
+    });
+    const store = harness.imap.calls.find(
+      (entry) => entry.name === 'messageFlagsAdd'
+    );
+    expect(store).toBeDefined();
+    const serialized = JSON.stringify(store);
+    for (const leaked of ['mailbox_override', 'Trash', 'silent', '99']) {
+      expect(serialized).not.toContain(leaked);
+    }
+    await harness.close();
+  });
+});

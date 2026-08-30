@@ -82,6 +82,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The attachment resources are covered by the tool filter, and bounded by the
+  inline budget.** `IMAP_DENY_TOOLS=get_attachments` removed the tool from
+  `tools/list` and left `imap://message/{uid}/part/{partId}` fully live — the
+  same door, still open, with the narrowing looking complete. They also read up
+  to `IMAP_MAX_DOWNLOAD_BYTES` (25 MB by default) and returned it base64 in one
+  JSON-RPC response; that limit exists to bound what may be written to a _file_,
+  and `IMAP_MAX_ATTACHMENT_BYTES` now applies instead, as it always did for the
+  tool.
+
+- **A binary attachment requested inline is refused rather than base64-encoded
+  without limit.** `textResult` applies no budget, so up to
+  `IMAP_MAX_ATTACHMENT_BYTES` x 1.37 of base64 went into the model's context
+  against a stated cap of 200 000 characters, scaling with a variable raised for
+  an unrelated reason. Truncating would be worse than useless — half a PDF
+  decodes to nothing — so the refusal names the two ways to get the bytes.
+
+- **`get_message` checks the size of the message it received**, not just the
+  size it asked for. imapflow's `maxLength` bounds the request; a compromised
+  server, or anyone in the way of an `IMAP_TLS=none` connection, could stream
+  more than that straight into the parser. Every attachment path already went
+  through `readCapped`; this was the one that did not.
+
 - **The `forgeable` flag on SPF/DKIM/DMARC verdicts is now honest, and there is
   `IMAP_TRUSTED_AUTHSERV_ID` to make it useful.** The old rule compared the
   header's authserv-id against the account's own domain and reported a match as

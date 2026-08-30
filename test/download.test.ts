@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { saveAttachment } from '../src/download.js';
 import { ToolInputError } from '../src/errors.js';
 
-import { call, connect, jsonOf, textOf } from './harness.js';
+import { call, connect, jsonOf, testConfig, textOf } from './harness.js';
 import { message } from './fake-imap.js';
 
 let directory: string;
@@ -347,6 +347,78 @@ describe('attachment resources', () => {
     await expect(
       harness.client.readResource({ uri: 'imap://message/999/part/2' })
     ).rejects.toThrow();
+    await harness.close();
+  });
+
+  it('is closed by the tool filter along with get_attachments', async () => {
+    // The resource is the same door as the tool. Denying the tool used to
+    // remove it from tools/list and leave imap://message/{uid}/part/{partId}
+    // fully live — a narrowing that looked complete and was not.
+    const harness = await connect({
+      config: { denyTools: 'get_attachments' },
+      mailboxes: [
+        {
+          path: 'INBOX',
+          messages: [
+            message(7, {
+              attachments: [
+                {
+                  partId: '2',
+                  filename: 'invoice.pdf',
+                  contentType: 'application/pdf',
+                  content: pdf,
+                },
+              ],
+            }),
+          ],
+        },
+      ],
+    });
+    // Nothing is registered, so the server does not advertise the resource
+    // capability at all and the read fails. Both are the same answer a client
+    // gets for a tool the filter removed: this server does not have that.
+    expect(harness.client.getServerCapabilities()?.resources).toBeUndefined();
+    await expect(
+      harness.client.readResource({ uri: 'imap://message/7/part/2' })
+    ).rejects.toThrow();
+    await harness.close();
+  });
+
+  it('bounds the resource by the inline budget, not the disk one', async () => {
+    // The bytes come back base64 in a JSON-RPC response, so they are context.
+    // maxDownloadBytes (25 MB by default) bounds what may be written to a file;
+    // using it here allowed ~34 MB of base64 in one response, where
+    // get_attachments caps the same attachment at 1 MB.
+    const big = Buffer.concat([pdf, Buffer.alloc(4096, 0x20)]);
+    const harness = await connect({
+      config: {
+        imap: {
+          ...testConfig().imap,
+          maxAttachmentBytes: 1024,
+          maxDownloadBytes: 25 * 1024 * 1024,
+        },
+      },
+      mailboxes: [
+        {
+          path: 'INBOX',
+          messages: [
+            message(7, {
+              attachments: [
+                {
+                  partId: '2',
+                  filename: 'invoice.pdf',
+                  contentType: 'application/pdf',
+                  content: big,
+                },
+              ],
+            }),
+          ],
+        },
+      ],
+    });
+    await expect(
+      harness.client.readResource({ uri: 'imap://message/7/part/2' })
+    ).rejects.toThrow(/IMAP_MAX_ATTACHMENT_BYTES/);
     await harness.close();
   });
 });

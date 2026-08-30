@@ -16,7 +16,17 @@
  * resources (`src/resources.ts`), and the filter does not touch those.
  */
 
-/** Registered always. Every one carries `readOnlyHint: true`. */
+/**
+ * Registered always — but "read" here means "registered under the read-only
+ * default", not "touches nothing".
+ *
+ * Two of them do write, and an operator who reads `IMAP_READ_ONLY=true` as
+ * "never changes anything" would be wrong about both. `list_new_messages`
+ * issues a STORE to set the seen keyword, which is how it can answer "anything
+ * new?" at all — that is the deliberate trade, and `dry_run` previews it
+ * without marking. `get_attachments` creates files when `IMAP_DOWNLOAD_DIR` is
+ * set. Neither carries `readOnlyHint: true`; the other four do.
+ */
 export const READ_TOOLS = [
   'get_attachments',
   'get_message',
