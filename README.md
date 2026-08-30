@@ -210,16 +210,26 @@ bind mount has to be owned by it on the host: `-e IMAP_DOWNLOAD_DIR=/data -v
 
 **Mailbox** — needs `IMAP_READ_ONLY=false`
 
-| Tool                | Confirmation                                        |
-| ------------------- | --------------------------------------------------- |
-| `set_message_flags` | none — flags are reversible                         |
-| `move_messages`     | 🔒 for `move`, none for `copy`                      |
-| `delete_messages`   | 👤 asks the user, 🔒 where the client cannot        |
-| `manage_mailbox`    | 👤 for `delete`, 🔒 for `rename`, none for `create` |
-| `save_draft`        | none — a draft does not leave the mailbox           |
+| Tool                | Confirmation                                           |
+| ------------------- | ------------------------------------------------------ |
+| `set_message_flags` | none — flags are reversible, and `\Deleted` is refused |
+| `move_messages`     | 🔒 for both `move` and `copy`                          |
+| `delete_messages`   | 👤 asks the user, 🔒 where the client cannot           |
+| `manage_mailbox`    | 👤 for `delete`, 🔒 for `rename`, none for `create`    |
+| `save_draft`        | none — a draft does not leave the mailbox              |
 
 👤 raises a dialog the model cannot answer · 🔒 needs a confirmation token: call once to
 receive one, then again with it.
+
+`copy` is confirmed as well as `move`, because the thing that cannot be taken back is not
+the deletion — it is the disclosure. A destination is a free-form folder name, and on a
+shared account or a public namespace one call hands every message to everyone who can read
+it, leaving the source folder untouched. For the same reason `set_message_flags` refuses to
+add `\Deleted`: it is half a deletion, and the next client to close the mailbox may finish
+it. Use `delete_messages`, which asks.
+
+Neither a confirmation nor a dialog quotes a mailbox name inside its own sentence — folder
+names come from the account, which on a shared mailbox means a colleague chose them.
 
 Attachments are also available as MCP resources at `imap://message/{uid}/part/{partId}`, which
 matters where the server has no useful filesystem. The resource path runs the same allowlist,

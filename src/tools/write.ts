@@ -37,8 +37,10 @@ export function registerWriteTools(
         'Adds or removes IMAP flags and keywords on one or more messages: ' +
         '\\Seen to mark read or unread, \\Flagged to star, \\Answered, \\Draft, ' +
         'or any custom keyword the server accepts. Reversible, so no ' +
-        'confirmation is required. Removing the new-mail keyword makes those ' +
-        'messages show up in list_new_messages again.',
+        'confirmation is required — which is why \\Deleted cannot be added ' +
+        'here; use delete_messages, which asks first. Removing \\Deleted is ' +
+        'allowed, since that undoes one. Removing the new-mail keyword makes ' +
+        'those messages show up in list_new_messages again.',
       inputSchema: {
         uids: uidListParam,
         mailbox: optionalMailboxParam,
@@ -54,6 +56,22 @@ export function registerWriteTools(
         if (add === undefined && remove === undefined) {
           throw new ToolInputError(
             'imap-mcp: give at least one of "add" or "remove".'
+          );
+        }
+        // \Deleted is not a flag like the others: it is half of a deletion.
+        // This tool has no confirmation and is annotated destructiveHint:false
+        // on the grounds that everything it does can be undone — true of \Seen
+        // and \Flagged, not of a flag that the next client to close the folder,
+        // or any server with autoexpunge, turns into a permanent removal. Left
+        // open it is delete_messages without the dialog, reachable in one call
+        // and present in the `essential` preset.
+        if (add?.some((flag) => flag.toLowerCase() === '\\deleted')) {
+          throw new ToolInputError(
+            'imap-mcp: \\Deleted cannot be added here — it marks messages for ' +
+              'permanent removal, which the next client to close the mailbox ' +
+              'may carry out. Use delete_messages, which asks for confirmation. ' +
+              'Moving them to a Trash folder with move_messages is usually what ' +
+              'is meant instead.'
           );
         }
         return client.withMailbox(mailbox, false, async (connection) => {
@@ -92,9 +110,8 @@ export function registerWriteTools(
       title: 'Move or copy messages',
       description:
         'Moves messages to another mailbox, or copies them when mode is ' +
-        '"copy". Moving requires confirmation: call once to receive a token, ' +
-        'then again with that token and the same UID list. Copying does not, ' +
-        'because nothing is removed.',
+        '"copy". Both require confirmation: call once to receive a token, ' +
+        'then again with that token and the same UID list and destination.',
       inputSchema: {
         uids: uidListParam,
         destination: mailboxParam.describe(
@@ -115,25 +132,36 @@ export function registerWriteTools(
       run(async () => {
         const copying = mode === 'copy';
         const source = mailbox ?? client.defaultMailbox;
-        if (!copying) {
-          // The key covers the exact UID set: a confirmation for [1] must not
-          // execute [1, 2], where the model picked the second list. A move is
-          // reversible, so this stays on the token rather than interrupting the
-          // user with a dialog for every tidy-up.
-          const key = setResourceKey(
-            `move_messages:${source}:${destination}`,
-            uids.map(String)
+        // Copying is confirmed as well. The old rule — a token for "move",
+        // nothing for "copy" — reasoned about deletion, and deletion is not the
+        // only thing that cannot be taken back. `destination` is a free-form
+        // mailbox name, so on a shared account or a public namespace one
+        // unconfirmed call hands every named message to everyone with access to
+        // that folder. Disclosure is the irreversible part, and copying is the
+        // mode that does it while leaving no trace in the source folder.
+        //
+        // The key covers the exact UID set and both mailboxes: a confirmation
+        // for [1] must not execute [1, 2], where the model picked the second
+        // list, and one for Archive must not execute against Public/Shared.
+        const key = setResourceKey(
+          `${copying ? 'copy_messages' : 'move_messages'}:${source}:${destination}`,
+          uids.map(String)
+        );
+        if (!confirmations.consume(key, confirm_token)) {
+          return textResult(
+            confirmationPrompt(
+              `${copying ? 'copy' : 'move'} ${uids.length} message(s) between mailboxes`,
+              confirmations.issue(key),
+              confirmations.ttlMinutes,
+              copying
+                ? 'Everyone with access to the destination can read the copies, and taking them back does not unsee them.'
+                : 'The messages keep their content but get new UIDs, so the current ones stop working.',
+              [
+                { label: 'From', value: source },
+                { label: 'To', value: destination },
+              ]
+            )
           );
-          if (!confirmations.consume(key, confirm_token)) {
-            return textResult(
-              confirmationPrompt(
-                `move ${uids.length} message(s) from "${source}" to "${destination}"`,
-                confirmations.issue(key),
-                confirmations.ttlMinutes,
-                'The messages keep their content but get new UIDs, so the current ones stop working.'
-              )
-            );
-          }
         }
         return client.withMailbox(mailbox, false, async (connection) => {
           if (copying) {
@@ -182,7 +210,7 @@ export function registerWriteTools(
       run(async () => {
         const source = mailbox ?? client.defaultMailbox;
         const approval = await requestApproval(server, confirmations, {
-          what: `Permanently delete ${uids.length} message(s) from "${source}" (UIDs ${uids.slice(0, 20).join(', ')}${uids.length > 20 ? ', …' : ''})`,
+          what: `Permanently delete ${uids.length} message(s) (UIDs ${uids.slice(0, 20).join(', ')}${uids.length > 20 ? ', …' : ''})`,
           consequence:
             'The messages are expunged, not moved to Trash. They cannot be recovered from here.',
           resourceKey: setResourceKey(
@@ -190,6 +218,7 @@ export function registerWriteTools(
             uids.map(String)
           ),
           token: confirm_token,
+          details: [{ label: 'Mailbox', value: source }],
         });
         if (!approval.approved) return approval.result;
 
@@ -236,11 +265,12 @@ export function registerWriteTools(
 
         if (action === 'delete') {
           const approval = await requestApproval(server, confirmations, {
-            what: `Delete the mailbox "${mailbox}"`,
+            what: 'Delete a mailbox',
             consequence:
               'Every message in the folder is deleted with it, and it cannot be recovered from here.',
             resourceKey: `manage_mailbox:delete:${mailbox}`,
             token: confirm_token,
+            details: [{ label: 'Mailbox', value: mailbox }],
           });
           if (!approval.approved) return approval.result;
         } else if (action === 'rename') {
@@ -248,10 +278,14 @@ export function registerWriteTools(
           if (!confirmations.consume(key, confirm_token)) {
             return textResult(
               confirmationPrompt(
-                `rename the mailbox "${mailbox}" to "${new_name}"`,
+                'rename a mailbox',
                 confirmations.issue(key),
                 confirmations.ttlMinutes,
-                'Clients that cached the old path will have to resynchronise.'
+                'Clients that cached the old path will have to resynchronise.',
+                [
+                  { label: 'Mailbox', value: mailbox },
+                  { label: 'New name', value: new_name ?? '' },
+                ]
               )
             );
           }

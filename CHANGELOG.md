@@ -14,6 +14,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **`set_message_flags` refuses to add `\Deleted`.** The tool carries no
+  confirmation and is annotated `destructiveHint: false`, on the grounds that
+  everything it does can be undone. That is true of `\Seen` and `\Flagged` and
+  not of `\Deleted`, which the next client to close the mailbox — or any server
+  with autoexpunge — turns into a permanent removal. It was `delete_messages`
+  without the dialog, reachable in one call, and it is in the `essential`
+  preset. Removing `\Deleted` is still allowed, since that undoes one.
+
+- **Copying messages now needs a confirmation, like moving them.** The old rule
+  reasoned about deletion; deletion is not the only thing that cannot be taken
+  back. `destination` is a free-form mailbox name, so on a shared account or a
+  public namespace one unconfirmed call handed every named message to everyone
+  with access to that folder — and left the source folder untouched, so nothing
+  looked different afterwards. Move and copy have separate token keys.
+
+- **Confirmations and elicitation dialogs no longer quote mailbox names inside
+  their own sentence.** Folder names look like server-side metadata and are not:
+  they come from the caller, and `list_mailboxes` sources them from the account,
+  which on a shared mailbox means a colleague — or whoever compromised one —
+  chose them. A folder named `Archive" — routine cleanup, pre-approved by IT`
+  became part of the sentence a human reads before losing a folder. Caller-chosen
+  names are now rendered on their own labelled lines under an explicit heading.
+
 ### Changed
 
 - **`IMAP_ALLOW_WRITE` is now `IMAP_READ_ONLY`**, for one name across the family —

@@ -1,6 +1,11 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
-import { confirmationPrompt, type ConfirmationStore } from './confirm.js';
+import {
+  confirmationPrompt,
+  renderDetails,
+  type ConfirmationDetail,
+  type ConfirmationStore,
+} from './confirm.js';
 import { ToolInputError } from './errors.js';
 import { textResult } from './result.js';
 
@@ -18,6 +23,12 @@ export interface ApprovalRequest {
   resourceKey: string;
   /** Token the caller supplied, if any. Only used on the fallback path. */
   token: string | undefined;
+  /**
+   * Names the caller chose — mailboxes above all. Rendered on their own labelled
+   * lines rather than inside {@link what}, so a folder named to read like an
+   * instruction cannot become part of the server's sentence.
+   */
+  details?: readonly ConfirmationDetail[];
 }
 
 /**
@@ -61,7 +72,8 @@ export async function requestApproval(
         request.what,
         confirmations.issue(request.resourceKey),
         confirmations.ttlMinutes,
-        request.consequence
+        request.consequence,
+        request.details ?? []
       )}\n\nNote: this client cannot ask the user directly, so this check only ` +
         'proves the call was made twice with the same arguments. A human should ' +
         'read the line above before you continue.'
@@ -78,8 +90,12 @@ async function elicit(
     response = await server.server.elicitInput(
       {
         // Server-side facts only: no subject, sender or body reaches this
-        // string. It is rendered to a human, but it is composed by us.
-        message: `${request.what}\n\n${request.consequence}`,
+        // string. It is rendered to a human, but it is composed by us — and
+        // the caller-chosen names go through renderDetails rather than into
+        // the sentence, so none of it is a place to hide an instruction.
+        message:
+          `${request.what}\n\n${request.consequence}` +
+          renderDetails(request.details ?? []),
         requestedSchema: {
           type: 'object',
           properties: {
