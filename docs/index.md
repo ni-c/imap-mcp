@@ -2,8 +2,8 @@
 layout: home
 hero:
   name: 'imap-mcp'
-  text: 'An MCP server for any IMAP mailbox: find the mail, read it, file it — with every message fenced as untrusted content and the write tools off unless you turn them on.'
-  tagline: 'An MCP server for any IMAP mailbox: find the mail, read it, file it — with every message fenced as untrusted content and the write tools off unless you turn them on.'
+  text: 'Your mailbox as tools, without a way to send'
+  tagline: 'Find the mail, read it, file it — every message fenced as untrusted content, and the write tools off unless you turn them on'
   actions:
     - theme: brand
       text: Get started

@@ -5,6 +5,7 @@
 [![npm downloads](https://img.shields.io/npm/dm/%40ni-c%2Fimap-mcp)](https://www.npmjs.com/package/@ni-c/imap-mcp)
 [![node](https://img.shields.io/node/v/%40ni-c%2Fimap-mcp)](https://nodejs.org)
 [![license](https://img.shields.io/npm/l/%40ni-c%2Fimap-mcp)](LICENSE)
+[![container](https://img.shields.io/badge/ghcr.io-ni--c%2Fimap--mcp-blue)](https://github.com/ni-c/imap-mcp/pkgs/container/imap-mcp)
 [![docs](https://img.shields.io/badge/docs-imap--mcp.ni--c.de-informational)](https://imap-mcp.ni-c.de)
 [![sponsor](https://img.shields.io/badge/sponsor-ni--c-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/ni-c)
 
@@ -21,6 +22,17 @@ operations are folded into one tool with a mode rather than split across many. A
 the ceiling, not the floor — `IMAP_ALLOW_TOOLS=essential` registers a curated six instead, and
 under the read-only default that narrows to four. See
 [choosing which tools load](#choosing-which-tools-load).
+
+<!-- <picture> is resolved against the colour scheme of the page showing it, so GitHub
+     picks the variant that matches its own theme toggle. npm strips <picture> and
+     <source> when it sanitises the README and keeps the <img>, which is why that
+     fallback carries its own dark card. The URLs are absolute because relative ones
+     are simply invisible on the npm package page. -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://imap-mcp.ni-c.de/architecture-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="https://imap-mcp.ni-c.de/architecture-light.svg">
+  <img src="https://imap-mcp.ni-c.de/architecture.svg" alt="An MCP client talking to imap-mcp over stdio, which connects to an IMAP server over TLS and returns message bodies fenced as untrusted content" width="800">
+</picture>
 
 ## What makes it different
 
@@ -131,6 +143,58 @@ separate on purpose: one protects the model's context window, the other protects
 The server starts without credentials on purpose — it completes the handshake and lists its
 tools, and every call then fails with setup instructions instead of reaching a server.
 
+## Installation
+
+### Claude Code
+
+```sh
+claude mcp add imap-mcp \
+  -e IMAP_HOST=imap.example.net -e IMAP_USER=you@example.net -e IMAP_PASSWORD=… \
+  -- npx -y @ni-c/imap-mcp
+```
+
+### Claude Desktop
+
+```json
+{
+  "mcpServers": {
+    "imap-mcp": {
+      "command": "npx",
+      "args": ["-y", "@ni-c/imap-mcp"],
+      "env": {
+        "IMAP_HOST": "imap.example.net",
+        "IMAP_USER": "you@example.net",
+        "IMAP_PASSWORD": "…"
+      }
+    }
+  }
+}
+```
+
+### Codex
+
+```toml
+[mcp_servers.imap-mcp]
+command = "npx"
+args = ["-y", "@ni-c/imap-mcp"]
+env = { IMAP_HOST = "imap.example.net", IMAP_USER = "you@example.net", IMAP_PASSWORD = "…" }
+```
+
+### Docker
+
+```sh
+docker run --rm -i \
+  -e IMAP_HOST=imap.example.net \
+  -e IMAP_USER=you@example.net \
+  -e IMAP_PASSWORD=… \
+  ghcr.io/ni-c/imap-mcp
+```
+
+Saving attachments needs a writable directory, and the image runs as uid 1000 — so a
+bind mount has to be owned by it on the host: `-e IMAP_DOWNLOAD_DIR=/data -v
+"$PWD/attachments:/data"` with `chown 1000:1000 attachments`. Without
+`IMAP_DOWNLOAD_DIR` the container never writes anything.
+
 ## Tools
 
 **Read** — always registered
@@ -207,6 +271,19 @@ npm test
 npm run build
 ```
 
+The test suite runs against an in-memory IMAP fake, so it needs no server and no
+network. For a live server to point the real thing at, see
+[CONTRIBUTING.md](CONTRIBUTING.md) — it starts a throwaway mailbox in a container.
+
+## Releasing
+
+1. Add the CHANGELOG entry and bump `package.json`.
+2. `npm run lint && npm run build && npm run test:coverage`
+3. Commit, then push a signed tag: `git tag -s vX.Y.Z -m "vX.Y.Z" && git push origin main vX.Y.Z`
+
+The release workflow publishes to npm (Trusted Publishing, with provenance), creates
+the GitHub release from the CHANGELOG section and updates the MCP Registry entry.
+
 ## License
 
-MIT
+MIT © Willi Thiel
