@@ -165,7 +165,7 @@ describe('parseAuthResults', () => {
   it('reads the three verdicts', () => {
     const auth = parseAuthResults(
       'mx.example.net; spf=pass; dkim=fail; dmarc=none',
-      'example.net'
+      'mx.example.net'
     );
     expect(auth.spf).toBe('pass');
     expect(auth.dkim).toBe('fail');
@@ -184,40 +184,58 @@ describe('parseAuthResults', () => {
     });
   });
 
-  it('ignores a forged header sitting below the receiving server’s own', () => {
+  it('ignores a forged header sitting below the receiving server\u2019s own', () => {
     // The receiving server prepends its header; the sender's forged copy comes
     // later in the joined string and must not override the real verdicts.
     const auth = parseAuthResults(
       'mx.example.net; spf=fail; dkim=fail; dmarc=fail\n' +
         'evil.example.org; spf=pass; dkim=pass; dmarc=pass',
-      'example.net'
+      'mx.example.net'
     );
     expect(auth.spf).toBe('fail');
     expect(auth.forgeable).toBe(false);
   });
 
-  it('flags verdicts as forgeable when the authserv-id is unrelated to the account', () => {
-    // Only a forged header present: the verdicts still get reported, but the
-    // flag says a sender could have written them.
+  it('flags verdicts as forgeable when the authserv-id is not the configured one', () => {
     const auth = parseAuthResults(
       'evil.example.org; spf=pass; dkim=pass; dmarc=pass',
-      'example.net'
+      'mx.example.net'
     );
     expect(auth.spf).toBe('pass');
     expect(auth.authservId).toBe('evil.example.org');
     expect(auth.forgeable).toBe(true);
   });
 
-  it('treats a subdomain of the account domain as the provider’s own', () => {
-    expect(
-      parseAuthResults('spam-filter.example.net; spf=pass', 'example.net')
-        .forgeable
-    ).toBe(false);
+  it('does not trust an id merely because it looks like the account domain', () => {
+    // The regression this replaces a heuristic for. The old rule compared the
+    // authserv-id against the account's own domain and reported a match as
+    // non-forgeable — but the sender knows that domain, they just addressed
+    // mail to it. On any account whose provider adds no Authentication-Results
+    // of its own, the sender's header is the topmost one, and this exact string
+    // bought a spoofed message the server's own vouching.
+    const auth = parseAuthResults(
+      'mail.example.net; spf=pass; dkim=pass; dmarc=pass',
+      undefined
+    );
+    expect(auth.spf).toBe('pass');
+    expect(auth.forgeable).toBe(true);
   });
 
-  it('flags verdicts as forgeable when no account domain is known', () => {
+  it('flags verdicts as forgeable when no trusted id is configured', () => {
     expect(
       parseAuthResults('mx.example.net; spf=pass', undefined).forgeable
+    ).toBe(true);
+  });
+
+  it('compares the id case-insensitively but not loosely', () => {
+    expect(
+      parseAuthResults('MX.Example.Net; spf=pass', 'mx.example.net').forgeable
+    ).toBe(false);
+    // A subdomain of the configured id is a different host, and saying so is
+    // the point: the operator names the one id their provider stamps.
+    expect(
+      parseAuthResults('evil.mx.example.net; spf=pass', 'mx.example.net')
+        .forgeable
     ).toBe(true);
   });
 });

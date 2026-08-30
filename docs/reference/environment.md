@@ -16,11 +16,44 @@ All configuration is by environment variable; there is no config file.
 | `IMAP_DENY_TOOLS`   | no       | —          | Same syntax; subtracted from whatever the allow list left                     |
 | `IMAP_DOWNLOAD_DIR` | no       | —          | Where attachments may be written. Unset means the filesystem is never touched |
 | `IMAP_INSECURE_TLS` | no       | `false`    | `true` accepts self-signed certificates, scoped to this connection            |
+| `IMAP_TRUSTED_AUTHSERV_ID` | no | —      | The authserv-id your provider stamps; without it every verdict is forgeable   |
 
 There are also `IMAP_MAX_MESSAGES`, `IMAP_MAX_ATTACHMENT_BYTES`,
 `IMAP_MAX_DOWNLOAD_BYTES` and `IMAP_DRAFTS_MAILBOX` for the limits and the drafts
 folder; the defaults are 100 messages, 1 MB inline, 25 MB to disk, and whichever
 folder the server flags as `\Drafts`.
+
+## `IMAP_TRUSTED_AUTHSERV_ID` and the `forgeable` flag
+
+`get_message` reports the SPF, DKIM and DMARC verdicts from the message's
+`Authentication-Results` header, together with a `forgeable` flag. By default that
+flag is always `true`, and that is not a bug.
+
+Anyone can put an `Authentication-Results` header in a message they send. Your
+provider normally adds its own and prepends it, so reading only the topmost header
+ignores a forged copy underneath — but if your provider adds none at all, which is
+common on small Postfix/Dovecot setups and on any mailbox where filtering happens
+somewhere else, the sender's header is the topmost one. Nothing inside the message
+tells the two apart.
+
+Set this to the id your provider stamps and only that id is treated as authentic:
+
+```sh
+IMAP_TRUSTED_AUTHSERV_ID=mx.example.net
+```
+
+It is the first token of the header, before the first semicolon. Open any message you
+already trust and read it off. The comparison is case-insensitive and exact — a
+subdomain of the configured id does not match, because `evil.mx.example.net` is a
+different host and a sender can choose it.
+
+::: tip Why not guess it
+An earlier version compared the authserv-id against your own account's domain and
+called a match authentic. A sender knows your domain — they just addressed mail to
+you — so `Authentication-Results: mail.yourdomain.example; spf=pass; dkim=pass` was
+enough to have this server vouch for a spoofed message. The heuristic gave its
+strongest answer in exactly the case it could not verify.
+:::
 
 ## `IMAP_READ_ONLY` defaults to `true`
 

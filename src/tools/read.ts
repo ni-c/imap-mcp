@@ -335,12 +335,13 @@ export function registerReadTools(
               `imap-mcp: message ${uid} has no retrievable source in this mailbox.`
             );
           }
-          // The domain of the account itself, for judging whether the
-          // Authentication-Results header came from the user's own provider.
+          // Only the operator can say which authserv-id belongs to their own
+          // provider; the message cannot, since the sender may have written the
+          // header. Unset means every verdict is reported as forgeable.
           const rendered = await renderMessage(
             uid,
             source,
-            client.user?.split('@')[1]
+            config.imap.trustedAuthservId
           );
           const attachments = collectAttachments(message.bodyStructure).map(
             (candidate) => checkPolicy(candidate, policyOf(config))

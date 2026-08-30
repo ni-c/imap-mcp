@@ -120,6 +120,12 @@
           "description": "Comma-separated content-type allowlist for attachments",
           "isRequired": false,
           "format": "string"
+        },
+        {
+          "name": "IMAP_TRUSTED_AUTHSERV_ID",
+          "description": "authserv-id your provider stamps into Authentication-Results; without it every verdict is reported as forgeable",
+          "isRequired": false,
+          "format": "string"
         }
       ]
     },
@@ -230,6 +236,12 @@
         {
           "name": "IMAP_ATTACHMENT_TYPES",
           "description": "Comma-separated content-type allowlist for attachments",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "IMAP_TRUSTED_AUTHSERV_ID",
+          "description": "authserv-id your provider stamps into Authentication-Results; without it every verdict is reported as forgeable",
           "isRequired": false,
           "format": "string"
         }

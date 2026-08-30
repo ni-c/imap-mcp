@@ -16,6 +16,8 @@ import { collectAttachments, type AttachmentCandidate } from './attachments.js';
  */
 const SUBJECT_MAX = 2000;
 const ADDRESS_MAX = 4000;
+/** RFC 5322 allows a long Message-ID; nothing needs more than this to be useful. */
+const MESSAGE_ID_MAX = 256;
 
 export interface MessageSummary {
   uid: number;
@@ -108,7 +110,7 @@ export interface RenderedMessage {
 export async function renderMessage(
   uid: number,
   source: Buffer,
-  accountDomain?: string
+  trustedAuthservId?: string
 ): Promise<RenderedMessage> {
   const parsed: ParsedMail = await simpleParser(source, {
     // Attachments are fetched deliberately, one at a time, through the policy
@@ -122,7 +124,7 @@ export async function renderMessage(
   const security = assess(
     `${parsed.subject ?? ''}\n${text}`,
     headerValue(parsed, 'authentication-results'),
-    accountDomain
+    trustedAuthservId
   );
 
   const content = [
@@ -142,7 +144,14 @@ export async function renderMessage(
     metadata: {
       uid,
       date: parsed.date?.toISOString(),
-      messageId: parsed.messageId,
+      // Sender-chosen, unbounded in length, and it lands in the metadata block
+      // *outside* the fence — the one part of the result the model is told is
+      // ours. Every other sender string on this path is sanitised; this one
+      // was going through raw.
+      messageId:
+        parsed.messageId === undefined
+          ? undefined
+          : sanitizeText(parsed.messageId, MESSAGE_ID_MAX),
       references: threadIdsOf({
         ...(parsed.references === undefined
           ? {}

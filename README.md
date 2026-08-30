@@ -62,10 +62,16 @@ markdown image syntax — inline and reference style — is defused so a renderi
 made to fetch a tracking URL.
 
 Alongside the message you get a server-side assessment: the SPF/DKIM/DMARC verdicts with the
-authserv-id they came from (and a `forgeable` flag when that header cannot be attributed to your
-own provider — senders can write one too), which prompt-injection shapes matched, and which
-words mix Latin with Cyrillic or Greek letters. When something matches, the warning is the first
-thing in the result rather than a field buried in JSON.
+authserv-id they came from, which prompt-injection shapes matched, and which words mix Latin
+with Cyrillic or Greek letters. When something matches, the warning is the first thing in the
+result rather than a field buried in JSON.
+
+Those verdicts carry a `forgeable` flag, and by default it is always `true`. A sender can write
+an `Authentication-Results` header of their own, and if your provider does not add one, theirs
+is the only one there — nothing inside the message distinguishes the two. Set
+`IMAP_TRUSTED_AUTHSERV_ID` to the id your provider stamps (it is the first token of the header
+on any message you already have) and only that id counts as authentic. Until you do, `spf=pass`
+is reported as what it is: a claim, from a header anyone could have written.
 
 **"New mail" that actually works.** The server tags messages it has handed over with a custom
 IMAP keyword (`AiSeen` by default), so `list_new_messages` returns each message once. The human
@@ -95,6 +101,7 @@ not, they fall back to a two-call token — and say so, rather than implying som
 | `IMAP_ALLOW_TOOLS`          | no       | —             | Tool names, `list_*` prefixes or `essential`         |
 | `IMAP_DENY_TOOLS`           | no       | —             | Same syntax; subtracted from the allow list          |
 | `IMAP_SEEN_KEYWORD`         | no       | `AiSeen`      | Keyword for new-mail tracking; empty turns it off    |
+| `IMAP_TRUSTED_AUTHSERV_ID`  | no       | —             | The authserv-id your provider stamps; see below      |
 | `IMAP_DRAFTS_MAILBOX`       | no       | auto          | Overrides the folder found via the `\Drafts` flag    |
 | `IMAP_MAX_MESSAGES`         | no       | `100`         | Default page size                                    |
 | `IMAP_MAX_ATTACHMENT_BYTES` | no       | `1048576`     | Ceiling for returning an attachment inline           |

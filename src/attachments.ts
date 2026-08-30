@@ -1,6 +1,6 @@
 import type { MessageStructureObject } from 'imapflow';
 
-import { stripInvisible } from './analyze.js';
+import { defuseAutoFetch, stripInvisible } from './analyze.js';
 
 /** How deep the MIME tree is walked. Forwarded mail nests; a loop does not. */
 const MAX_DEPTH = 5;
@@ -147,7 +147,7 @@ export interface AttachmentPolicy {
  */
 export function sanitizeFilename(raw: string | undefined): string {
   if (raw === undefined || raw.trim() === '') return '(unnamed)';
-  const cleaned = stripInvisible(raw.normalize('NFKC'))
+  const cleaned = defuseAutoFetch(stripInvisible(raw.normalize('NFKC')))
     .replace(/[/\\]/g, '_')
     .replace(/^\.+/, '')
     .trim();

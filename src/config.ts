@@ -17,6 +17,14 @@ export interface ImapConfig {
   seenKeyword: string;
   /** Overrides the folder auto-detected from the \Drafts special-use flag. */
   draftsMailbox: string | undefined;
+  /**
+   * The authserv-id this account's own provider stamps into
+   * Authentication-Results. Only a header carrying it is treated as
+   * non-forgeable; unset, every SPF/DKIM/DMARC verdict is reported as forgeable,
+   * because a sender can write that header too and nothing in the message
+   * distinguishes theirs from the provider's.
+   */
+  trustedAuthservId: string | undefined;
   maxMessages: number;
   maxAttachmentBytes: number;
   allowedAttachmentTypes: string[];
@@ -129,6 +137,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (draftsMailbox !== undefined) {
     assertSingleLine(draftsMailbox, 'IMAP_DRAFTS_MAILBOX');
   }
+  const trustedAuthservId = env.IMAP_TRUSTED_AUTHSERV_ID?.trim() || undefined;
+  if (trustedAuthservId !== undefined) {
+    assertSingleLine(trustedAuthservId, 'IMAP_TRUSTED_AUTHSERV_ID');
+  }
 
   const config: Config = {
     imap: {
@@ -145,6 +157,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       mailbox: env.IMAP_MAILBOX || 'INBOX',
       seenKeyword: parseKeyword(env.IMAP_SEEN_KEYWORD),
       draftsMailbox,
+      trustedAuthservId,
       maxMessages: parseCount(
         env.IMAP_MAX_MESSAGES,
         DEFAULT_MAX_MESSAGES,
