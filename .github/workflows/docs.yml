@@ -1,5 +1,3 @@
-# Template — resolve every action SHA LIVE before applying.
-# Placeholders: none. Requires docs/ with its own package.json + lockfile.
 name: Docs
 
 # Builds the VitePress site under docs/ and publishes it to the gh-pages branch,
