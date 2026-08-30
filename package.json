@@ -1,6 +1,6 @@
 {
   "name": "@ni-c/imap-mcp",
-  "version": "0.1.0",
+  "version": "0.1.0-rc.1",
   "mcpName": "io.github.ni-c/imap-mcp",
   "description": "MCP server for IMAP mailboxes: read, search, organise and draft mail — it cannot send",
   "keywords": [
