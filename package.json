@@ -2,7 +2,7 @@
   "name": "@ni-c/imap-mcp",
   "version": "0.1.0",
   "mcpName": "io.github.ni-c/imap-mcp",
-  "description": "MCP server for IMAP mailboxes: read, search, organise and draft mail \u2014 it cannot send",
+  "description": "MCP server for IMAP mailboxes: read, search, organise and draft mail — it cannot send",
   "keywords": [
     "mcp",
     "model-context-protocol",
@@ -24,6 +24,9 @@
   "homepage": "https://imap-mcp.ni-c.de",
   "funding": "https://github.com/sponsors/ni-c",
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "imap-mcp": "dist/index.js"
   },
@@ -36,6 +39,7 @@
   },
   "scripts": {
     "prepublishOnly": "npm run lint && npm run build && npm test",
+    "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc",
     "watch": "tsc --watch",
     "lint": "eslint . && prettier --check .",
@@ -48,14 +52,14 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "imapflow": "^1.7.6",
-    "mailparser": "^3.9.16",
-    "zod": "^4.4.3"
+    "mailparser": "^3.9.17",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@resvg/resvg-js": "^2.6.2",
     "@types/mailparser": "^3.4.6",
-    "@types/node": "^26.3.0",
+    "@types/node": "^26.4.0",
     "@vitest/coverage-v8": "4.1.11",
     "eslint": "^10.9.1",
     "prettier": "^3.9.6",
