@@ -12,9 +12,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      last in the file so the link definitions come along. -->
 <!-- #region changelog -->
 
-## [Unreleased]
+## [0.2.0] - 2026-08-30
+
+This is the first release published to npm, so everything below reaches a
+package page for the first time — including the parts that changed weeks ago.
 
 ### Added
+
+- **A container image** at `ghcr.io/ni-c/imap-mcp`, multi-arch (amd64 and
+  arm64), built from a digest-pinned `node:24-alpine`, running as a non-root
+  user, with an SBOM and build provenance. It never writes to the filesystem
+  unless `IMAP_DOWNLOAD_DIR` is set, and then as uid 1000 — a bind mount has to
+  be owned by that user on the host.
+
+- **A published npm package**, `@ni-c/imap-mcp`, with provenance, released
+  through GitHub Actions with npm Trusted Publishing. The unscoped name belongs
+  to an unrelated project.
+
+- README: a container badge, the architecture diagram, install snippets for
+  Claude Code, Claude Desktop, Codex and Docker, and a demo recording. The
+  documentation site at [imap-mcp.ni-c.de](https://imap-mcp.ni-c.de) is now
+  actually served.
 
 - `IMAP_ALLOW_TOOLS` and `IMAP_DENY_TOOLS` choose which of the eleven tools are
   registered. Both take comma-separated tool names or a prefix with a trailing
@@ -192,6 +210,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Every change to the mailbox is logged to stderr with UIDs and folder, never
   subjects.
 
+[0.2.0]: https://github.com/ni-c/imap-mcp/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ni-c/imap-mcp/releases/tag/v0.1.0
 
 <!-- #endregion changelog -->
