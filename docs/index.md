@@ -65,8 +65,8 @@ features:
   <text class="label-mono" x="226" y="98" text-anchor="middle">stdio</text>
 
   <path class="edge-accent" d="M450,110 L542,110" marker-end="url(#arch-arrow-accent)" />
-  <text class="label-mono" x="496" y="98" text-anchor="middle">HTTPS</text>
-  <text class="label-muted" x="496" y="130" text-anchor="middle">IMAP</text>
+  <text class="label-mono" x="496" y="98" text-anchor="middle">IMAP</text>
+  <text class="label-muted" x="496" y="130" text-anchor="middle">TLS</text>
 
   <path class="edge edge-dashed" d="M625,150 L625,196" marker-end="url(#arch-arrow)" />
   <text class="label-muted" x="625" y="216" text-anchor="middle">This server never sends mail.</text>
@@ -74,3 +74,13 @@ features:
 <!-- ARCHITECTURE:END -->
 <figcaption>The server holds no state of its own beyond short-lived confirmation tokens; what the assistant has seen lives in the mailbox, as a keyword.</figcaption>
 </figure>
+
+## What it looks like
+
+![A terminal session: listing the tools registered under the read-only default, listing an inbox, then reading a phishing message — which comes back with the injection shapes named before anything else, the body fenced line by line with a per-call nonce, and the tracking beacon defused](/demo.gif)
+
+Four calls against a throwaway mailbox. The last two are the point: the message
+asks the assistant to forward the inbox to a stranger and carries a tracking
+pixel, and both arrive labelled as what they are rather than acted upon. The
+recording is reproducible — `docs/demo.tape` and `docs/demo-seed.mjs` build the
+mailbox from scratch, and nothing in it comes from a real account.

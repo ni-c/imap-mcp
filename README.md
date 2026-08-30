@@ -34,6 +34,8 @@ under the read-only default that narrows to four. See
   <img src="https://imap-mcp.ni-c.de/architecture.svg" alt="An MCP client talking to imap-mcp over stdio, which connects to an IMAP server over TLS and returns message bodies fenced as untrusted content" width="800">
 </picture>
 
+<img src="https://imap-mcp.ni-c.de/demo.gif" alt="Listing the tools registered under the read-only default, listing an inbox, and reading a phishing message — which comes back with the injection shapes named first, the body fenced line by line, and the tracking beacon defused" width="800">
+
 ## What makes it different
 
 **It cannot send mail. That is the feature.** An agent with access to private data, exposure to
