@@ -42,7 +42,7 @@
     "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc",
     "watch": "tsc --watch",
-    "lint": "eslint . && prettier --check .",
+    "lint": "oxlint --deny-warnings && prettier --check .",
     "format": "prettier --write .",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
@@ -56,15 +56,13 @@
     "zod": "^4.5.4"
   },
   "devDependencies": {
-    "@eslint/js": "^10.0.1",
     "@resvg/resvg-js": "^2.6.2",
     "@types/mailparser": "^3.4.6",
     "@types/node": "^26.4.0",
     "@vitest/coverage-v8": "4.1.11",
-    "eslint": "^10.9.1",
+    "oxlint": "^1.80.0",
     "prettier": "^3.9.6",
-    "typescript": "^6.0.3",
-    "typescript-eslint": "^8.68.0",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.11"
   }
 }
