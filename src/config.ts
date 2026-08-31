@@ -299,12 +299,23 @@ function assertSingleLine(value: string, name: string): void {
 }
 
 function isLoopbackHost(hostname: string | undefined): boolean {
+  // URL.hostname keeps the brackets around an IPv6 literal, may carry a %zone
+  // suffix, and 'localhost.' with its root label is the same name as
+  // 'localhost'. The comparison this replaced saw none of them — which is why
+  // its bare '::1' branch could never match a hostname taken from a URL.
   if (hostname === undefined) return false;
+  const host = hostname
+    .toLowerCase()
+    .replace(/^\[|]$/g, '')
+    .replace(/%.*$/, '')
+    .replace(/\.+$/, '');
   return (
-    hostname === 'localhost' ||
-    hostname.endsWith('.localhost') ||
-    hostname.startsWith('127.') ||
-    hostname === '::1' ||
-    hostname === '[::1]'
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host.startsWith('127.') ||
+    host === '::1' ||
+    // Every dual-stack client dials ::ffff:127.0.0.1 as plain 127.0.0.1, and
+    // URL normalises the mapped form to hex (::ffff:7f00:1).
+    /^::ffff:(?:7f[0-9a-f]{0,2}:|127\.)/.test(host)
   );
 }

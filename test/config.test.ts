@@ -107,6 +107,22 @@ describe('loadConfig', () => {
   });
 
   it.each([
+    ['::1'],
+    ['[::1]'],
+    ['::ffff:127.0.0.1'],
+    ['localhost.'],
+    ['LOCALHOST'],
+  ])('recognises %s as loopback too', (host) => {
+    // IMAP_HOST is a bare hostname rather than a URL, so the bracketed form is
+    // not the only spelling that reaches here — but the mapped IPv4 address,
+    // the root label and the casing all did get past the old comparison.
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    loadConfig(env({ IMAP_TLS: 'none', IMAP_HOST: host }));
+    expect(errors).not.toHaveBeenCalled();
+    errors.mockRestore();
+  });
+
+  it.each([
     ['IMAP_HOST', { IMAP_HOST: 'imap.example.net\r\nX-Evil: 1' }],
     ['IMAP_HOST with a scheme', { IMAP_HOST: 'imaps://imap.example.net' }],
     ['IMAP_HOST with credentials', { IMAP_HOST: 'user:pass@imap.example.net' }],

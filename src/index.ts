@@ -38,6 +38,11 @@ async function main(): Promise<void> {
   );
 }
 
+// In a container node runs as PID 1 with no default signal disposition, so
+// without this handler `docker stop` waits out the grace period and SIGKILLs.
+process.on('SIGTERM', () => process.exit(0));
+process.on('SIGINT', () => process.exit(0));
+
 main().catch((error: unknown) => {
   console.error('imap-mcp: fatal error:', error);
   process.exit(1);
