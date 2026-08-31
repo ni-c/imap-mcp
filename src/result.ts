@@ -1,4 +1,4 @@
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
 
 import { wrapUntrusted } from './analyze.js';
 import { MailError, ToolInputError } from './errors.js';

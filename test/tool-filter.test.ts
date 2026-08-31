@@ -1,13 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
-
-import { createServer } from '../src/server.js';
-import { ToolFilterError } from '../src/tool-filter.js';
 import {
   ALL_TOOLS,
   ESSENTIAL_TOOLS,
   READ_TOOLS,
   WRITE_TOOLS,
 } from '../src/tools/catalogue.js';
+
+import { createServer } from '../src/server.js';
+import { ToolFilterError } from '../src/tool-filter.js';
 import { connect, testConfig, toolNames } from './harness.js';
 
 /** The tools a server built with this configuration actually offers. */
@@ -122,15 +122,15 @@ describe('a filtered-out tool', () => {
     const harness = await connect({ config: { allowTools: 'list_mailboxes' } });
     const before = harness.imap.calls.length;
 
-    const result = await harness.client.callTool({
-      name: 'get_message',
-      arguments: { uid: 1 },
-    });
-
-    expect(result.isError).toBe(true);
-    expect(JSON.stringify(result.content)).toContain(
-      'Tool get_message not found'
-    );
+    // SDK v2 reports an unknown tool as a JSON-RPC error rather than as a
+    // result carrying isError. Either way the call fails and nothing reaches
+    // the API, which is what this test is about.
+    await expect(
+      harness.client.callTool({
+        name: 'get_message',
+        arguments: { uid: 1 },
+      })
+    ).rejects.toThrow('Tool get_message not found');
     // Nothing reached the mailbox.
     expect(harness.imap.calls).toHaveLength(before);
     await harness.close();

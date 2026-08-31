@@ -1,8 +1,6 @@
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { McpServer, CallToolResult } from '@modelcontextprotocol/server';
 import type { FetchMessageObject, SearchObject } from 'imapflow';
 import { z } from 'zod';
-
 import {
   defuseAutoFetch,
   detectSuspicious,
@@ -15,13 +13,6 @@ import {
   sniffContent,
   type AttachmentCandidate,
 } from '../attachments.js';
-import { audit } from '../audit.js';
-import type { Config } from '../config.js';
-import { saveAttachment } from '../download.js';
-import { readCapped } from '../stream.js';
-import { ToolInputError } from '../errors.js';
-import { ImapClient, withTimeout, type ImapConnection } from '../imap.js';
-import { renderMessage, summarize, threadIdsOf } from '../message.js';
 import {
   fencedUntrustedResult,
   jsonResult,
@@ -38,6 +29,14 @@ import {
   searchTextParam,
   uidParam,
 } from '../schema.js';
+
+import { audit } from '../audit.js';
+import type { Config } from '../config.js';
+import { saveAttachment } from '../download.js';
+import { readCapped } from '../stream.js';
+import { ToolInputError } from '../errors.js';
+import { ImapClient, withTimeout, type ImapConnection } from '../imap.js';
+import { renderMessage, summarize, threadIdsOf } from '../message.js';
 
 /** Upper bound on the raw message pulled for a single `get_message`. */
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
@@ -74,7 +73,7 @@ export function registerReadTools(
         'IMAP capabilities, which flags the mailbox stores permanently, whether ' +
         'the new-mail keyword can be used, and which tool groups are enabled. ' +
         'Start here when a call fails for reasons that sound like configuration.',
-      inputSchema: {},
+      inputSchema: z.object({}),
       annotations: { readOnlyHint: true },
     },
     async () =>
@@ -143,7 +142,7 @@ export function registerReadTools(
         'its special-use role (drafts, sent, trash, junk) and whether it can ' +
         'hold messages. Use the returned "path" verbatim wherever a tool takes ' +
         'a mailbox.',
-      inputSchema: {},
+      inputSchema: z.object({}),
       annotations: { readOnlyHint: true },
     },
     async () =>
@@ -166,7 +165,7 @@ export function registerReadTools(
         'pages through the mailbox. Every filter is applied by the mail server, ' +
         'so searching a large folder is cheap. Returns summaries only — use ' +
         'get_message for the body.',
-      inputSchema: {
+      inputSchema: z.object({
         mailbox: optionalMailboxParam,
         limit: limitParam,
         offset: offsetParam,
@@ -198,7 +197,7 @@ export function registerReadTools(
           .regex(/^[A-Za-z0-9$_.-]+$/)
           .optional()
           .describe('Only messages carrying this custom IMAP keyword.'),
-      },
+      }),
       annotations: { readOnlyHint: true },
     },
     async (args) =>
@@ -248,7 +247,7 @@ export function registerReadTools(
           'the next call returns only what arrived since. This is separate from ' +
           'the human read/unread state, which is never touched. Use dry_run to ' +
           'preview without marking.',
-        inputSchema: {
+        inputSchema: z.object({
           limit: limitParam,
           dry_run: z
             .boolean()
@@ -256,7 +255,7 @@ export function registerReadTools(
             .describe(
               'true returns the messages without marking them, so the same set comes back next time.'
             ),
-        },
+        }),
         annotations: { readOnlyHint: false, destructiveHint: false },
       },
       async (args) =>
@@ -320,7 +319,7 @@ export function registerReadTools(
         'assessment (SPF/DKIM/DMARC verdicts, prompt-injection and homoglyph ' +
         'signals) and the list of its attachments. Does not change the read ' +
         'state. Set include_thread to also list the surrounding conversation.',
-      inputSchema: {
+      inputSchema: z.object({
         uid: uidParam,
         mailbox: optionalMailboxParam,
         include_thread: z
@@ -329,7 +328,7 @@ export function registerReadTools(
           .describe(
             'true also returns summaries of the other messages in the same conversation.'
           ),
-      },
+      }),
       annotations: { readOnlyHint: true },
     },
     async ({ uid, mailbox, include_thread }) =>
@@ -427,7 +426,7 @@ export function registerReadTools(
         'directory and you get the path. part_id must come from a listing call ' +
         'of this same tool. Executables are refused even when they claim to be ' +
         'something else — including when writing to disk.',
-      inputSchema: {
+      inputSchema: z.object({
         uid: uidParam,
         mailbox: optionalMailboxParam,
         part_id: z
@@ -448,7 +447,7 @@ export function registerReadTools(
           .describe(
             '"auto" (default) reads small text and images inline and saves the rest to disk; "inline" always returns the content; "file" always saves it.'
           ),
-      },
+      }),
       // Only read-only while there is nowhere to write: with a download
       // directory configured this tool creates files, and a client that
       // auto-approves read-only tools must not auto-approve that.

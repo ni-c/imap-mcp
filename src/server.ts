@@ -1,6 +1,5 @@
 import { createRequire } from 'node:module';
-
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer } from '@modelcontextprotocol/server';
 
 import type { Config } from './config.js';
 import { ConfirmationStore } from './confirm.js';

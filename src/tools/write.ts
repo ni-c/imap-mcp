@@ -1,18 +1,10 @@
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-
-import { requestApproval } from '../approval.js';
-import { audit } from '../audit.js';
-import type { Config } from '../config.js';
 import {
   confirmationPrompt,
   setResourceKey,
   type ConfirmationStore,
 } from '../confirm.js';
-import { ToolInputError } from '../errors.js';
-import { ImapClient, withTimeout } from '../imap.js';
-import { buildDraft } from '../draft.js';
-import { jsonResult, run, textResult } from '../result.js';
 import {
   addressListParam,
   confirmTokenParam,
@@ -22,6 +14,14 @@ import {
   uidListParam,
   uidParam,
 } from '../schema.js';
+
+import { requestApproval } from '../approval.js';
+import { audit } from '../audit.js';
+import type { Config } from '../config.js';
+import { ToolInputError } from '../errors.js';
+import { ImapClient, withTimeout } from '../imap.js';
+import { buildDraft } from '../draft.js';
+import { jsonResult, run, textResult } from '../result.js';
 
 export function registerWriteTools(
   server: McpServer,
@@ -41,14 +41,14 @@ export function registerWriteTools(
         'here; use delete_messages, which asks first. Removing \\Deleted is ' +
         'allowed, since that undoes one. Removing the new-mail keyword makes ' +
         'those messages show up in list_new_messages again.',
-      inputSchema: {
+      inputSchema: z.object({
         uids: uidListParam,
         mailbox: optionalMailboxParam,
         add: flagListParam.optional().describe('Flags or keywords to set.'),
         remove: flagListParam
           .optional()
           .describe('Flags or keywords to clear.'),
-      },
+      }),
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async ({ uids, mailbox, add, remove }) =>
@@ -112,7 +112,7 @@ export function registerWriteTools(
         'Moves messages to another mailbox, or copies them when mode is ' +
         '"copy". Both require confirmation: call once to receive a token, ' +
         'then again with that token and the same UID list and destination.',
-      inputSchema: {
+      inputSchema: z.object({
         uids: uidListParam,
         destination: mailboxParam.describe(
           'Mailbox the messages end up in, exactly as listed by list_mailboxes.'
@@ -125,7 +125,7 @@ export function registerWriteTools(
             '"move" (default) removes the originals, "copy" keeps them.'
           ),
         confirm_token: confirmTokenParam,
-      },
+      }),
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async ({ uids, destination, mailbox, mode, confirm_token }) =>
@@ -199,11 +199,11 @@ export function registerWriteTools(
         'most servers this does not go to Trash — move them there instead if ' +
         'that is what is meant. Asks the user to confirm; where the client ' +
         'cannot show a prompt, it falls back to a two-call token.',
-      inputSchema: {
+      inputSchema: z.object({
         uids: uidListParam,
         mailbox: optionalMailboxParam,
         confirm_token: confirmTokenParam,
-      },
+      }),
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
     async ({ uids, mailbox, confirm_token }) =>
@@ -241,7 +241,7 @@ export function registerWriteTools(
         'Creates a folder, renames one, or deletes one. Deleting asks the user ' +
         'to confirm and takes every message in the folder with it; renaming ' +
         'uses the two-call token because it is reversible.',
-      inputSchema: {
+      inputSchema: z.object({
         action: z
           .enum(['create', 'rename', 'delete'])
           .describe('What to do with the mailbox.'),
@@ -252,7 +252,7 @@ export function registerWriteTools(
           .optional()
           .describe('Required for "rename": the full new path.'),
         confirm_token: confirmTokenParam,
-      },
+      }),
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
     async ({ action, mailbox, new_name, confirm_token }) =>
@@ -322,7 +322,7 @@ export function registerWriteTools(
         'person opens it in their own mail client and sends it from there. ' +
         'That is deliberate: it keeps the composing useful while leaving the ' +
         'decision to send with a human.',
-      inputSchema: {
+      inputSchema: z.object({
         to: addressListParam,
         cc: addressListParam.optional(),
         bcc: addressListParam.optional(),
@@ -344,7 +344,7 @@ export function registerWriteTools(
         mailbox: optionalMailboxParam.describe(
           'Where to look for reply_to_uid. Defaults to the configured mailbox.'
         ),
-      },
+      }),
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async ({ to, cc, bcc, subject, body, reply_to_uid, mailbox }) =>

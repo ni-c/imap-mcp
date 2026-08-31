@@ -1,14 +1,9 @@
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import {
-  ElicitRequestSchema,
-  type CallToolResult,
-} from '@modelcontextprotocol/sdk/types.js';
+import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
+import type { CallToolResult } from '@modelcontextprotocol/client';
 
 import type { Config } from '../src/config.js';
 import { DEFAULT_ATTACHMENT_TYPES } from '../src/config.js';
 import { createServer } from '../src/server.js';
-
 import { FakeImap, message, type FakeMailbox } from './fake-imap.js';
 
 export function testConfig(overrides: Partial<Config> = {}): Config {
@@ -96,7 +91,7 @@ export async function connect(
 
   if (options.elicit !== undefined) {
     const behaviour = options.elicit;
-    client.setRequestHandler(ElicitRequestSchema, (request) => {
+    client.setRequestHandler('elicitation/create', (request) => {
       const params = request.params as { message?: string };
       prompts.push(params.message ?? '');
       if (behaviour === 'error') throw new Error('dialog unavailable');

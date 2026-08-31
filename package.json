@@ -50,12 +50,13 @@
     "assets:check": "node scripts/gen-assets.mjs --check"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/server": "^2.0.0",
     "imapflow": "^1.7.6",
     "mailparser": "^3.9.17",
     "zod": "^4.5.4"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
     "@resvg/resvg-js": "^2.6.2",
     "@types/mailparser": "^3.4.6",
     "@types/node": "^26.4.0",

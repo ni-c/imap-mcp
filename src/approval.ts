@@ -1,15 +1,13 @@
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-
+import type { McpServer, CallToolResult } from '@modelcontextprotocol/server';
 import {
   confirmationPrompt,
   renderDetails,
   type ConfirmationDetail,
   type ConfirmationStore,
 } from './confirm.js';
+
 import { ToolInputError } from './errors.js';
 import { textResult } from './result.js';
-
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 /** How long the server waits for the human to answer the dialog. */
 const ELICITATION_TIMEOUT_MS = 5 * 60 * 1000;

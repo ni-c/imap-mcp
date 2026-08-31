@@ -1,14 +1,14 @@
-import {
-  ResourceTemplate,
-  type McpServer,
-} from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
-
+import { ResourceTemplate } from '@modelcontextprotocol/server';
+import type {
+  McpServer,
+  ReadResourceResult,
+} from '@modelcontextprotocol/server';
 import {
   checkPolicy,
   collectAttachments,
   sniffContent,
 } from './attachments.js';
+
 import type { Config } from './config.js';
 import { ToolInputError } from './errors.js';
 import { ImapClient, withTimeout } from './imap.js';
