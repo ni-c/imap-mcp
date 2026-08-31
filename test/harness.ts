@@ -29,7 +29,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
       allowedAttachmentTypes: DEFAULT_ATTACHMENT_TYPES,
       downloadDir: undefined,
       maxDownloadBytes: 25 * 1024 * 1024,
-      ...(overrides.imap ?? {}),
+      ...overrides.imap,
     },
     // Mirrors the real default: read-only unless the test says otherwise.
     readOnly: overrides.readOnly ?? true,
