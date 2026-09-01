@@ -17,6 +17,7 @@ All configuration is by environment variable; there is no config file.
 | `IMAP_DOWNLOAD_DIR` | no       | —          | Where attachments may be written. Unset means the filesystem is never touched |
 | `IMAP_INSECURE_TLS` | no       | `false`    | `true` accepts self-signed certificates, scoped to this connection            |
 | `IMAP_TRUSTED_AUTHSERV_ID` | no | —      | The authserv-id your provider stamps; without it every verdict is forgeable   |
+| `ELICITATION`       | no       | `true`     | `false` replaces the approval dialog with the two-call token. **Not prefixed** |
 
 There are also `IMAP_MAX_MESSAGES`, `IMAP_MAX_ATTACHMENT_BYTES`,
 `IMAP_MAX_DOWNLOAD_BYTES` and `IMAP_DRAFTS_MAILBOX` for the limits and the drafts
@@ -54,6 +55,27 @@ you — so `Authentication-Results: mail.yourdomain.example; spf=pass; dkim=pass
 enough to have this server vouch for a spoofed message. The heuristic gave its
 strongest answer in exactly the case it could not verify.
 :::
+
+## `ELICITATION`
+
+Whether a client that *can* show a dialog is asked before `delete_messages`,
+`move_messages` or deleting a folder acts. Default `true`. `false` takes the
+two-call-token path instead — it does not remove the guard, and a server started
+with it off prints one line saying so.
+
+Two ways it differs from every other variable here:
+
+- **No prefix.** One `export ELICITATION=false` reaches every MCP server in the
+  same environment, not just this one. That is the point of it and also its risk;
+  see [Asking a person](/guide/approval).
+- **Fatal on anything else.** Like `IMAP_TLS`, and unlike `IMAP_READ_ONLY`: `1`,
+  `off` or a typo stop the server with exit code 1. It is the only variable of
+  this family that defaults to *on*, and a typo that fell back would leave the
+  dialog running while you believed it was off.
+
+Values are trimmed and matched case-insensitively. It is read *after*
+`IMAP_PASSWORD` is deleted from `process.env`, so the fatal path cannot leave the
+password sitting there for a crash reporter.
 
 ## `IMAP_READ_ONLY` defaults to `true`
 

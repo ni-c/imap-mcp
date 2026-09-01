@@ -115,7 +115,8 @@ export function registerWriteTools(
       title: 'Move or copy messages',
       description:
         'Moves messages to another mailbox, or copies them when mode is ' +
-        '"copy". Both require confirmation: call once to receive a token, ' +
+        '"copy". Both ask the user to confirm; where the client cannot show a ' +
+        'prompt, they fall back to a two-call token — call once to receive it, ' +
         'then again with that token and the same UID list and destination.',
       inputSchema: z.object({
         uids: uidListParam,
@@ -141,7 +142,7 @@ export function registerWriteTools(
         openWorldHint: false,
       },
     },
-    async ({ uids, destination, mailbox, mode, confirm_token }) =>
+    async ({ uids, destination, mailbox, mode, confirm_token }, mcp) =>
       run(async () => {
         const copying = mode === 'copy';
         const source = mailbox ?? client.defaultMailbox;
@@ -153,30 +154,45 @@ export function registerWriteTools(
         // that folder. Disclosure is the irreversible part, and copying is the
         // mode that does it while leaving no trace in the source folder.
         //
+        // Which is also why this now goes the whole way rather than only to the
+        // token: the token proves the call was made twice, and a disclosure
+        // that cannot be taken back is exactly the case where the model
+        // agreeing with itself is not enough.
+        //
         // The key covers the exact UID set and both mailboxes: a confirmation
         // for [1] must not execute [1, 2], where the model picked the second
         // list, and one for Archive must not execute against Public/Shared.
-        const key = setResourceKey(
-          `${copying ? 'copy_messages' : 'move_messages'}:${source}:${destination}`,
-          uids.map(String)
+        const outcome = await approval.requestApproval(
+          server,
+          mcp,
+          confirmations,
+          {
+            what: `${copying ? 'copy' : 'move'} ${uids.length} message(s) between mailboxes`,
+            consequence: copying
+              ? 'Everyone with access to the destination can read the copies, and taking them back does not unsee them.'
+              : 'The messages keep their content but get new UIDs, so the current ones stop working.',
+            resourceKey: setResourceKey(
+              `${copying ? 'copy_messages' : 'move_messages'}:${source}:${destination}`,
+              uids.map(String)
+            ),
+            token: confirm_token,
+            details: [
+              { label: 'From', value: source },
+              { label: 'To', value: destination },
+            ],
+            toolName: copying ? 'copy_messages' : 'move_messages',
+          }
         );
-        if (!confirmations.consume(key, confirm_token)) {
-          return textResult(
-            confirmationPrompt({
-              what: `${copying ? 'copy' : 'move'} ${uids.length} message(s) between mailboxes`,
-              token: confirmations.issue(key),
-              ttlMinutes: confirmations.ttlMinutes,
-              consequence: copying
-                ? 'Everyone with access to the destination can read the copies, and taking them back does not unsee them.'
-                : 'The messages keep their content but get new UIDs, so the current ones stop working.',
-              details: [
-                { label: 'From', value: source },
-                { label: 'To', value: destination },
-              ],
-              toolName: copying ? 'copy_messages' : 'move_messages',
-            })
+        if (outcome.decision === 'rejected') {
+          throw new ToolInputError(`imap-mcp: ${outcome.reason}`);
+        }
+        if (outcome.decision === 'declined') {
+          throw new ToolInputError(
+            'imap-mcp: the user declined. Nothing was moved.'
           );
         }
+        if (outcome.decision === 'pending') return outcome.result;
+
         return client.withMailbox(mailbox, false, async (connection) => {
           if (copying) {
             await withTimeout(

@@ -30,7 +30,7 @@ features:
   - title: Only the tools you want
     details: 'IMAP_READ_ONLY=true registers the read tools and nothing else. IMAP_ALLOW_TOOLS cuts finer — essential for a curated handful, your own comma-separated list, or a whole family with list_* — and IMAP_DENY_TOOLS subtracts. Whatever is filtered out does not exist on the protocol rather than failing when called, and a name that matches no tool stops the server at startup instead of quietly going missing.'
   - title: Safe by default
-    details: Destructive tools need a server-issued confirmation token, upstream content is marked untrusted, and read-only mode simply does not register the write tools.
+    details: 'Deleting messages, moving or copying them and deleting a folder ask a person first, through MCP elicitation — a dialog the model cannot answer on its behalf, falling back to a server-issued token where the client cannot show one. Upstream content is marked untrusted, and read-only mode simply does not register the write tools.'
 ---
 
 <figure class="diagram">
@@ -55,7 +55,7 @@ features:
   <rect class="node-accent" x="280" y="60" width="170" height="100" rx="10" />
   <text class="label-title" x="365" y="95" text-anchor="middle">imap-mcp</text>
   <text class="label-muted" x="365" y="115" text-anchor="middle">11 tools</text>
-  <text class="label-muted" x="365" y="133" text-anchor="middle">confirm tokens</text>
+  <text class="label-muted" x="365" y="133" text-anchor="middle">asks a person</text>
 
   <rect class="node" x="550" y="70" width="150" height="80" rx="10" />
   <text class="label-title" x="625" y="103" text-anchor="middle">IMAP</text>
@@ -72,7 +72,7 @@ features:
   <text class="label-muted" x="625" y="216" text-anchor="middle">This server never sends mail.</text>
 </svg>
 <!-- ARCHITECTURE:END -->
-<figcaption>The server holds no state of its own beyond short-lived confirmation tokens; what the assistant has seen lives in the mailbox, as a keyword.</figcaption>
+<figcaption>The server holds no state of its own beyond short-lived approvals; what the assistant has seen lives in the mailbox, as a keyword.</figcaption>
 </figure>
 
 ## What it looks like

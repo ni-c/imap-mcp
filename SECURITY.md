@@ -87,7 +87,8 @@ wall.
 
 ## Confirmation
 
-Deleting messages and deleting a folder ask the person at the keyboard, using MCP elicitation.
+Deleting messages, moving or copying them, and deleting a folder ask the person at the
+keyboard, using MCP elicitation.
 That matters because the older mechanism — returning a token the caller must send back — is
 **not** a human-in-the-loop gate: the token appears in a tool result, so the model reads it and
 can call again in the same turn without anyone seeing anything. It still prevents a target set
@@ -98,6 +99,10 @@ did not happen.
 Tokens are random, single-use, expire after five minutes, and are bound to a SHA-256
 fingerprint of the sorted target set: a confirmation obtained for one message cannot be
 replayed for a longer list.
+
+`ELICITATION=false` moves a capable client onto that fallback deliberately, for a scheduled
+job or a test harness. It does not remove the guard — there is no setting in which a guarded
+call goes unannounced — and the server prints one line at startup saying it is off.
 
 Confirmation text never quotes a subject, sender or body. That text is read by a human and by a
 model, and putting attacker-chosen prose into it would hand the attacker the last word at

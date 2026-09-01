@@ -167,7 +167,10 @@ describe('move_messages', () => {
       destination: 'Archive',
       confirm_token: tokenOf(first),
     });
-    expect(textOf(result)).toContain('confirm_token');
+    // Refused with the reason rather than answered with a fresh prompt: the
+    // token was issued for different arguments, which is what the key binds
+    // against, and a new prompt would say nothing about that.
+    expect(textOf(result)).toContain('invalid, expired');
     expect(
       harness.imap.calls.some((entry) => entry.name === 'messageMove')
     ).toBe(false);
@@ -185,7 +188,10 @@ describe('move_messages', () => {
       destination: 'Trash',
       confirm_token: tokenOf(first),
     });
-    expect(textOf(result)).toContain('confirm_token');
+    // Refused with the reason rather than answered with a fresh prompt: the
+    // token was issued for different arguments, which is what the key binds
+    // against, and a new prompt would say nothing about that.
+    expect(textOf(result)).toContain('invalid, expired');
     await harness.close();
   });
 
@@ -227,7 +233,10 @@ describe('move_messages', () => {
       mode: 'copy',
       confirm_token: tokenOf(first),
     });
-    expect(textOf(result)).toContain('confirm_token');
+    // Refused with the reason rather than answered with a fresh prompt: the
+    // token was issued for different arguments, which is what the key binds
+    // against, and a new prompt would say nothing about that.
+    expect(textOf(result)).toContain('invalid, expired');
     expect(
       harness.imap.calls.some((entry) => entry.name === 'messageCopy')
     ).toBe(false);

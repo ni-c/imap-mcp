@@ -236,8 +236,14 @@ describe('manage_mailbox approval', () => {
   });
 });
 
-describe('moving stays on the token', () => {
-  it('does not raise a dialog for a move', async () => {
+describe('moving asks too, and it used not to', () => {
+  // It was on the token alone, on the grounds that a move destroys nothing. Its
+  // own comment already said what is wrong with that: `destination` is a
+  // free-form mailbox name, so on a shared account one call hands every named
+  // message to everyone with access to that folder. Disclosure is the part that
+  // cannot be taken back, and a token only proves the model agreed with itself.
+
+  it('raises a dialog for a move and does not offer the token', async () => {
     const harness = await connect({
       config: writeConfig,
       mailboxes: mailboxes(),
@@ -247,8 +253,40 @@ describe('moving stays on the token', () => {
       uids: [2],
       destination: 'Archive',
     });
-    expect(textOf(first)).toContain('confirm_token');
-    expect(harness.prompts).toHaveLength(0);
+    expect(harness.prompts).toHaveLength(1);
+    expect(harness.prompts[0]).toContain('new UIDs');
+    expect(textOf(first)).not.toContain('confirm_token');
+    await harness.close();
+  });
+
+  it('says what a copy discloses, rather than what a move renumbers', async () => {
+    const harness = await connect({
+      config: writeConfig,
+      mailboxes: mailboxes(),
+      elicit: 'decline',
+    });
+    const result = await call(harness.client, 'move_messages', {
+      uids: [2],
+      destination: 'Public/Shared',
+      mode: 'copy',
+    });
+    expect(harness.prompts[0]).toContain('does not unsee them');
+    expect(result.isError).toBe(true);
+    await harness.close();
+  });
+
+  it('moves nothing when the person declines', async () => {
+    const harness = await connect({
+      config: writeConfig,
+      mailboxes: mailboxes(),
+      elicit: 'decline',
+    });
+    const result = await call(harness.client, 'move_messages', {
+      uids: [2],
+      destination: 'Archive',
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('Nothing was moved');
     await harness.close();
   });
 });

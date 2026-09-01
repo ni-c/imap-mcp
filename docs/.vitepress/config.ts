@@ -64,6 +64,7 @@ export default defineConfig({
           text: 'Operating it',
           items: [
             { text: 'Configuration', link: '/guide/configuration' },
+            { text: 'Asking a person', link: '/guide/approval' },
             { text: 'Security', link: '/guide/security' },
             { text: 'FAQ & troubleshooting', link: '/guide/faq' },
           ],

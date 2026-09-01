@@ -79,9 +79,11 @@ is reported as what it is: a claim, from a header anyone could have written.
 IMAP keyword (`AiSeen` by default), so `list_new_messages` returns each message once. The human
 `\Seen` state is never touched — everything is read with `BODY.PEEK`.
 
-**Deleting asks a person.** Where the client supports MCP elicitation, `delete_messages` and
-deleting a folder raise a real dialog that the model cannot answer on its behalf. Where it does
-not, they fall back to a two-call token — and say so, rather than implying somebody approved.
+**Deleting and moving ask a person.** Where the client supports MCP elicitation, `delete_messages`,
+`move_messages` and deleting a folder raise a real dialog that the model cannot answer on its
+behalf. Where it does not, they fall back to a two-call token — and say so, rather than implying
+somebody approved. `ELICITATION=false` takes that fallback deliberately; it never removes the
+guard. See [Asking a person](https://imap-mcp.ni-c.de/guide/approval).
 
 ## Requirements
 
@@ -91,26 +93,27 @@ not, they fall back to a two-call token — and say so, rather than implying som
 
 ## Configuration
 
-| Variable                    | Required | Default       | Description                                          |
-| --------------------------- | -------- | ------------- | ---------------------------------------------------- |
-| `IMAP_HOST`                 | yes      | —             | Hostname of the IMAP server, e.g. `imap.example.net` |
-| `IMAP_USER`                 | yes      | —             | Account username, usually the address                |
-| `IMAP_PASSWORD`             | yes      | —             | Password or app-specific password                    |
-| `IMAP_PORT`                 | no       | `993` / `143` | Defaults by TLS mode                                 |
-| `IMAP_TLS`                  | no       | `implicit`    | `implicit`, `starttls` or `none`                     |
-| `IMAP_MAILBOX`              | no       | `INBOX`       | Mailbox the message tools default to                 |
-| `IMAP_READ_ONLY`            | no       | **`true`**    | Exactly `false` registers the five mailbox tools     |
-| `IMAP_ALLOW_TOOLS`          | no       | —             | Tool names, `list_*` prefixes or `essential`         |
-| `IMAP_DENY_TOOLS`           | no       | —             | Same syntax; subtracted from the allow list          |
-| `IMAP_SEEN_KEYWORD`         | no       | `AiSeen`      | Keyword for new-mail tracking; empty turns it off    |
-| `IMAP_TRUSTED_AUTHSERV_ID`  | no       | —             | The authserv-id your provider stamps; see below      |
-| `IMAP_DRAFTS_MAILBOX`       | no       | auto          | Overrides the folder found via the `\Drafts` flag    |
-| `IMAP_MAX_MESSAGES`         | no       | `100`         | Default page size                                    |
-| `IMAP_MAX_ATTACHMENT_BYTES` | no       | `1048576`     | Ceiling for returning an attachment inline           |
-| `IMAP_MAX_DOWNLOAD_BYTES`   | no       | `26214400`    | Ceiling for writing one to disk                      |
-| `IMAP_ATTACHMENT_TYPES`     | no       | see below     | Comma-separated content-type allowlist               |
-| `IMAP_DOWNLOAD_DIR`         | no       | —             | Setting it allows saving attachments there           |
-| `IMAP_INSECURE_TLS`         | no       | `false`       | Exactly `true` accepts a self-signed certificate     |
+| Variable                    | Required | Default       | Description                                                  |
+| --------------------------- | -------- | ------------- | ------------------------------------------------------------ |
+| `IMAP_HOST`                 | yes      | —             | Hostname of the IMAP server, e.g. `imap.example.net`         |
+| `IMAP_USER`                 | yes      | —             | Account username, usually the address                        |
+| `IMAP_PASSWORD`             | yes      | —             | Password or app-specific password                            |
+| `IMAP_PORT`                 | no       | `993` / `143` | Defaults by TLS mode                                         |
+| `IMAP_TLS`                  | no       | `implicit`    | `implicit`, `starttls` or `none`                             |
+| `IMAP_MAILBOX`              | no       | `INBOX`       | Mailbox the message tools default to                         |
+| `IMAP_READ_ONLY`            | no       | **`true`**    | Exactly `false` registers the five mailbox tools             |
+| `IMAP_ALLOW_TOOLS`          | no       | —             | Tool names, `list_*` prefixes or `essential`                 |
+| `IMAP_DENY_TOOLS`           | no       | —             | Same syntax; subtracted from the allow list                  |
+| `IMAP_SEEN_KEYWORD`         | no       | `AiSeen`      | Keyword for new-mail tracking; empty turns it off            |
+| `IMAP_TRUSTED_AUTHSERV_ID`  | no       | —             | The authserv-id your provider stamps; see below              |
+| `IMAP_DRAFTS_MAILBOX`       | no       | auto          | Overrides the folder found via the `\Drafts` flag            |
+| `IMAP_MAX_MESSAGES`         | no       | `100`         | Default page size                                            |
+| `IMAP_MAX_ATTACHMENT_BYTES` | no       | `1048576`     | Ceiling for returning an attachment inline                   |
+| `IMAP_MAX_DOWNLOAD_BYTES`   | no       | `26214400`    | Ceiling for writing one to disk                              |
+| `IMAP_ATTACHMENT_TYPES`     | no       | see below     | Comma-separated content-type allowlist                       |
+| `IMAP_DOWNLOAD_DIR`         | no       | —             | Setting it allows saving attachments there                   |
+| `IMAP_INSECURE_TLS`         | no       | `false`       | Exactly `true` accepts a self-signed certificate             |
+| `ELICITATION`               | no       | `true`        | `false` replaces the dialog with the token. **Not prefixed** |
 
 Booleans are compared against the literal string `true`; `1`, `yes` and `True` are not true.
 `IMAP_READ_ONLY` is the mirror image: only the literal `false` turns it off, so a typo leaves
@@ -219,13 +222,13 @@ bind mount has to be owned by it on the host: `-e IMAP_DOWNLOAD_DIR=/data -v
 
 **Mailbox** — needs `IMAP_READ_ONLY=false`
 
-| Tool                | Confirmation                                           |
-| ------------------- | ------------------------------------------------------ |
-| `set_message_flags` | none — flags are reversible, and `\Deleted` is refused |
-| `move_messages`     | 🔒 for both `move` and `copy`                          |
-| `delete_messages`   | 👤 asks the user, 🔒 where the client cannot           |
-| `manage_mailbox`    | 👤 for `delete`, 🔒 for `rename`, none for `create`    |
-| `save_draft`        | none — a draft does not leave the mailbox              |
+| Tool                | Confirmation                                              |
+| ------------------- | --------------------------------------------------------- |
+| `set_message_flags` | none — flags are reversible, and `\Deleted` is refused    |
+| `move_messages`     | 👤 for both `move` and `copy`, 🔒 where the client cannot |
+| `delete_messages`   | 👤 asks the user, 🔒 where the client cannot              |
+| `manage_mailbox`    | 👤 for `delete`, 🔒 for `rename`, none for `create`       |
+| `save_draft`        | none — a draft does not leave the mailbox                 |
 
 👤 raises a dialog the model cannot answer · 🔒 needs a confirmation token: call once to
 receive one, then again with it.

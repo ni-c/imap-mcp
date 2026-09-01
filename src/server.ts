@@ -67,7 +67,10 @@ export function createServer(config: Config, deps: ServerDeps = {}): McpServer {
   const confirmations = new ConfirmationStore();
   // One approver per server: it holds the key that seals the request state
   // carried out through the client and back.
-  const approval = createApproval({ server: 'imap-mcp' });
+  const approval = createApproval({
+    server: 'imap-mcp',
+    elicitation: config.elicitation,
+  });
 
   const server = new McpServer(
     {

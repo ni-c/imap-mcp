@@ -45,7 +45,7 @@
   <rect class="node-accent" x="280" y="60" width="170" height="100" rx="10" />
   <text class="label-title" x="365" y="95" text-anchor="middle">imap-mcp</text>
   <text class="label-muted" x="365" y="115" text-anchor="middle">11 tools</text>
-  <text class="label-muted" x="365" y="133" text-anchor="middle">confirm tokens</text>
+  <text class="label-muted" x="365" y="133" text-anchor="middle">asks a person</text>
 
   <rect class="node" x="550" y="70" width="150" height="80" rx="10" />
   <text class="label-title" x="625" y="103" text-anchor="middle">IMAP</text>

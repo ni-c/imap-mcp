@@ -25,13 +25,23 @@ Registered always.
 
 Registered only when `IMAP_READ_ONLY=false`.
 
-| Tool                | Description                                                                             |
-| ------------------- | ----------------------------------------------------------------------------------------- |
-| `set_message_flags` | Set or clear flags and keywords — read, flagged, and the assistant's own. **essential**  |
-| `move_messages`     | Move messages between folders. **essential**                                             |
-| `delete_messages`   | Delete. Refused on the first call and answered with a single-use confirmation token      |
-| `save_draft`        | Append a draft to the drafts folder. This server never **sends** anything                |
-| `manage_mailbox`    | Create, rename and delete folders                                                        |
+| Tool                   | Description                                                                             |
+| ---------------------- | ----------------------------------------------------------------------------------------- |
+| `set_message_flags`    | Set or clear flags and keywords — read, flagged, and the assistant's own. **essential**  |
+| `move_messages` 👤     | Move or copy messages between folders. **essential**                                     |
+| `delete_messages` 👤   | Delete: sets `\Deleted` and expunges. Not the same as moving to Trash                    |
+| `save_draft`           | Append a draft to the drafts folder. This server never **sends** anything                |
+| `manage_mailbox` 👤    | Create, rename and delete folders — 👤 for `delete`, 🔒 for `rename`, nothing for `create` |
+
+👤 **asks a person** through MCP elicitation, a dialog the model cannot answer on its
+behalf. 🔒 uses the two-call `confirm_token` only. Where a 👤 tool's client cannot show
+a dialog it falls back to 🔒, and `ELICITATION=false` takes that fallback deliberately.
+See [Asking a person](/guide/approval).
+
+Every tool declares all four MCP annotations — `readOnlyHint`, `destructiveHint`,
+`idempotentHint`, `openWorldHint`. `get_attachments` carries the only *computed* one in
+the family: it is `readOnlyHint: true` until `IMAP_DOWNLOAD_DIR` is set, because from
+then on it writes files.
 
 ## Resources, which the filter does not cover
 

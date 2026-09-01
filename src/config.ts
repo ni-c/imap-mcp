@@ -51,6 +51,14 @@ export interface Config {
    */
   readOnly: boolean;
   /**
+   * Whether a client that *can* show a dialog is asked before a guarded tool
+   * acts. `ELICITATION=false` turns the dialog off — the guard stays and falls
+   * back to the two-call token, so there is no setting in which a guarded call
+   * goes unannounced.
+   */
+  elicitation: boolean;
+
+  /**
    * Raw value of `IMAP_ALLOW_TOOLS` — comma-separated tool names, `list_*`
    * prefixes, or `essential`. Kept unparsed on purpose: this file is a mirror
    * of the environment, and the names can only be checked against the tool
@@ -131,6 +139,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   delete env.IMAP_PASSWORD;
 
   const tls = parseTlsMode(env.IMAP_TLS);
+  // After the password delete, deliberately: this one can exit the process, and
+  // an exit above the delete would leave the password in the environment for
+  // whatever runs next.
+  const elicitation = parseElicitation(env.ELICITATION);
 
   if (host !== undefined) assertSafeHost(host, 'IMAP_HOST');
   const draftsMailbox = env.IMAP_DRAFTS_MAILBOX;
@@ -178,6 +190,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     },
     // Defaults to true, unlike the rest of the family — see the field comment.
     readOnly: env.IMAP_READ_ONLY !== 'false',
+    elicitation,
     allowTools: env.IMAP_ALLOW_TOOLS,
     denyTools: env.IMAP_DENY_TOOLS,
   };
@@ -214,6 +227,30 @@ function parseTlsMode(raw: string | undefined): TlsMode {
   if (raw === undefined || raw === '') return 'implicit';
   if (raw === 'implicit' || raw === 'starttls' || raw === 'none') return raw;
   console.error('imap-mcp: IMAP_TLS must be one of implicit, starttls or none');
+  process.exit(1);
+}
+
+/**
+ * Reads `ELICITATION` — deliberately unprefixed, and deliberately fatal on
+ * anything it does not recognise.
+ *
+ * Unprefixed: environment variables are process-wide, so this is one switch for
+ * every server in the same environment. That is also its risk, which is why a
+ * server started with it off says so on its startup line.
+ *
+ * Fatal, like `parseTlsMode` above and unlike `IMAP_READ_ONLY`: this is the
+ * first variable of the family that defaults to *on*, so a typo that fell back
+ * to the default would leave the dialog running while the operator believes it
+ * is off — and an operator who believes that has no way to find out.
+ */
+export function parseElicitation(raw: string | undefined): boolean {
+  const value = raw?.trim().toLowerCase();
+  if (value === undefined || value === '' || value === 'true') return true;
+  if (value === 'false') return false;
+  console.error(
+    `imap-mcp: ELICITATION must be "true" or "false" — got "${raw}". ` +
+      'Refusing to start rather than guess.'
+  );
   process.exit(1);
 }
 
