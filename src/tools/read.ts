@@ -31,6 +31,7 @@ import {
 } from '../schema.js';
 
 import { audit } from '../audit.js';
+import { READ_ONLY } from './annotations.js';
 import type { Config } from '../config.js';
 import { saveAttachment } from '../download.js';
 import { readCapped } from '../stream.js';
@@ -74,7 +75,7 @@ export function registerReadTools(
         'the new-mail keyword can be used, and which tool groups are enabled. ' +
         'Start here when a call fails for reasons that sound like configuration.',
       inputSchema: z.object({}),
-      annotations: { readOnlyHint: true },
+      annotations: READ_ONLY,
     },
     async () =>
       run(async () => {
@@ -143,7 +144,7 @@ export function registerReadTools(
         'hold messages. Use the returned "path" verbatim wherever a tool takes ' +
         'a mailbox.',
       inputSchema: z.object({}),
-      annotations: { readOnlyHint: true },
+      annotations: READ_ONLY,
     },
     async () =>
       run(async () => {
@@ -198,7 +199,7 @@ export function registerReadTools(
           .optional()
           .describe('Only messages carrying this custom IMAP keyword.'),
       }),
-      annotations: { readOnlyHint: true },
+      annotations: READ_ONLY,
     },
     async (args) =>
       run(async () => {
@@ -256,7 +257,16 @@ export function registerReadTools(
               'true returns the messages without marking them, so the same set comes back next time.'
             ),
         }),
-        annotations: { readOnlyHint: false, destructiveHint: false },
+        annotations: {
+          // Writes a flag, which is why it is not read-only. Not destructive
+          // — the \Seen keyword comes back off — and not idempotent: that is
+          // the point of the tool, and dry_run is how you look without
+          // marking.
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: false,
+        },
       },
       async (args) =>
         run(async () => {
@@ -329,7 +339,7 @@ export function registerReadTools(
             'true also returns summaries of the other messages in the same conversation.'
           ),
       }),
-      annotations: { readOnlyHint: true },
+      annotations: READ_ONLY,
     },
     async ({ uid, mailbox, include_thread }) =>
       run(async () =>
@@ -448,10 +458,20 @@ export function registerReadTools(
             '"auto" (default) reads small text and images inline and saves the rest to disk; "inline" always returns the content; "file" always saves it.'
           ),
       }),
-      // Only read-only while there is nowhere to write: with a download
-      // directory configured this tool creates files, and a client that
-      // auto-approves read-only tools must not auto-approve that.
-      annotations: { readOnlyHint: config.imap.downloadDir === undefined },
+      annotations: {
+        // Only read-only while there is nowhere to write: with a download
+        // directory configured this tool creates files, and a client that
+        // auto-approves read-only tools must not auto-approve that. The one
+        // computed annotation in the fleet, and the reason the others are
+        // constants.
+        readOnlyHint: config.imap.downloadDir === undefined,
+        // Writing an attachment overwrites a file of the same name in the
+        // download directory, which is the only thing here that can lose
+        // something a person put there.
+        destructiveHint: config.imap.downloadDir !== undefined,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     },
     async ({ uid, mailbox, part_id, mode }) =>
       run(async () =>

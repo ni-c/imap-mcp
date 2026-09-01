@@ -46,7 +46,15 @@ export function registerWriteTools(
           .optional()
           .describe('Flags or keywords to clear.'),
       }),
-      annotations: { readOnlyHint: false, destructiveHint: false },
+      annotations: {
+        // A flag is a marker and comes back off, so this is not destructive.
+        // freshrss-mcp answers the opposite for mark_articles and is right
+        // to: FreshRSS keeps no record of what was unread, IMAP does.
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     },
     async ({ uids, mailbox, add, remove }) =>
       run(async () => {
@@ -123,7 +131,15 @@ export function registerWriteTools(
           ),
         confirm_token: confirmTokenParam,
       }),
-      annotations: { readOnlyHint: false, destructiveHint: false },
+      annotations: {
+        // Destructive: the messages keep their content but get new UIDs, so
+        // every reference to the old ones stops working. Copying into a shared
+        // folder is the irreversible half — it cannot be unread.
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
     },
     async ({ uids, destination, mailbox, mode, confirm_token }) =>
       run(async () => {
@@ -202,7 +218,14 @@ export function registerWriteTools(
         mailbox: optionalMailboxParam,
         confirm_token: confirmTokenParam,
       }),
-      annotations: { readOnlyHint: false, destructiveHint: true },
+      annotations: {
+        // Expunged, not moved to Trash. Idempotent by the specification's
+        // wording — the second call finds nothing, and the world is the same.
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     },
     async ({ uids, mailbox, confirm_token }, mcp) =>
       run(async () => {
@@ -265,7 +288,15 @@ export function registerWriteTools(
           .describe('Required for "rename": the full new path.'),
         confirm_token: confirmTokenParam,
       }),
-      annotations: { readOnlyHint: false, destructiveHint: true },
+      annotations: {
+        // Destructive in its delete mode, which takes every message in the
+        // folder; create and rename are the additive ones. One tool, so the
+        // annotation has to describe its strongest mode.
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     },
     async ({ action, mailbox, new_name, confirm_token }, mcp) =>
       run(async () => {
@@ -373,7 +404,14 @@ export function registerWriteTools(
           'Where to look for reply_to_uid. Defaults to the configured mailbox.'
         ),
       }),
-      annotations: { readOnlyHint: false, destructiveHint: false },
+      annotations: {
+        // Additive: it appends a message to the drafts folder. Two calls
+        // leave two drafts.
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
     },
     async ({ to, cc, bcc, subject, body, reply_to_uid, mailbox }) =>
       run(async () => {

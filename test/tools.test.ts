@@ -87,6 +87,50 @@ describe('tool registration', () => {
     const { tools } = await harness.client.listTools();
     const tool = tools.find((entry) => entry.name === 'get_attachments');
     expect(tool?.annotations?.readOnlyHint).toBe(false);
+    // And it can then overwrite a file of the same name, which is the only
+    // thing this server does that loses something a person put somewhere.
+    expect(tool?.annotations?.destructiveHint).toBe(true);
+    await harness.close();
+  });
+
+  it('declares all four annotation hints on every tool', async () => {
+    // Not a style rule. Two of the four default to a *stronger* claim than
+    // silence suggests: the specification gives destructiveHint and
+    // openWorldHint a default of true. This repository stated the first two on
+    // every tool and left the other two to chance, so all ten were claiming an
+    // open world while talking to one configured account.
+    const harness = await connect({ config: { readOnly: false } });
+    const { tools } = await harness.client.listTools();
+    const hints = [
+      'readOnlyHint',
+      'destructiveHint',
+      'idempotentHint',
+      'openWorldHint',
+    ] as const;
+    for (const tool of tools) {
+      for (const hint of hints) {
+        expect(typeof tool.annotations?.[hint], `${tool.name}.${hint}`).toBe(
+          'boolean'
+        );
+      }
+    }
+    await harness.close();
+  });
+
+  it('does not call setting a flag destructive, unlike freshrss-mcp', async () => {
+    // The same operation, the opposite answer, and both are right. An IMAP
+    // flag comes back off; FreshRSS keeps no record of what was unread, so
+    // marking there cannot be undone. Worth pinning, because a later sweep
+    // aligning the family would otherwise "fix" one of them.
+    const harness = await connect({ config: { readOnly: false } });
+    const { tools } = await harness.client.listTools();
+    const byName = new Map(tools.map((tool) => [tool.name, tool.annotations]));
+    expect(byName.get('set_message_flags')?.destructiveHint).toBe(false);
+    expect(byName.get('set_message_flags')?.idempotentHint).toBe(true);
+    // Moving is destructive for a different reason: the UIDs change, so every
+    // reference to the old ones stops working.
+    expect(byName.get('move_messages')?.destructiveHint).toBe(true);
+    expect(byName.get('save_draft')?.destructiveHint).toBe(false);
     await harness.close();
   });
 
