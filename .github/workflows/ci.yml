@@ -129,7 +129,40 @@ jobs:
           ignore-unfixed: true
           exit-code: '1'
 
+  integration:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # The suite spawns dist/index.js, not src/. Building is not optional.
+      - run: npm run build
+      - name: Start GreenMail
+        env:
+          # On the weekly run, against :latest instead of the pin. Different
+          # question: the pinned run catches my regressions, this one catches
+          # GreenMail moving underneath the server. It is allowed to fail
+          # without blocking a pull request.
+          GREENMAIL_IMAGE: ${{ github.event_name == 'schedule' && 'greenmail/standalone:latest' || '' }}
+        run: docker compose -f test/integration/compose.yml up -d
+      - run: npm run test:integration
+      - if: failure()
+        run: docker compose -f test/integration/compose.yml logs --tail=200
+      - if: always()
+        # `down`, not `down -v`: GreenMail keeps everything in memory and has
+        # no volume, so stopping the container is the whole reset.
+        run: docker compose -f test/integration/compose.yml down
+
   publish:
+    # `integration` is deliberately NOT in this list. It depends on GreenMail's
+    # image pulling from Docker Hub; a release that fails because a third
+    # party's registry is having an afternoon would be a gate with nothing to
+    # say. It blocks pull requests, which is where a regression in this server
+    # can still be stopped cheaply.
     needs: [test, codeql, container-scan]
     # Same gate as codeql, for a different reason: pushing an image out of a
     # private repository would create a package nobody can pull, and `codeql`

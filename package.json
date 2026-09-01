@@ -2,7 +2,7 @@
   "name": "@ni-c/imap-mcp",
   "version": "0.2.0",
   "mcpName": "io.github.ni-c/imap-mcp",
-  "description": "MCP server for IMAP mailboxes: read, search, organise and draft mail — it cannot send",
+  "description": "MCP server for IMAP mailboxes: read, search, organise and draft mail \u2014 it cannot send",
   "keywords": [
     "mcp",
     "model-context-protocol",
@@ -46,6 +46,7 @@
     "format": "prettier --write .",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
     "assets": "svg-asset-set",
     "assets:check": "svg-asset-set --check"
   },
@@ -62,6 +63,7 @@
     "@types/mailparser": "^3.4.6",
     "@types/node": "^26.4.0",
     "@vitest/coverage-v8": "4.1.11",
+    "mcp-integration-harness": "^0.1.0",
     "oxlint": "^1.80.0",
     "prettier": "^3.9.6",
     "svg-asset-set": "https://github.com/ni-c/svg-asset-set/releases/download/v0.1.0/svg-asset-set-0.1.0.tgz",
