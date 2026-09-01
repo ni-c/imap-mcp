@@ -5,7 +5,7 @@ import { buildToolFilter, installToolFilter } from 'mcp-tool-allowlist';
 import { ALL_TOOLS, ESSENTIAL_TOOLS, READ_TOOLS } from './tools/catalogue.js';
 
 import type { Config } from './config.js';
-import { ConfirmationStore } from './confirm.js';
+import { ConfirmationStore, createApproval } from 'mcp-approval';
 import { ImapClient, type ImapClientFactory } from './imap.js';
 import { registerAttachmentResources } from './resources.js';
 import { registerReadTools } from './tools/read.js';
@@ -65,6 +65,9 @@ export function createServer(config: Config, deps: ServerDeps = {}): McpServer {
       ? new ImapClient(config)
       : new ImapClient(config, deps.imapFactory);
   const confirmations = new ConfirmationStore();
+  // One approver per server: it holds the key that seals the request state
+  // carried out through the client and back.
+  const approval = createApproval({ server: 'imap-mcp' });
 
   const server = new McpServer(
     {
@@ -95,7 +98,7 @@ export function createServer(config: Config, deps: ServerDeps = {}): McpServer {
   // Rejecting them at call time would still advertise capabilities the server
   // refuses to provide, and a tool the model can see is a tool it will try.
   if (!config.readOnly) {
-    registerWriteTools(server, client, config, confirmations);
+    registerWriteTools(server, client, config, confirmations, approval);
   }
 
   return server;

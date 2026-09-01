@@ -290,7 +290,10 @@ describe('delete_messages', () => {
       uids: [3],
       confirm_token: token,
     });
-    expect(textOf(replay)).toContain('confirm_token');
+    // A token that does not match these arguments is refused with the
+    // reason rather than answered with a fresh prompt. The binding is the
+    // same; the wording is the library's, so every server agrees.
+    expect(textOf(replay)).toContain('invalid, expired');
     await harness.close();
   });
 
@@ -302,7 +305,10 @@ describe('delete_messages', () => {
       mailbox: 'Archive',
       confirm_token: tokenOf(first),
     });
-    expect(textOf(result)).toContain('confirm_token');
+    // A token that does not match these arguments is refused with the reason
+    // rather than answered with a fresh prompt. The binding is the same; the
+    // wording is the library's, so every server in the family agrees.
+    expect(textOf(result)).toContain('invalid, expired');
     await harness.close();
   });
 });

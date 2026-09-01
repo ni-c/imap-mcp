@@ -153,7 +153,10 @@ describe('fallback where the client cannot ask', () => {
       uids: [2, 3],
       confirm_token: tokenOf(first),
     });
-    expect(textOf(result)).toContain('confirm_token');
+    // A token that does not match these arguments is refused with the
+    // reason rather than answered with a fresh prompt. The binding is the
+    // same; the wording is the library's, so every server agrees.
+    expect(textOf(result)).toContain('invalid, expired');
     expect(
       harness.imap.calls.some((entry) => entry.name === 'messageDelete')
     ).toBe(false);

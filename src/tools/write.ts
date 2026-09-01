@@ -1,10 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import {
-  confirmationPrompt,
-  setResourceKey,
-  type ConfirmationStore,
-} from '../confirm.js';
+import { confirmationPrompt, setResourceKey } from 'mcp-approval';
+import type { Approver, ConfirmationStore } from 'mcp-approval';
 import {
   addressListParam,
   confirmTokenParam,
@@ -15,7 +12,6 @@ import {
   uidParam,
 } from '../schema.js';
 
-import { requestApproval } from '../approval.js';
 import { audit } from '../audit.js';
 import type { Config } from '../config.js';
 import { ToolInputError } from '../errors.js';
@@ -27,7 +23,8 @@ export function registerWriteTools(
   server: McpServer,
   client: ImapClient,
   config: Config,
-  confirmations: ConfirmationStore
+  confirmations: ConfirmationStore,
+  approval: Approver
 ): void {
   server.registerTool(
     'set_message_flags',
@@ -149,18 +146,19 @@ export function registerWriteTools(
         );
         if (!confirmations.consume(key, confirm_token)) {
           return textResult(
-            confirmationPrompt(
-              `${copying ? 'copy' : 'move'} ${uids.length} message(s) between mailboxes`,
-              confirmations.issue(key),
-              confirmations.ttlMinutes,
-              copying
+            confirmationPrompt({
+              what: `${copying ? 'copy' : 'move'} ${uids.length} message(s) between mailboxes`,
+              token: confirmations.issue(key),
+              ttlMinutes: confirmations.ttlMinutes,
+              consequence: copying
                 ? 'Everyone with access to the destination can read the copies, and taking them back does not unsee them.'
                 : 'The messages keep their content but get new UIDs, so the current ones stop working.',
-              [
+              details: [
                 { label: 'From', value: source },
                 { label: 'To', value: destination },
-              ]
-            )
+              ],
+              toolName: copying ? 'copy_messages' : 'move_messages',
+            })
           );
         }
         return client.withMailbox(mailbox, false, async (connection) => {
@@ -209,18 +207,32 @@ export function registerWriteTools(
     async ({ uids, mailbox, confirm_token }, mcp) =>
       run(async () => {
         const source = mailbox ?? client.defaultMailbox;
-        const approval = await requestApproval(server, mcp, confirmations, {
-          what: `Permanently delete ${uids.length} message(s) (UIDs ${uids.slice(0, 20).join(', ')}${uids.length > 20 ? ', …' : ''})`,
-          consequence:
-            'The messages are expunged, not moved to Trash. They cannot be recovered from here.',
-          resourceKey: setResourceKey(
-            `delete_messages:${source}`,
-            uids.map(String)
-          ),
-          token: confirm_token,
-          details: [{ label: 'Mailbox', value: source }],
-        });
-        if (!approval.approved) return approval.result;
+        const outcome = await approval.requestApproval(
+          server,
+          mcp,
+          confirmations,
+          {
+            what: `Permanently delete ${uids.length} message(s) (UIDs ${uids.slice(0, 20).join(', ')}${uids.length > 20 ? ', …' : ''})`,
+            consequence:
+              'The messages are expunged, not moved to Trash. They cannot be recovered from here.',
+            resourceKey: setResourceKey(
+              `delete_messages:${source}`,
+              uids.map(String)
+            ),
+            token: confirm_token,
+            toolName: 'delete_messages',
+            details: [{ label: 'Mailbox', value: source }],
+          }
+        );
+        if (outcome.decision === 'rejected') {
+          throw new ToolInputError(`imap-mcp: ${outcome.reason}`);
+        }
+        if (outcome.decision === 'declined') {
+          throw new ToolInputError(
+            'imap-mcp: the user declined. Nothing was changed.'
+          );
+        }
+        if (outcome.decision === 'pending') return outcome.result;
 
         return client.withMailbox(mailbox, false, async (connection) => {
           await withTimeout(
@@ -264,29 +276,45 @@ export function registerWriteTools(
         }
 
         if (action === 'delete') {
-          const approval = await requestApproval(server, mcp, confirmations, {
-            what: 'Delete a mailbox',
-            consequence:
-              'Every message in the folder is deleted with it, and it cannot be recovered from here.',
-            resourceKey: `manage_mailbox:delete:${mailbox}`,
-            token: confirm_token,
-            details: [{ label: 'Mailbox', value: mailbox }],
-          });
-          if (!approval.approved) return approval.result;
+          const outcome = await approval.requestApproval(
+            server,
+            mcp,
+            confirmations,
+            {
+              what: 'Delete a mailbox',
+              consequence:
+                'Every message in the folder is deleted with it, and it cannot be recovered from here.',
+              resourceKey: `manage_mailbox:delete:${mailbox}`,
+              token: confirm_token,
+              toolName: 'manage_mailbox',
+              details: [{ label: 'Mailbox', value: mailbox }],
+            }
+          );
+          if (outcome.decision === 'rejected') {
+            throw new ToolInputError(`imap-mcp: ${outcome.reason}`);
+          }
+          if (outcome.decision === 'declined') {
+            throw new ToolInputError(
+              'imap-mcp: the user declined. Nothing was changed.'
+            );
+          }
+          if (outcome.decision === 'pending') return outcome.result;
         } else if (action === 'rename') {
           const key = `manage_mailbox:rename:${mailbox}:${new_name ?? ''}`;
           if (!confirmations.consume(key, confirm_token)) {
             return textResult(
-              confirmationPrompt(
-                'rename a mailbox',
-                confirmations.issue(key),
-                confirmations.ttlMinutes,
-                'Clients that cached the old path will have to resynchronise.',
-                [
+              confirmationPrompt({
+                what: 'rename a mailbox',
+                token: confirmations.issue(key),
+                ttlMinutes: confirmations.ttlMinutes,
+                consequence:
+                  'Clients that cached the old path will have to resynchronise.',
+                details: [
                   { label: 'Mailbox', value: mailbox },
                   { label: 'New name', value: new_name ?? '' },
-                ]
-              )
+                ],
+                toolName: 'manage_mailbox',
+              })
             );
           }
         }
