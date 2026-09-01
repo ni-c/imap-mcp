@@ -12,6 +12,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      last in the file so the link definitions come along. -->
 <!-- #region changelog -->
 
+## [Unreleased]
+
+### Changed
+
+- A `confirm_token` that does not match its arguments is **refused with the
+  reason** instead of being answered with a fresh prompt. The binding is
+  unchanged — a confirmation issued for one set of UIDs still cannot delete
+  another, and one for INBOX cannot delete from Archive — but the answer now
+  says which of the two happened. `move_messages` and the rename branch of
+  `manage_mailbox` are unaffected: they use the plain two-call token and still
+  re-prompt.
+
+- `delete_messages` and `manage_mailbox` name themselves in the fallback text
+  rather than saying "call this tool again".
+
+- Runs on **MCP SDK 2.0**. Existing clients see the same protocol revision they
+  always did; the change is the package layout behind it.
+
+- The linter is **oxlint** instead of eslint plus typescript-eslint, which lifts
+  the TypeScript ceiling: typescript-eslint pins `typescript` below 6.1, so this
+  repository was held on TypeScript 6 by its linter rather than by its code.
+
+- The tool filter, the confirmation store, the approval flow and the
+  documentation-asset generator now come from **`mcp-tool-allowlist`**,
+  **`mcp-approval`** and **`svg-asset-set`** rather than from copies kept here
+  — 1000 fewer lines. The approval flow was written in this repository and cut
+  into a library once smtp-mcp had grown a near-identical copy of it; the
+  behaviour is the same, with one owner. None of the packages has a runtime
+  dependency of its own.
+
+### Fixed
+
+- An entry in `IMAP_ALLOW_TOOLS` that is not tool-name-shaped is now
+  **redacted** in the error rather than quoted back. `IMAP_PASSWORD` and
+  `IMAP_ALLOW_TOOLS` are adjacent lines in every compose file, and a paste into
+  the wrong one used to print the credential into the client's log.
+
 ## [0.2.0] - 2026-08-30
 
 This is the first release published to npm, so everything below reaches a
