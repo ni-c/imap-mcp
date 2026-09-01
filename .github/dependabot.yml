@@ -69,8 +69,12 @@ updates:
     schedule:
       interval: weekly
     groups:
-      # init and analyze are separate dependencies to Dependabot but must always
-      # move together — a version mismatch kills the codeql job.
+      # init and analyze are separate dependencies to Dependabot. Ungrouped,
+      # one of them bumps first and the version mismatch fails the CodeQL job.
       codeql:
         patterns:
           - github/codeql-action*
+      # The docker/* actions are released in lockstep and used in one job.
+      docker:
+        patterns:
+          - docker/*
