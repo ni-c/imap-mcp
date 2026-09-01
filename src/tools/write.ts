@@ -206,10 +206,10 @@ export function registerWriteTools(
       }),
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    async ({ uids, mailbox, confirm_token }) =>
+    async ({ uids, mailbox, confirm_token }, mcp) =>
       run(async () => {
         const source = mailbox ?? client.defaultMailbox;
-        const approval = await requestApproval(server, confirmations, {
+        const approval = await requestApproval(server, mcp, confirmations, {
           what: `Permanently delete ${uids.length} message(s) (UIDs ${uids.slice(0, 20).join(', ')}${uids.length > 20 ? ', …' : ''})`,
           consequence:
             'The messages are expunged, not moved to Trash. They cannot be recovered from here.',
@@ -255,7 +255,7 @@ export function registerWriteTools(
       }),
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    async ({ action, mailbox, new_name, confirm_token }) =>
+    async ({ action, mailbox, new_name, confirm_token }, mcp) =>
       run(async () => {
         if (action === 'rename' && new_name === undefined) {
           throw new ToolInputError(
@@ -264,7 +264,7 @@ export function registerWriteTools(
         }
 
         if (action === 'delete') {
-          const approval = await requestApproval(server, confirmations, {
+          const approval = await requestApproval(server, mcp, confirmations, {
             what: 'Delete a mailbox',
             consequence:
               'Every message in the folder is deleted with it, and it cannot be recovered from here.',

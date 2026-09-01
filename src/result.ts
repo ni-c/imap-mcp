@@ -1,4 +1,7 @@
-import type { CallToolResult } from '@modelcontextprotocol/server';
+import type {
+  CallToolResult,
+  InputRequiredResult,
+} from '@modelcontextprotocol/server';
 
 import { wrapUntrusted } from './analyze.js';
 import { MailError, ToolInputError } from './errors.js';
@@ -222,10 +225,14 @@ function hintFor(error: MailError): string {
 /**
  * Runs a tool handler and converts thrown errors into MCP error results instead
  * of protocol-level failures.
+ *
+ * A handler may also answer with a question rather than a result — asking a
+ * human is a return value on the 2026-07-28 revision. That travels through
+ * untouched; there is nothing here to convert.
  */
 export async function run(
-  fn: () => Promise<CallToolResult>
-): Promise<CallToolResult> {
+  fn: () => Promise<CallToolResult | InputRequiredResult>
+): Promise<CallToolResult | InputRequiredResult> {
   try {
     return await fn();
   } catch (error) {

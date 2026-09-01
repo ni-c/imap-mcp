@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { call, connect, jsonOf, textOf, tokenOf } from './harness.js';
+import {
+  call,
+  connect,
+  connectModern,
+  jsonOf,
+  textOf,
+  tokenOf,
+} from './harness.js';
 import { message } from './fake-imap.js';
 
 function mailboxes() {
@@ -63,6 +70,10 @@ describe('delete_messages with elicitation', () => {
   });
 
   it('deletes nothing when the dialog cannot be shown at all', async () => {
+    // The wording is the SDK's here, not ours: the question is a RETURN value
+    // now, so by the time the round trip fails this handler has finished and
+    // the seam is the only thing left to answer. What has to hold is that it is
+    // an error and that nothing was deleted, and both do.
     const harness = await connect({
       config: writeConfig,
       mailboxes: mailboxes(),
@@ -72,7 +83,7 @@ describe('delete_messages with elicitation', () => {
       uids: [2],
     });
     expect(result.isError).toBe(true);
-    expect(textOf(result)).toContain('Nothing was changed');
+    expect(textOf(result)).toContain('dialog unavailable');
     expect(
       harness.imap.calls.some((entry) => entry.name === 'messageDelete')
     ).toBe(false);
@@ -292,5 +303,114 @@ describe('audit log', () => {
 
     const entry = lines.find((line) => line.includes('imap-mcp audit')) ?? '';
     expect(entry).toContain('+20]');
+  });
+});
+
+describe('delete_messages on the 2026-07-28 revision', () => {
+  // Here the question is a RETURN value: the call ends, the person decides, and
+  // the client retries carrying the answer. Which means the answer arrives as
+  // ordinary request content -- attacker-controlled input, in the SDK's own
+  // words -- so an accepted reply on its own must not be enough to expunge a
+  // mailbox.
+
+  const accepted = {
+    confirm: { action: 'accept', content: { confirm: true } },
+  };
+  const deleted = (harness: Awaited<ReturnType<typeof connectModern>>) =>
+    harness.imap.calls.some((entry) => entry.name === 'messageDelete');
+
+  it('asks, then deletes once the answer comes back with the state it minted', async () => {
+    const harness = await connectModern({
+      config: writeConfig,
+      mailboxes: mailboxes(),
+    });
+    const asked = await harness.del({ uids: [2] });
+    expect(asked.resultType).toBe('input_required');
+    expect(asked.requestState).toBeTruthy();
+    expect(asked.inputRequests?.confirm?.params.message).toContain(
+      'cannot be recovered'
+    );
+    expect(deleted(harness)).toBe(false);
+
+    const done = await harness.del(
+      { uids: [2] },
+      { inputResponses: accepted, requestState: asked.requestState }
+    );
+    expect(done.resultType).not.toBe('input_required');
+    expect(deleted(harness)).toBe(true);
+    await harness.close();
+  });
+
+  it('deletes nothing when the box was left unticked', async () => {
+    const harness = await connectModern({
+      config: writeConfig,
+      mailboxes: mailboxes(),
+    });
+    const asked = await harness.del({ uids: [2] });
+    const done = await harness.del(
+      { uids: [2] },
+      {
+        inputResponses: {
+          confirm: { action: 'accept', content: { confirm: false } },
+        },
+        requestState: asked.requestState,
+      }
+    );
+    expect(done.isError).toBe(true);
+    expect(textOf(done as never)).toContain('declined');
+    expect(deleted(harness)).toBe(false);
+    await harness.close();
+  });
+
+  it('asks again rather than deleting when the answer carries no state', async () => {
+    // Without a seal this bare object would be all it took to expunge a
+    // mailbox, and anything that can shape a tool call can produce it.
+    const harness = await connectModern({
+      config: writeConfig,
+      mailboxes: mailboxes(),
+    });
+    await harness.del({ uids: [2] });
+    const again = await harness.del(
+      { uids: [2] },
+      { inputResponses: accepted }
+    );
+    expect(again.resultType).toBe('input_required');
+    expect(deleted(harness)).toBe(false);
+    await harness.close();
+  });
+
+  it('asks again when the state was not minted here', async () => {
+    const harness = await connectModern({
+      config: writeConfig,
+      mailboxes: mailboxes(),
+    });
+    const asked = await harness.del({ uids: [2] });
+    const again = await harness.del(
+      { uids: [2] },
+      {
+        inputResponses: accepted,
+        requestState: `${asked.requestState?.slice(0, -4)}AAAA`,
+      }
+    );
+    expect(again.resultType).toBe('input_required');
+    expect(deleted(harness)).toBe(false);
+    await harness.close();
+  });
+
+  it('asks again when the state belongs to a different set of messages', async () => {
+    // The seal names the exact UIDs and mailbox that were approved. Approval of
+    // one message is not approval of another.
+    const harness = await connectModern({
+      config: writeConfig,
+      mailboxes: mailboxes(),
+    });
+    const asked = await harness.del({ uids: [2] });
+    const again = await harness.del(
+      { uids: [3] },
+      { inputResponses: accepted, requestState: asked.requestState }
+    );
+    expect(again.resultType).toBe('input_required');
+    expect(deleted(harness)).toBe(false);
+    await harness.close();
   });
 });
