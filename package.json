@@ -46,24 +46,25 @@
     "format": "prettier --write .",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "assets": "node scripts/gen-assets.mjs",
-    "assets:check": "node scripts/gen-assets.mjs --check"
+    "assets": "svg-asset-set",
+    "assets:check": "svg-asset-set --check"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
     "imapflow": "^1.7.6",
     "mailparser": "^3.9.17",
+    "mcp-approval": "^0.6.0",
     "mcp-tool-allowlist": "^0.2.0",
     "zod": "^4.5.4"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.0.0",
-    "@resvg/resvg-js": "^2.6.2",
     "@types/mailparser": "^3.4.6",
     "@types/node": "^26.4.0",
     "@vitest/coverage-v8": "4.1.11",
     "oxlint": "^1.80.0",
     "prettier": "^3.9.6",
+    "svg-asset-set": "https://github.com/ni-c/svg-asset-set/releases/download/v0.1.0/svg-asset-set-0.1.0.tgz",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11"
   }
