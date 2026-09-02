@@ -321,7 +321,10 @@ describe('attachment resources', () => {
     });
     expect(result.contents[0]?.mimeType).toBe('application/pdf');
     expect(
-      Buffer.from(result.contents[0]?.blob as string, 'base64').equals(pdf)
+      Buffer.from(
+        (result.contents[0] as { blob?: string }).blob as string,
+        'base64'
+      ).equals(pdf)
     ).toBe(true);
     await harness.close();
   });

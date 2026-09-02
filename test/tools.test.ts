@@ -146,6 +146,7 @@ describe('tool registration', () => {
           tls: 'implicit',
           insecureTls: false,
           mailbox: 'INBOX',
+          trustedAuthservId: undefined,
           seenKeyword: 'AiSeen',
           draftsMailbox: undefined,
           maxMessages: 100,

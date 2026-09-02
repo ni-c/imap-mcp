@@ -22,7 +22,12 @@ import { ToolFilterError } from 'mcp-tool-allowlist';
 import { connect, testConfig, toolNames } from './harness.js';
 
 /** The tools a server built with this configuration actually offers. */
-async function names(config: Parameters<typeof connect>[0]['config'] = {}) {
+async function names(
+  // `Parameters<typeof connect>[0]` is optional, so indexing it reaches
+  // through `undefined`. `NonNullable` names the object the parameter is
+  // when it is passed, which is the only case this helper has.
+  config: NonNullable<Parameters<typeof connect>[0]>['config'] = {}
+) {
   const harness = await connect({ config });
   const list = await toolNames(harness.client);
   await harness.close();

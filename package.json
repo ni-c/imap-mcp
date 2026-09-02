@@ -38,9 +38,10 @@
     "node": ">=22"
   },
   "scripts": {
-    "prepublishOnly": "npm run lint && npm run build && npm test",
+    "prepublishOnly": "npm run lint && npm run typecheck && npm run build && npm test",
     "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc",
+    "typecheck": "tsc --project tsconfig.test.json",
     "watch": "tsc --watch",
     "lint": "oxlint --deny-warnings && prettier --check .",
     "format": "prettier --write .",

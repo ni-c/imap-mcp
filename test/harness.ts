@@ -34,6 +34,8 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     },
     // Mirrors the real default: read-only unless the test says otherwise.
     readOnly: overrides.readOnly ?? true,
+    // Also the real default: unset means "ask".
+    elicitation: overrides.elicitation ?? true,
     allowTools: overrides.allowTools,
     denyTools: overrides.denyTools,
   };
