@@ -75,6 +75,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `IMAP_ALLOW_TOOLS` are adjacent lines in every compose file, and a paste into
   the wrong one used to print the credential into the client's log.
 
+### Security
+
+- **A single mail could stop the server for half a minute.** `htmlToText` was a
+  chain of regexes with bounded scan windows, and a bounded window bounds one
+  factor of a product: the other is how many scans an input can start. A
+  `text/html` body of `'<style '` repeated 73 000 times is 512 000 legal bytes
+  that start 73 000 scans and finish none, and it measured **33 seconds** —
+  Node is single-threaded and the transport is stdio, so nothing else was
+  served meanwhile. The IMAP command timeout could not help; it wraps commands,
+  not parsing, and its `setTimeout` cannot fire on a blocked event loop. Two
+  more shapes did the same, and the tag stripper itself was scanning without
+  any bound at all: `'<a '` with no `>` in the document took 57 seconds.
+
+  The pass is now one forward walk with cursors that never rewind, plus one
+  global budget for closing-tag searches — a cap on the product rather than on
+  either factor. The same inputs are under 20 ms. Stripping is still best
+  effort and the fence is still what carries the weight.
+
+  The test that was supposed to catch this measured 238 ms, because its payload
+  was longer than the 512 000-character input cap and the hostile half was
+  sliced off before a regex saw it.
+
+- **Folder names went to the model unsanitised.** Every other mailbox string
+  goes through `sanitizeText` or `sanitizeFilename`; `list_mailboxes` returned
+  `path`, `name` and `specialUse` raw, so a right-to-left override survived, and
+  so did `![](https://collector.example.org/p?s=x)` — the beacon
+  `defuseAutoFetch` exists to take apart, arriving through the one door without
+  it. Each entry now carries a sanitised `display_name` beside the verbatim
+  `path`, and a `name_warning` spelling out the difference when there is one.
+  `path` stays verbatim on purpose: it is the argument the other tools take.
+
+  The confirmation dialog shows folder names with their invisible characters
+  removed and escaped beside them — `Archive` and `Archive<U+200B>` are the same
+  pixels, so the gate was asking about one folder and acting on another. The
+  audit log on stderr escapes them too, which is what its own comment always
+  said it did. `mailboxParam` now refuses the whole C0/C1 range rather than
+  `\r\n\0` alone.
+
+- **`get_message(include_thread: true)` returned up to 2.9× the stated result
+  budget.** It went out through a path that never touched `budgetedJson`, and
+  fifty thread summaries with capped 2 000-character subjects and
+  4 000-character address lists are 10 kB each — all sender-chosen. The metadata
+  block is now budgeted to a quarter of the result with the thread list as the
+  first thing dropped, and the assembled result is checked as a whole, which
+  also catches the growth from defusing images and from the per-line datamarks.
+
+- **Two entries of the executable blocklist could never match.** `extensionOf`
+  read extensions with `/\.([A-Za-z0-9]{1,10})$/`, so `appref-ms` (hyphen) and
+  `application` (eleven characters) both read as no extension — and no extension
+  makes the check skip rather than fail. With `IMAP_DOWNLOAD_DIR` set,
+  `Rechnung-2026.appref-ms` declared `application/xml` reached the disk under its
+  own name with nothing noted against it; a ClickOnce manifest is valid XML, so
+  the magic-byte check had nothing to object to either. A test now walks the
+  whole blocklist and requires every entry to be refused.
+
 ## [0.2.0] - 2026-08-30
 
 This is the first release published to npm, so everything below reaches a

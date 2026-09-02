@@ -63,6 +63,11 @@ dropped on a best-effort basis (the fencing, not the stripping, is what carries 
 markdown image syntax — inline and reference style — is defused so a rendering client cannot be
 made to fetch a tracking URL.
 
+That covers folder names too, and it did not always: a folder name is chosen by whoever created
+the folder, which on a shared mailbox is not necessarily you. `list_mailboxes` returns the name
+twice — `path` exactly as the server spelled it, because that is the handle every other tool
+takes, and `display_name` cleaned up for reading, with a warning on the entry when the two differ.
+
 Alongside the message you get a server-side assessment: the SPF/DKIM/DMARC verdicts with the
 authserv-id they came from, which prompt-injection shapes matched, and which words mix Latin
 with Cyrillic or Greek letters. When something matches, the warning is the first thing in the
