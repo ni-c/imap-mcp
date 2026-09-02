@@ -14,6 +14,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Every tool declares an `outputSchema` and answers with `structuredContent`
+  beside the text block. A client no longer has to parse prose to use a result.
+
+  Every tool that reports anything out of the mailbox carries `untrusted: true`
+  and `source: "imap"` as fields, not only as a preamble in the text. A sender
+  display name, a folder name a colleague chose and an attachment filename are
+  all attacker-controllable and reach the model through the listing tools long
+  before anyone opens a message, so a client that reads the structured half must
+  not get them unframed. `get_server_info` and the five write tools do not carry
+  it: those report this server's own configuration, or what it just did with the
+  uids it was given.
+
+  `get_message` and a text attachment keep the nonce fence in the text block;
+  the structured half states the same fields rather than making a client parse
+  it. An image attachment keeps its bytes in the content block, where a client
+  renders them, instead of repeating the base64.
+
+### Changed
+
+- **Four refusals are error results rather than plain ones.** An attachment the
+  policy rejects, one whose bytes are an executable whatever it declared, one
+  too large to return inline, and the `manage_mailbox` rename prompt. Each read
+  like an answer while being the opposite, and a tool that declares an output
+  schema may not answer without `structuredContent` unless the result is an
+  error.
+
+- A result too large to shrink is an error rather than an envelope carrying the
+  oversized document as a string. That envelope is valid JSON and no longer a
+  valid _answer_: the SDK checks a result against the schema its tool declares.
+
+- The two-call `confirm_token` prompt is an error result, for the same reason.
+  The text is unchanged and still carries the token.
+
 ### Changed
 
 - A `confirm_token` that does not match its arguments is **refused with the

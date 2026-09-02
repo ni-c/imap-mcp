@@ -1,6 +1,7 @@
 import { readdir } from 'node:fs/promises';
 
 import {
+  expectEveryToolDeclaresOutputSchema,
   expectEveryToolExercised,
   startServer,
   toolCoverage,
@@ -246,9 +247,11 @@ describe('the fallback path for a client with no dialog', () => {
     const target = listed.messages.find((m) => m.subject === SUBJECTS.toDelete);
     expect(target).toBeDefined();
 
-    const refusal = await plain.call('delete_messages', {
-      uids: [target!.uid],
-    });
+    const refusal = await plain.call(
+      'delete_messages',
+      { uids: [target!.uid] },
+      { expectError: /confirm_token=/ }
+    );
     expect(refusal).toContain('confirm_token');
     expect(plain.prompts).toHaveLength(0);
     // Still there: the first call is a question.
@@ -305,9 +308,14 @@ describe('the refusals, against a server that would have obeyed', () => {
       await plain.call('list_messages', { limit: 50 })
     );
     const [first, second] = listed.messages;
-    const refusal = await plain.call('delete_messages', {
-      uids: [first!.uid],
-    });
+    // An error result: nothing was deleted, which is what `isError` says —
+    // and a tool that declares an `outputSchema` may not answer without
+    // `structuredContent` unless the result is an error.
+    const refusal = await plain.call(
+      'delete_messages',
+      { uids: [first!.uid] },
+      { expectError: /confirm_token=/ }
+    );
     await plain.call(
       'delete_messages',
       { uids: [first!.uid, second!.uid], confirm_token: tokenOf(refusal) },
@@ -344,15 +352,28 @@ describe('the refusals, against a server that would have obeyed', () => {
       '.appref-ms is an executable file type'
     );
 
-    const fetched = await asking.call('get_attachments', {
-      uid,
-      part_id: part.part_id,
-    });
+    // The refusal is an error result: the tool was asked to fetch something
+    // and did not. The reason is named rather than passing a bare `true`,
+    // which a schema rejection would satisfy just as well.
+    const fetched = await asking.call(
+      'get_attachments',
+      { uid, part_id: part.part_id },
+      { expectError: 'is an executable file type' }
+    );
     expect(fetched).toContain('Refused to fetch part');
     // And nothing reached the directory the operator named.
     const files = await readdir(sandbox.downloadDir);
     expect(files.some((name) => name.includes('Rechnung'))).toBe(false);
   });
+});
+
+it('declares an output schema on every tool', async () => {
+  // The unit suite checks the same thing against a stub. Here it is checked
+  // against the server that has just answered every one of these tools against
+  // a real IMAP server — and each of those answers went through the SDK's
+  // validation against the schema below it.
+  const { tools } = await asking.client.listTools();
+  expectEveryToolDeclaresOutputSchema(tools);
 });
 
 it('exercises every tool in the catalogue', () => {

@@ -248,6 +248,41 @@ it. Use `delete_messages`, which asks.
 Neither a confirmation nor a dialog quotes a mailbox name inside its own sentence — folder
 names come from the account, which on a shared mailbox means a colleague chose them.
 
+### Structured output
+
+Every tool declares an `outputSchema` and answers with `structuredContent`
+alongside the text block, so a client can use the result without parsing prose:
+
+```jsonc
+{
+  "untrusted": true,
+  "source": "imap",
+  "mailbox": "INBOX",
+  "total_matching": 214,
+  "offset": 0,
+  "returned": 25,
+  "next_offset": 25,
+  "messages": [{ "uid": 4711, "subject": "…", "from": "…", "seen": false }],
+}
+```
+
+Every tool that reports anything out of the mailbox carries `untrusted: true`
+and `source: "imap"` as fields — a sender display name, a folder name a
+colleague chose and an attachment filename are all attacker-controllable, and
+they reach the model through the listing tools long before anyone opens a
+message. Only `get_server_info` and the five write tools are without it: those
+report this server's own configuration, or what it just did with the uids it was
+given.
+
+`get_message` and a text attachment keep the per-call nonce fence in the text
+block — the structured half states the same fields, so a client is not made to
+parse the fence to find them. An image attachment keeps its bytes in the content
+block, where a client renders them, rather than repeating the base64.
+
+A refusal is now an **error result**: an attachment the policy rejects, one whose
+bytes are an executable whatever it claimed, one too large to inline. Each was a
+plain result that read like an answer.
+
 Attachments are also available as MCP resources at `imap://message/{uid}/part/{partId}`, which
 matters where the server has no useful filesystem. The resource path runs the same allowlist,
 size limit and magic-byte check as the tool — it is not a second, unguarded door.

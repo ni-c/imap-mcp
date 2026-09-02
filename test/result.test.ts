@@ -7,6 +7,7 @@ import {
   fencedUntrustedResult,
   jsonResult,
   MAX_RESULT_BYTES,
+  ResultTooLargeError,
   run,
   sanitizeErrorBody,
   textResult,
@@ -120,11 +121,14 @@ describe('budgetedJson', () => {
     expect(parsed.messages).toEqual([]);
   });
 
-  it('falls back to partial_json when nothing is array-shaped', () => {
-    const parsed = JSON.parse(
+  it('refuses when nothing is array-shaped', () => {
+    // It used to answer with an envelope carrying the oversized document as a
+    // string. That is a valid JSON document and no longer a valid *answer*:
+    // every tool declares what it returns, and the SDK refuses a result that
+    // does not fit. There is no true answer of this size.
+    expect(() =>
       budgetedJson({ body: 'x'.repeat(MAX_RESULT_BYTES * 2) })
-    ) as { partial_json: string };
-    expect(typeof parsed.partial_json).toBe('string');
+    ).toThrow(ResultTooLargeError);
   });
 
   it('carries the caller follow-up hint', () => {

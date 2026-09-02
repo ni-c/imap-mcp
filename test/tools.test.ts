@@ -94,6 +94,57 @@ describe('tool registration', () => {
     await harness.close();
   });
 
+  it('declares an output schema on every tool', async () => {
+    // The same argument as the annotations below, one field along. A tool that
+    // says nothing about its result forces a client to parse prose, and the
+    // SDK sends no `structuredContent` at all for a tool that declared no
+    // schema.
+    const harness = await connect({ config: { readOnly: false } });
+    const { tools } = await harness.client.listTools();
+    expect(tools.length).toBeGreaterThan(0);
+    for (const tool of tools) {
+      expect(tool.outputSchema, tool.name).toBeDefined();
+      // An object root, not merely a schema. SEP-2106 allows an array or a
+      // scalar, but a 2025-era client is served that same tool with the schema
+      // rewritten to `{result: …}` — so it would answer in two shapes
+      // depending on who asked.
+      expect(tool.outputSchema?.type, tool.name).toBe('object');
+    }
+    await harness.close();
+  });
+
+  it('marks every result built from mailbox content as untrusted', async () => {
+    // Anyone in the world can put a message in a mailbox, and a sender display
+    // name or a folder name reaches the model through the listing tools long
+    // before anyone opens a message. A client that reads only
+    // `structuredContent` must not get any of it unframed.
+    // With the write tools registered too: they are the ones that report what
+    // this server just did rather than what came out of the mailbox, and a
+    // read-only server would not put that distinction to the test.
+    const harness = await connect({ config: { readOnly: false } });
+    const { tools } = await harness.client.listTools();
+    const plainTools = tools
+      .filter((tool) => {
+        const properties = tool.outputSchema?.properties as
+          Record<string, unknown> | undefined;
+        return properties?.untrusted === undefined;
+      })
+      .map((tool) => tool.name)
+      .sort();
+    // get_server_info is this server's own configuration and the capability
+    // list the mail server states about itself; the write tools report what
+    // this server just did, with the uids it was given.
+    expect(plainTools).toEqual([
+      'delete_messages',
+      'get_server_info',
+      'manage_mailbox',
+      'move_messages',
+      'save_draft',
+      'set_message_flags',
+    ]);
+    await harness.close();
+  });
+
   it('declares all four annotation hints on every tool', async () => {
     // Not a style rule. Two of the four default to a *stronger* claim than
     // silence suggests: the specification gives destructiveHint and

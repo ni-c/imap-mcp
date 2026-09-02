@@ -18,7 +18,7 @@ import type { Config } from '../config.js';
 import { ToolInputError } from '../errors.js';
 import { ImapClient, withTimeout } from '../imap.js';
 import { buildDraft } from '../draft.js';
-import { jsonResult, run, textResult } from '../result.js';
+import { errorResult, jsonResult, run } from '../result.js';
 
 /**
  * A caller-chosen value as the person deciding should see it.
@@ -75,6 +75,12 @@ export function registerWriteTools(
         idempotentHint: true,
         openWorldHint: false,
       },
+      outputSchema: z.object({
+        mailbox: z.string(),
+        uids: z.array(z.number().int()),
+        added: z.array(z.string()),
+        removed: z.array(z.string()),
+      }),
     },
     async ({ uids, mailbox, add, remove }) =>
       run(async () => {
@@ -161,6 +167,12 @@ export function registerWriteTools(
         idempotentHint: false,
         openWorldHint: false,
       },
+      outputSchema: z.object({
+        action: z.enum(['moved', 'copied']),
+        source: z.string(),
+        destination: z.string(),
+        uids: z.array(z.number().int()),
+      }),
     },
     async ({ uids, destination, mailbox, mode, confirm_token }, mcp) =>
       run(async () => {
@@ -262,6 +274,11 @@ export function registerWriteTools(
         idempotentHint: true,
         openWorldHint: false,
       },
+      outputSchema: z.object({
+        action: z.literal('deleted'),
+        mailbox: z.string(),
+        uids: z.array(z.number().int()),
+      }),
     },
     async ({ uids, mailbox, confirm_token }, mcp) =>
       run(async () => {
@@ -333,6 +350,11 @@ export function registerWriteTools(
         idempotentHint: true,
         openWorldHint: false,
       },
+      outputSchema: z.object({
+        action: z.enum(['create', 'rename', 'delete']),
+        mailbox: z.string(),
+        new_name: z.string().optional(),
+      }),
     },
     async ({ action, mailbox, new_name, confirm_token }, mcp) =>
       run(async () => {
@@ -369,7 +391,11 @@ export function registerWriteTools(
         } else if (action === 'rename') {
           const key = `manage_mailbox:rename:${mailbox}:${new_name ?? ''}`;
           if (!confirmations.consume(key, confirm_token)) {
-            return textResult(
+            // An error result, like `mcp-approval`'s own prompt: the rename
+            // was asked for and did not happen. It is also what lets this tool
+            // declare an output schema — the SDK requires `structuredContent`
+            // from a tool that has one, and a prompt has none to give.
+            return errorResult(
               confirmationPrompt({
                 what: 'rename a mailbox',
                 token: confirmations.issue(key),
@@ -448,6 +474,12 @@ export function registerWriteTools(
         idempotentHint: false,
         openWorldHint: false,
       },
+      outputSchema: z.object({
+        action: z.literal('draft_saved'),
+        mailbox: z.string().describe('The Drafts folder this server found.'),
+        recipients: z.array(z.string()),
+        note: z.string(),
+      }),
     },
     async ({ to, cc, bcc, subject, body, reply_to_uid, mailbox }) =>
       run(async () => {

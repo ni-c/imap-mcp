@@ -38,6 +38,14 @@ behalf. 🔒 uses the two-call `confirm_token` only. Where a 👤 tool's client 
 a dialog it falls back to 🔒, and `ELICITATION=false` takes that fallback deliberately.
 See [Asking a person](/guide/approval).
 
+Every tool declares an `outputSchema` and answers with `structuredContent` beside
+the text block, so a client can use a result without parsing prose. Every tool
+that reports anything out of the mailbox carries `untrusted: true` and
+`source: "imap"` as fields — only `get_server_info` and the five write tools are
+without it. `get_message` and a text attachment keep the nonce fence in the text
+block and state the same fields in the structured half; an image attachment
+keeps its bytes in the content block rather than repeating the base64.
+
 Every tool declares all four MCP annotations — `readOnlyHint`, `destructiveHint`,
 `idempotentHint`, `openWorldHint`. `get_attachments` carries the only *computed* one in
 the family: it is `readOnlyHint: true` until `IMAP_DOWNLOAD_DIR` is set, because from
