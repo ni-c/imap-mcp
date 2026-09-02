@@ -84,3 +84,17 @@ asks the assistant to forward the inbox to a stranger and carries a tracking
 pixel, and both arrive labelled as what they are rather than acted upon. The
 recording is reproducible — `docs/demo.tape` and `docs/demo-seed.mjs` build the
 mailbox from scratch, and nothing in it comes from a real account.
+
+## Running it elsewhere
+
+A client that cannot spawn a local process — ChatGPT connectors, Claude on the web,
+Cursor, LibreChat — cannot start imap-mcp the way Claude Code does.
+[mcp-hub](https://mcp-hub.ni-c.de) is the bridge: one container serves many stdio MCP
+servers over Streamable HTTP, with an OAuth 2.1 login behind a single password and
+long-lived tokens for the clients that cannot do OAuth. Its `/hub` endpoint puts every
+server behind six meta-tools, so one connector reaches all of them without N×tool schemas
+in the model's context, and it speaks both protocol revisions — a question this server
+asks travels through it to the person at the far end instead of ending at the gateway.
+
+Its configuration is Claude Code's `mcpServers` format, so the entry you already have is
+the entry it takes: [Through mcp-hub](/guide/clients#through-mcp-hub).
