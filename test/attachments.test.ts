@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   checkPolicy,
   collectAttachments,
+  EXECUTABLE_EXTENSIONS,
   extensionOf,
   sanitizeFilename,
   sniffContent,
@@ -71,6 +72,10 @@ describe('extensionOf', () => {
     ['Archive.TAR.GZ', 'gz'],
     ['noextension', ''],
     ['trailing.', ''],
+    // A hyphen and eleven characters: both were outside the old character
+    // class, and an extension that reads as '' is one checkPolicy skips.
+    ['launch.appref-ms', 'appref-ms'],
+    ['setup.application', 'application'],
   ])('reads %s as %s', (name, expected) => {
     expect(extensionOf(name)).toBe(expected);
   });
@@ -218,6 +223,31 @@ describe('checkPolicy', () => {
     expect(input.allowed).toBe(true);
     expect(input.notes).toEqual([]);
   });
+
+  it.each([...EXECUTABLE_EXTENSIONS])(
+    'refuses .%s, so the whole blocklist stays reachable',
+    (extension) => {
+      // The list and the extractor are two declarations that have to agree, and
+      // reading them side by side does not show when they stop agreeing:
+      // 'appref-ms' and 'application' sat in the list for months while
+      // extensionOf returned '' for both, which makes checkPolicy skip the
+      // executable check rather than fail it. Declared as a type from the
+      // allowlist, either one was allowed with no note against it.
+      const result = checkPolicy(
+        // A content type that passes on its own, so the extension is what the
+        // assertion is about.
+        candidate({
+          filename: `invoice.${extension}`,
+          contentType: 'application/pdf',
+        }),
+        policy
+      );
+      expect(result.allowed).toBe(false);
+      expect(result.notes.join(' ')).toContain(
+        `refused: .${extension} is an executable file type`
+      );
+    }
+  );
 });
 
 describe('sniffContent', () => {

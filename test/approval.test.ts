@@ -345,6 +345,39 @@ describe('audit log', () => {
     const entry = lines.find((line) => line.includes('imap-mcp audit')) ?? '';
     expect(entry).toContain('+20]');
   });
+
+  it('escapes a folder name that would misrepresent itself in the log', async () => {
+    // The comment on audit() says attacker-chosen text stays out of an
+    // operator's log viewer, and then wrote folder names into it raw. A
+    // destination of "Archive<U+202E>…" logs as an entirely different folder, and
+    // a CR in a name rewrites the line a human is reading.
+    const lines: string[] = [];
+    const spy = vi
+      .spyOn(console, 'error')
+      .mockImplementation((...args: unknown[]) => {
+        lines.push(args.map(String).join(' '));
+      });
+
+    const evil = 'Archive\u202edlofretsam';
+    const harness = await connect({
+      config: writeConfig,
+      mailboxes: [
+        { path: 'INBOX', messages: [message(2)] },
+        { path: evil, messages: [] },
+      ],
+      elicit: 'accept',
+    });
+    await call(harness.client, 'move_messages', {
+      uids: [2],
+      destination: evil,
+    });
+    await harness.close();
+    spy.mockRestore();
+
+    const entry = lines.find((line) => line.includes(' move from=')) ?? '';
+    expect(entry).toContain('to=Archive\\u202edlofretsam');
+    expect(entry).not.toContain('\u202e');
+  });
 });
 
 describe('delete_messages on the 2026-07-28 revision', () => {

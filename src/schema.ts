@@ -4,20 +4,42 @@ import { z } from 'zod';
 export const MAX_LIMIT = 200;
 
 /**
+ * C0 and C1 control characters. Tab is excepted; a folder name may legitimately
+ * contain one, and it is the one character in the range that renders as itself.
+ */
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/;
+
+/**
  * A mailbox name.
  *
  * IMAP is a line protocol and mailbox names are interpolated into commands.
  * imapflow quotes them, but a CR or LF would still be a command-injection
- * primitive if any layer ever stopped quoting, so they are refused outright.
+ * primitive if any layer ever stopped quoting, so they are refused outright —
+ * along with the rest of the C0/C1 range, which the CR/LF/NUL check used to
+ * leave through. A bare CR was the interesting one: `list_mailboxes` hands the
+ * path back for the model to quote into the next call, and the confirmation
+ * dialog a person reads before losing messages is line-oriented, so a name
+ * carrying control characters is a name that does not read the way it looks.
+ *
  * The `%` and `*` wildcards are refused too: they belong to LIST patterns, and
  * a "delete the mailbox `*`" that quietly matched everything is not a mistake
  * worth being one layer away from.
+ *
+ * Deliberately *not* refused: zero-width and directional-override characters.
+ * A folder someone else created may genuinely have them in its name, and a
+ * parameter that rejected them would leave that folder unreadable and
+ * undeletable through this server. They are handled where they can be handled
+ * honestly — `display_name` in the listing, and the escape form in the dialog.
  */
 export const mailboxParam = z
   .string()
   .min(1)
   .max(255)
-  .refine((v) => !/[\r\n\0]/.test(v), 'must not contain line breaks')
+  .refine(
+    (v) => !CONTROL_CHARS.test(v),
+    'must not contain line breaks or control characters'
+  )
   .refine((v) => !/[%*]/.test(v), 'must not contain the wildcards % or *')
   .describe(
     'Mailbox (folder) name exactly as returned by list_mailboxes, e.g. "INBOX" or "INBOX/Archive". Defaults to the configured mailbox.'

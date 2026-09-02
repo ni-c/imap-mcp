@@ -29,8 +29,23 @@ describe('mailboxParam', () => {
     ['the % wildcard', 'INBOX/%'],
     ['the * wildcard', '*'],
     ['an empty name', ''],
+    // The CR/LF/NUL check let the rest of the C0/C1 range through. A bare CR
+    // is the one that matters most: the confirmation a person reads before
+    // losing messages is line-oriented, and a CR-padded name overwrites it.
+    ['a bare carriage return', 'INBOX\rArchive'],
+    ['a bell character', 'INBOX'],
+    ['an escape character', 'INBOX[2J'],
+    ['a DEL', 'INBOX'],
+    ['a C1 control', 'INBOX'],
   ])('refuses %s', (_name, value) => {
     expect(mailboxParam.safeParse(value).success).toBe(false);
+  });
+
+  it('still accepts a folder that someone else named badly', () => {
+    // Not the same call. A zero-width space in a folder name is a problem to
+    // show, not one to refuse: the folder exists, and a parameter that rejected
+    // its name would leave it unreadable and undeletable through this server.
+    expect(mailboxParam.safeParse('Archive\u200b').success).toBe(true);
   });
 
   it('refuses an absurdly long name', () => {

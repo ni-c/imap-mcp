@@ -275,6 +275,86 @@ describe('the fallback path for a client with no dialog', () => {
   });
 });
 
+describe('the refusals, against a server that would have obeyed', () => {
+  it('will not mark a message \\Deleted through the flag tool', async () => {
+    // set_message_flags has no confirmation, on the grounds that a flag comes
+    // back off. \Deleted does not: the next client to close the mailbox, or any
+    // server with autoexpunge, turns it into a removal. GreenMail is a real
+    // server with a real EXPUNGE, so this is the refusal measured where it
+    // matters. The reason is asserted, not just the failure — a renamed
+    // argument would fail at the schema and look identical.
+    const uid = await uidOf(SUBJECTS.second);
+    await asking.call(
+      'set_message_flags',
+      { uids: [uid], add: ['\\Deleted'] },
+      { expectError: 'Use delete_messages, which asks for confirmation' }
+    );
+    // Still there, and still not marked.
+    const listed = parse<Listing>(
+      await asking.call('list_messages', { limit: 50 })
+    );
+    const target = listed.messages.find((m) => m.uid === uid);
+    expect(target?.flags ?? []).not.toContain('\\Deleted');
+  });
+
+  it('will not spend a confirmation token on a longer list than it was issued for', async () => {
+    // The attack the resource key exists for: confirm deleting one message,
+    // then call again with two. Bare `expectError: true` would pass here on a
+    // schema error as readily as on the binding, so the sentence is the test.
+    const listed = parse<Listing>(
+      await plain.call('list_messages', { limit: 50 })
+    );
+    const [first, second] = listed.messages;
+    const refusal = await plain.call('delete_messages', {
+      uids: [first!.uid],
+    });
+    await plain.call(
+      'delete_messages',
+      { uids: [first!.uid, second!.uid], confirm_token: tokenOf(refusal) },
+      { expectError: 'invalid, expired, or was issued for different arguments' }
+    );
+    // Nothing went: the whole point is that the widened set is not executed.
+    const after = parse<Listing>(
+      await plain.call('list_messages', { limit: 50 })
+    );
+    expect(after.messages.map((m) => m.uid)).toContain(first!.uid);
+    expect(after.messages.map((m) => m.uid)).toContain(second!.uid);
+  });
+
+  it('refuses an executable extension the content type vouches for', async () => {
+    // `application/xml` is in the allowlist and a ClickOnce manifest really is
+    // XML, so the declaration check passes and the magic-byte check passes.
+    // The extension is the only gate left — and it was reading `''` for
+    // `appref-ms`, which makes checkPolicy skip the executable check rather
+    // than fail it. With IMAP_DOWNLOAD_DIR set, that put the file on disk under
+    // its own name and reported nothing unusual about it.
+    const uid = await uidOf(SUBJECTS.executable);
+    const listed = parse<{
+      attachments: {
+        part_id: string;
+        filename: string;
+        allowed: boolean;
+        notes: string[];
+      }[];
+    }>(await asking.call('get_attachments', { uid }));
+    const part = listed.attachments[0]!;
+    expect(part.filename).toBe('Rechnung-2026.appref-ms');
+    expect(part.allowed).toBe(false);
+    expect(part.notes.join(' ')).toContain(
+      '.appref-ms is an executable file type'
+    );
+
+    const fetched = await asking.call('get_attachments', {
+      uid,
+      part_id: part.part_id,
+    });
+    expect(fetched).toContain('Refused to fetch part');
+    // And nothing reached the directory the operator named.
+    const files = await readdir(sandbox.downloadDir);
+    expect(files.some((name) => name.includes('Rechnung'))).toBe(false);
+  });
+});
+
 it('exercises every tool in the catalogue', () => {
   const called = new Set([...asking.called, ...plain.called]);
   const report = toolCoverage({ called }, ALL_TOOLS, {});

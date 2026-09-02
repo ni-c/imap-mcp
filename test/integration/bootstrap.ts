@@ -132,10 +132,50 @@ function withAttachment(subject: string): string {
   ].join('\r\n');
 }
 
+/**
+ * A message whose attachment is executable and does not look it.
+ *
+ * `application/xml` is in the default type allowlist and a ClickOnce manifest
+ * genuinely is XML, so the declaration passes and the magic bytes pass — the
+ * extension is the only gate left, and `appref-ms` sat in the blocklist for
+ * months without ever being read out of a filename. Delivered over real SMTP so
+ * the refusal is measured against a real MIME part rather than a fixture.
+ */
+function withExecutableAttachment(subject: string): string {
+  const boundary = 'integration-executable';
+  const manifest =
+    '<?xml version="1.0" encoding="utf-8"?>\n' +
+    '<assembly xmlns="urn:schemas-microsoft-com:asm.v1"/>\n';
+  return [
+    `From: Sender <sender@example.org>`,
+    `To: Integration <${ADDRESS}>`,
+    `Subject: ${subject}`,
+    `Date: Mon, 01 Sep 2026 12:00:00 +0000`,
+    `Message-ID: <${subject.replace(/\W+/g, '-')}@example.org>`,
+    `MIME-Version: 1.0`,
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    ``,
+    `--${boundary}`,
+    `Content-Type: text/plain; charset=utf-8`,
+    ``,
+    `Your invoice is attached.`,
+    ``,
+    `--${boundary}`,
+    `Content-Type: application/xml; name="Rechnung-2026.appref-ms"`,
+    `Content-Disposition: attachment; filename="Rechnung-2026.appref-ms"`,
+    `Content-Transfer-Encoding: base64`,
+    ``,
+    Buffer.from(manifest).toString('base64'),
+    ``,
+    `--${boundary}--`,
+  ].join('\r\n');
+}
+
 export const SUBJECTS = {
   first: 'Integration first message',
   second: 'Integration second message',
   attachment: 'Integration message with an attachment',
+  executable: 'Integration message with an executable attachment',
   toMove: 'Integration message to move',
   toDelete: 'Integration message to delete',
 };
@@ -165,12 +205,13 @@ export async function bootstrap(): Promise<Sandbox> {
     await deliver(plain(subject, `Body of "${subject}".`));
   }
   await deliver(withAttachment(SUBJECTS.attachment));
+  await deliver(withExecutableAttachment(SUBJECTS.executable));
 
   const downloadDir = await mkdtemp(join(tmpdir(), 'imap-mcp-integration-'));
 
   return {
     downloadDir,
-    subjects: [...subjects, SUBJECTS.attachment],
+    subjects: [...subjects, SUBJECTS.attachment, SUBJECTS.executable],
     env: {
       IMAP_HOST: '127.0.0.1',
       IMAP_PORT,

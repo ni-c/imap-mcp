@@ -36,6 +36,33 @@ describe('result helpers', () => {
     expect(text).toContain('END UNTRUSTED EMAIL CONTENT');
     expect(text).toContain('the body');
   });
+
+  it('holds the fenced result to the budget the server states', () => {
+    // textResult applies no budget — only budgetedJson does — so this path had
+    // none at all, and everything that reaches it grows: the per-line marks add
+    // ten characters per line, and defuseAutoFetch turns a three-character
+    // `![x]` into a forty-four-character sentence upstream. Measuring the
+    // assembled text is the only measurement that is true about a result.
+    const result = fencedUntrustedResult('METADATA', 'line\n'.repeat(60_000));
+    const text = textOf(result);
+    expect(text.length).toBeLessThanOrEqual(MAX_RESULT_BYTES);
+    // Cut with a reason, in the server's own voice and outside the fence.
+    expect(text).toContain('SERVER NOTE');
+    expect(text.indexOf('SERVER NOTE')).toBeLessThan(
+      text.indexOf('BEGIN UNTRUSTED EMAIL CONTENT')
+    );
+  });
+
+  it('keeps the header when the body has to go entirely', () => {
+    const header = `METADATA ${'h'.repeat(MAX_RESULT_BYTES / 2)}`;
+    const text = textOf(
+      fencedUntrustedResult(header, 'body '.repeat(MAX_RESULT_BYTES))
+    );
+    expect(text.length).toBeLessThanOrEqual(MAX_RESULT_BYTES);
+    // The header carries the uid and the part ids a follow-up call needs; the
+    // body is the part a caller can come back for.
+    expect(text).toContain('METADATA');
+  });
 });
 
 describe('budgetedJson', () => {

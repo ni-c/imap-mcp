@@ -13,8 +13,12 @@ const MAX_FILENAME_LENGTH = 120;
  * is a refusal list applied on top of the content-type allowlist, and the cost
  * of an extra entry is one unusual attachment that has to be fetched by other
  * means.
+ *
+ * Exported so a test can walk it. An entry {@link extensionOf} cannot produce
+ * is not a stricter list, it is a longer one that refuses less — and nothing
+ * about reading the two declarations side by side says which is which.
  */
-const EXECUTABLE_EXTENSIONS = new Set([
+export const EXECUTABLE_EXTENSIONS = new Set([
   'ade',
   'adp',
   'app',
@@ -157,8 +161,22 @@ export function sanitizeFilename(raw: string | undefined): string {
     : cleaned;
 }
 
+/**
+ * The trailing extension of a filename, lowercased, or `''`.
+ *
+ * The character class and the length have to cover every entry of
+ * {@link EXECUTABLE_EXTENSIONS}, or the blocklist has entries that can never be
+ * read out of a name. Both used to be too narrow: `appref-ms` carries a hyphen
+ * and `application` is eleven characters, so both returned `''` — and an empty
+ * extension makes {@link checkPolicy} skip the executable check entirely rather
+ * than fail it. `Rechnung-2026.appref-ms` declared as `application/xml` (which
+ * is in the default type allowlist, and which a ClickOnce manifest genuinely
+ * is) therefore reached the download directory under its own name with no note
+ * against it. The property test over the whole set is what keeps the two in
+ * step from here on.
+ */
 export function extensionOf(filename: string): string {
-  const match = /\.([A-Za-z0-9]{1,10})$/.exec(filename);
+  const match = /\.([A-Za-z0-9-]{1,16})$/.exec(filename);
   return match?.[1]?.toLowerCase() ?? '';
 }
 

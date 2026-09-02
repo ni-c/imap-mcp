@@ -12,12 +12,32 @@ import {
   uidParam,
 } from '../schema.js';
 
+import { escapeInvisible, stripInvisible } from '../analyze.js';
 import { audit } from '../audit.js';
 import type { Config } from '../config.js';
 import { ToolInputError } from '../errors.js';
 import { ImapClient, withTimeout } from '../imap.js';
 import { buildDraft } from '../draft.js';
 import { jsonResult, run, textResult } from '../result.js';
+
+/**
+ * A caller-chosen value as the person deciding should see it.
+ *
+ * mcp-approval already keeps these off the server's own sentence and onto their
+ * own labelled line, which answers a name that reads like an instruction. It
+ * cannot answer a name that reads like a *different name*: `Archive` and
+ * `Archive<U+200B>` occupy the same space on a screen, so a dialog that renders
+ * the second one verbatim asks about the folder the person recognises and then
+ * acts on the one they do not. Here the invisible characters are removed from
+ * what is shown and spelled out beside it, so the answer is to the question
+ * that was actually asked.
+ */
+function shownValue(raw: string): string {
+  const visible = stripInvisible(raw);
+  return visible === raw
+    ? raw
+    : `${visible} — as written: ${escapeInvisible(raw)}`;
+}
 
 export function registerWriteTools(
   server: McpServer,
@@ -177,8 +197,8 @@ export function registerWriteTools(
             ),
             token: confirm_token,
             details: [
-              { label: 'From', value: source },
-              { label: 'To', value: destination },
+              { label: 'From', value: shownValue(source) },
+              { label: 'To', value: shownValue(destination) },
             ],
             toolName: copying ? 'copy_messages' : 'move_messages',
           }
@@ -260,7 +280,7 @@ export function registerWriteTools(
             ),
             token: confirm_token,
             toolName: 'delete_messages',
-            details: [{ label: 'Mailbox', value: source }],
+            details: [{ label: 'Mailbox', value: shownValue(source) }],
           }
         );
         if (outcome.decision === 'rejected') {
@@ -334,7 +354,7 @@ export function registerWriteTools(
               resourceKey: `manage_mailbox:delete:${mailbox}`,
               token: confirm_token,
               toolName: 'manage_mailbox',
-              details: [{ label: 'Mailbox', value: mailbox }],
+              details: [{ label: 'Mailbox', value: shownValue(mailbox) }],
             }
           );
           if (outcome.decision === 'rejected') {
@@ -357,8 +377,8 @@ export function registerWriteTools(
                 consequence:
                   'Clients that cached the old path will have to resynchronise.',
                 details: [
-                  { label: 'Mailbox', value: mailbox },
-                  { label: 'New name', value: new_name ?? '' },
+                  { label: 'Mailbox', value: shownValue(mailbox) },
+                  { label: 'New name', value: shownValue(new_name ?? '') },
                 ],
                 toolName: 'manage_mailbox',
               })

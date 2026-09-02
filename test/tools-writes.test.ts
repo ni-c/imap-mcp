@@ -263,6 +263,26 @@ describe('move_messages', () => {
     expect(text).not.toContain(`to "${evil}"`);
     await harness.close();
   });
+
+  it('spells out a destination that is not the folder it looks like', async () => {
+    // The labelled line answers a name that reads like an instruction. It does
+    // nothing about a name that reads like a *different name*: "Archive" and
+    // "Archive<U+200B>" are the same pixels, so the dialog asked about the folder
+    // the person recognises and the move went somewhere else. The gate worked
+    // and prevented nothing.
+    const harness = await connect({ config: writeConfig });
+    const evil = 'Archive\u200b\u202e';
+    const first = await call(harness.client, 'move_messages', {
+      uids: [2],
+      destination: evil,
+    });
+    const text = textOf(first);
+    // Not shown as it was written, because as written it is indistinguishable
+    // from the real Archive.
+    expect(text).not.toContain(evil);
+    expect(text).toContain('  To: Archive — as written: Archive\\u200b\\u202e');
+    await harness.close();
+  });
 });
 
 describe('delete_messages', () => {
