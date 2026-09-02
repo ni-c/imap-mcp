@@ -40,16 +40,58 @@ describe('htmlToText', () => {
     );
   });
 
-  it('stays fast on crafted HTML full of unclosed tags', () => {
-    // Unbounded scans for a closing tag that never comes are quadratic; the
-    // bounded windows keep this pathological 1 MB input in linear territory.
-    const hostile =
-      '<div style="display:none">'.repeat(20_000) +
-      '<script>'.repeat(20_000) +
-      'tail';
+  // Everything below stays under the 512 000-character input cap on purpose.
+  // The test this replaces built a 680 014-character payload, which meant the
+  // slice at the top of htmlToText threw away the half that was supposed to be
+  // hostile: it measured 238 ms and passed a 5 000 ms budget while the function
+  // took 33 seconds on a legal mail.
+  const HOSTILE = {
+    // A start token that opens a scan for `</style>` and never closes it. 73 000
+    // of them are 511 001 legal bytes and, before the walk was linear, 33
+    // seconds of a single-threaded server that speaks over stdio.
+    'unclosed non-content tags': '<style '.repeat(73_000),
+    // Same shape one level down: nothing in the document is `-->`.
+    'unterminated comments': '<!--'.repeat(127_000),
+    'comments wrapping non-content tags': '<!--<style '.repeat(46_000),
+    // No `>` anywhere, so every `<` used to start an attribute scan of its own.
+    // Not the shape the removal windows were written for, and the most
+    // expensive of the four before the rewrite.
+    'tags that never end': '<a '.repeat(170_000),
+    // Elements that ask to be removed, in a document that contains no closing
+    // tag at all — so every one of them sends its search to the end of the
+    // input. This is the shape the scan budget bounds rather than the forward
+    // cursors: without the budget the walk itself takes twelve seconds on it.
+    'elements with no closing tag anywhere': '<style>'.repeat(73_000),
+  };
+
+  it.each(Object.entries(HOSTILE))('stays linear on %s', (_name, hostile) => {
+    expect(hostile.length).toBeLessThan(512_000);
     const start = performance.now();
     htmlToText(hostile);
-    expect(performance.now() - start).toBeLessThan(5_000);
+    // Two orders of magnitude below what the regex chain took on these, and
+    // still loose enough for a busy CI runner.
+    expect(performance.now() - start).toBeLessThan(1_000);
+  });
+
+  it('still reads the visible text out of a message built to stall it', () => {
+    // The point of the budget: what it gives up is stripping, never answering.
+    const text = htmlToText(
+      `${HOSTILE['elements with no closing tag anywhere']}<p>Invoice attached</p>`
+    );
+    expect(text).toContain('Invoice attached');
+  });
+
+  it('treats an unterminated comment as text rather than swallowing the rest', () => {
+    // `<!--` with no `-->` is not a comment, and dropping everything after it
+    // would let one four-character token hide the whole message from the reader.
+    expect(htmlToText('<p>Visible</p><!-- unterminated')).toContain('Visible');
+    expect(htmlToText('<p>Visible</p><!-- unterminated')).toContain(
+      'unterminated'
+    );
+  });
+
+  it('keeps text that follows a tag which is never closed', () => {
+    expect(htmlToText('<p>before</p><a href="x">after')).toContain('after');
   });
 });
 
