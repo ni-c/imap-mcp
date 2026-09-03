@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      last in the file so the link definitions come along. -->
 <!-- #region changelog -->
 
-## [Unreleased]
+## [0.3.0] - 2026-09-03
 
 ### Added
 
@@ -57,8 +57,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The two-call `confirm_token` prompt is an error result, for the same reason.
   The text is unchanged and still carries the token.
-
-### Changed
 
 - A `confirm_token` that does not match its arguments is **refused with the
   reason** instead of being answered with a fresh prompt. The binding is
@@ -380,6 +378,7 @@ package page for the first time — including the parts that changed weeks ago.
 - Every change to the mailbox is logged to stderr with UIDs and folder, never
   subjects.
 
+[0.3.0]: https://github.com/ni-c/imap-mcp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/ni-c/imap-mcp/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ni-c/imap-mcp/releases/tag/v0.1.0
 
