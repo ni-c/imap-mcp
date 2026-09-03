@@ -51,7 +51,12 @@ import {
   type ImapConnection,
   type MailboxSummary,
 } from '../imap.js';
-import { renderMessage, summarize, threadIdsOf } from '../message.js';
+import {
+  renderMessage,
+  summarize,
+  threadIdsOf,
+  type MessageSummary,
+} from '../message.js';
 
 /** Upper bound on the raw message pulled for a single `get_message`. */
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
@@ -107,12 +112,28 @@ export function registerReadTools(
         mailbox: z.string().describe('The default this server selects.'),
         capabilities: z.array(z.string()),
         permanent_flags: z.array(z.string()),
-        new_mail_tracking: z.looseObject({ enabled: z.boolean() }),
+        // Described in full rather than left open: both shapes below are
+        // this server's own words about its own configuration.
+        new_mail_tracking: z.object({
+          enabled: z.boolean(),
+          reason: z.string().optional().describe('Only when it is off.'),
+          keyword: z.string().optional(),
+          storable: z.boolean().optional(),
+        }),
         write_tools_enabled: z.boolean(),
         can_send_mail: z
           .literal(false)
           .describe('This server cannot send mail at all, by design.'),
-        attachment_downloads: z.looseObject({ as_resource: z.boolean() }),
+        attachment_downloads: z.object({
+          as_resource: z.boolean(),
+          to_disk: z.boolean(),
+          reason: z
+            .string()
+            .optional()
+            .describe('Only when saving to disk is off.'),
+          directory: z.string().optional(),
+          max_bytes: z.number().int().optional(),
+        }),
         limits: z.object({
           default_message_limit: z.number().int(),
           max_inline_attachment_bytes: z.number().int(),
@@ -442,7 +463,7 @@ export function registerReadTools(
           .describe('Verdicts this server computed, not the sender.'),
         attachments: z.array(attachmentEntry),
         thread: z
-          .array(z.unknown())
+          .array(messageSummary)
           .optional()
           .describe('Only with include_thread.'),
         body: z
@@ -607,7 +628,11 @@ export function registerReadTools(
         uid: z.number().int(),
         mailbox: z.string().optional(),
         note: z.string().optional(),
-        download_directory: z.string().nullable().optional(),
+        download_directory: z
+          .string()
+          .describe('Where a saved attachment lands.')
+          .nullable()
+          .optional(),
         attachments: z
           .array(attachmentEntry)
           .optional()
@@ -617,9 +642,9 @@ export function registerReadTools(
         content_type: z.string().optional(),
         detected_type: z
           .string()
+          .describe('What the bytes actually are, whatever was declared.')
           .nullable()
-          .optional()
-          .describe('What the bytes actually are, whatever was declared.'),
+          .optional(),
         path: z.string().optional().describe('Only on "saved".'),
         bytes: z.number().int().optional(),
         encoding: z
@@ -814,7 +839,7 @@ async function threadSummaries(
   rendered: {
     metadata: { messageId: string | undefined; references: string[] };
   }
-): Promise<unknown[]> {
+): Promise<MessageSummary[]> {
   // The whole chain, not just this message's own id: a reply three levels down
   // references its ancestors, and searching only for the current id finds the
   // direct answers to it and nothing else.

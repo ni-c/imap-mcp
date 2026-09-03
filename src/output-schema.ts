@@ -76,9 +76,11 @@ export const mailboxEntry = z.object({
 });
 
 /** One attachment, as `publicAttachment` projects it. */
-export const attachmentEntry = z.looseObject({
-  part_id: z.string().optional(),
-  filename: z.string().optional(),
-  content_type: z.string().optional(),
-  size: z.number().optional(),
-});
+export const attachmentEntry = z
+  .looseObject({
+    part_id: z.string().optional(),
+    filename: z.string().optional(),
+    content_type: z.string().optional(),
+    size: z.number().optional(),
+  })
+  .meta({ additionalProperties: true });
