@@ -167,7 +167,10 @@ describe('move_messages', () => {
       destination: 'Archive',
       confirm_token: tokenOf(first),
     });
-    expect(textOf(result)).toContain('confirm_token');
+    // Refused with the reason rather than answered with a fresh prompt: the
+    // token was issued for different arguments, which is what the key binds
+    // against, and a new prompt would say nothing about that.
+    expect(textOf(result)).toContain('invalid, expired');
     expect(
       harness.imap.calls.some((entry) => entry.name === 'messageMove')
     ).toBe(false);
@@ -185,7 +188,10 @@ describe('move_messages', () => {
       destination: 'Trash',
       confirm_token: tokenOf(first),
     });
-    expect(textOf(result)).toContain('confirm_token');
+    // Refused with the reason rather than answered with a fresh prompt: the
+    // token was issued for different arguments, which is what the key binds
+    // against, and a new prompt would say nothing about that.
+    expect(textOf(result)).toContain('invalid, expired');
     await harness.close();
   });
 
@@ -227,7 +233,10 @@ describe('move_messages', () => {
       mode: 'copy',
       confirm_token: tokenOf(first),
     });
-    expect(textOf(result)).toContain('confirm_token');
+    // Refused with the reason rather than answered with a fresh prompt: the
+    // token was issued for different arguments, which is what the key binds
+    // against, and a new prompt would say nothing about that.
+    expect(textOf(result)).toContain('invalid, expired');
     expect(
       harness.imap.calls.some((entry) => entry.name === 'messageCopy')
     ).toBe(false);
@@ -252,6 +261,26 @@ describe('move_messages', () => {
     // The name appears only on its own labelled line, never inside the
     // server's own sentence.
     expect(text).not.toContain(`to "${evil}"`);
+    await harness.close();
+  });
+
+  it('spells out a destination that is not the folder it looks like', async () => {
+    // The labelled line answers a name that reads like an instruction. It does
+    // nothing about a name that reads like a *different name*: "Archive" and
+    // "Archive<U+200B>" are the same pixels, so the dialog asked about the folder
+    // the person recognises and the move went somewhere else. The gate worked
+    // and prevented nothing.
+    const harness = await connect({ config: writeConfig });
+    const evil = 'Archive\u200b\u202e';
+    const first = await call(harness.client, 'move_messages', {
+      uids: [2],
+      destination: evil,
+    });
+    const text = textOf(first);
+    // Not shown as it was written, because as written it is indistinguishable
+    // from the real Archive.
+    expect(text).not.toContain(evil);
+    expect(text).toContain('  To: Archive — as written: Archive\\u200b\\u202e');
     await harness.close();
   });
 });
@@ -290,7 +319,10 @@ describe('delete_messages', () => {
       uids: [3],
       confirm_token: token,
     });
-    expect(textOf(replay)).toContain('confirm_token');
+    // A token that does not match these arguments is refused with the
+    // reason rather than answered with a fresh prompt. The binding is the
+    // same; the wording is the library's, so every server agrees.
+    expect(textOf(replay)).toContain('invalid, expired');
     await harness.close();
   });
 
@@ -302,7 +334,10 @@ describe('delete_messages', () => {
       mailbox: 'Archive',
       confirm_token: tokenOf(first),
     });
-    expect(textOf(result)).toContain('confirm_token');
+    // A token that does not match these arguments is refused with the reason
+    // rather than answered with a fresh prompt. The binding is the same; the
+    // wording is the library's, so every server in the family agrees.
+    expect(textOf(result)).toContain('invalid, expired');
     await harness.close();
   });
 });

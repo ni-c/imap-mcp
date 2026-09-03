@@ -7,6 +7,7 @@
 [![license](https://img.shields.io/npm/l/%40ni-c%2Fimap-mcp)](LICENSE)
 [![container](https://img.shields.io/badge/ghcr.io-ni--c%2Fimap--mcp-blue)](https://github.com/ni-c/imap-mcp/pkgs/container/imap-mcp)
 [![docs](https://img.shields.io/badge/docs-imap--mcp.ni--c.de-informational)](https://imap-mcp.ni-c.de)
+[![HTTP • via mcp-hub](https://img.shields.io/badge/HTTP-via%20mcp--hub-6f42c1)](https://mcp-hub.ni-c.de)
 [![sponsor](https://img.shields.io/badge/sponsor-ni--c-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/ni-c)
 
 A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server for any IMAP
@@ -63,6 +64,11 @@ dropped on a best-effort basis (the fencing, not the stripping, is what carries 
 markdown image syntax — inline and reference style — is defused so a rendering client cannot be
 made to fetch a tracking URL.
 
+That covers folder names too, and it did not always: a folder name is chosen by whoever created
+the folder, which on a shared mailbox is not necessarily you. `list_mailboxes` returns the name
+twice — `path` exactly as the server spelled it, because that is the handle every other tool
+takes, and `display_name` cleaned up for reading, with a warning on the entry when the two differ.
+
 Alongside the message you get a server-side assessment: the SPF/DKIM/DMARC verdicts with the
 authserv-id they came from, which prompt-injection shapes matched, and which words mix Latin
 with Cyrillic or Greek letters. When something matches, the warning is the first thing in the
@@ -79,9 +85,11 @@ is reported as what it is: a claim, from a header anyone could have written.
 IMAP keyword (`AiSeen` by default), so `list_new_messages` returns each message once. The human
 `\Seen` state is never touched — everything is read with `BODY.PEEK`.
 
-**Deleting asks a person.** Where the client supports MCP elicitation, `delete_messages` and
-deleting a folder raise a real dialog that the model cannot answer on its behalf. Where it does
-not, they fall back to a two-call token — and say so, rather than implying somebody approved.
+**Deleting and moving ask a person.** Where the client supports MCP elicitation, `delete_messages`,
+`move_messages` and deleting a folder raise a real dialog that the model cannot answer on its
+behalf. Where it does not, they fall back to a two-call token — and say so, rather than implying
+somebody approved. `ELICITATION=false` takes that fallback deliberately; it never removes the
+guard. See [Asking a person](https://imap-mcp.ni-c.de/guide/approval).
 
 ## Requirements
 
@@ -91,26 +99,27 @@ not, they fall back to a two-call token — and say so, rather than implying som
 
 ## Configuration
 
-| Variable                    | Required | Default       | Description                                          |
-| --------------------------- | -------- | ------------- | ---------------------------------------------------- |
-| `IMAP_HOST`                 | yes      | —             | Hostname of the IMAP server, e.g. `imap.example.net` |
-| `IMAP_USER`                 | yes      | —             | Account username, usually the address                |
-| `IMAP_PASSWORD`             | yes      | —             | Password or app-specific password                    |
-| `IMAP_PORT`                 | no       | `993` / `143` | Defaults by TLS mode                                 |
-| `IMAP_TLS`                  | no       | `implicit`    | `implicit`, `starttls` or `none`                     |
-| `IMAP_MAILBOX`              | no       | `INBOX`       | Mailbox the message tools default to                 |
-| `IMAP_READ_ONLY`            | no       | **`true`**    | Exactly `false` registers the five mailbox tools     |
-| `IMAP_ALLOW_TOOLS`          | no       | —             | Tool names, `list_*` prefixes or `essential`         |
-| `IMAP_DENY_TOOLS`           | no       | —             | Same syntax; subtracted from the allow list          |
-| `IMAP_SEEN_KEYWORD`         | no       | `AiSeen`      | Keyword for new-mail tracking; empty turns it off    |
-| `IMAP_TRUSTED_AUTHSERV_ID`  | no       | —             | The authserv-id your provider stamps; see below      |
-| `IMAP_DRAFTS_MAILBOX`       | no       | auto          | Overrides the folder found via the `\Drafts` flag    |
-| `IMAP_MAX_MESSAGES`         | no       | `100`         | Default page size                                    |
-| `IMAP_MAX_ATTACHMENT_BYTES` | no       | `1048576`     | Ceiling for returning an attachment inline           |
-| `IMAP_MAX_DOWNLOAD_BYTES`   | no       | `26214400`    | Ceiling for writing one to disk                      |
-| `IMAP_ATTACHMENT_TYPES`     | no       | see below     | Comma-separated content-type allowlist               |
-| `IMAP_DOWNLOAD_DIR`         | no       | —             | Setting it allows saving attachments there           |
-| `IMAP_INSECURE_TLS`         | no       | `false`       | Exactly `true` accepts a self-signed certificate     |
+| Variable                    | Required | Default       | Description                                                  |
+| --------------------------- | -------- | ------------- | ------------------------------------------------------------ |
+| `IMAP_HOST`                 | yes      | —             | Hostname of the IMAP server, e.g. `imap.example.net`         |
+| `IMAP_USER`                 | yes      | —             | Account username, usually the address                        |
+| `IMAP_PASSWORD`             | yes      | —             | Password or app-specific password                            |
+| `IMAP_PORT`                 | no       | `993` / `143` | Defaults by TLS mode                                         |
+| `IMAP_TLS`                  | no       | `implicit`    | `implicit`, `starttls` or `none`                             |
+| `IMAP_MAILBOX`              | no       | `INBOX`       | Mailbox the message tools default to                         |
+| `IMAP_READ_ONLY`            | no       | **`true`**    | Exactly `false` registers the five mailbox tools             |
+| `IMAP_ALLOW_TOOLS`          | no       | —             | Tool names, `list_*` prefixes or `essential`                 |
+| `IMAP_DENY_TOOLS`           | no       | —             | Same syntax; subtracted from the allow list                  |
+| `IMAP_SEEN_KEYWORD`         | no       | `AiSeen`      | Keyword for new-mail tracking; empty turns it off            |
+| `IMAP_TRUSTED_AUTHSERV_ID`  | no       | —             | The authserv-id your provider stamps; see below              |
+| `IMAP_DRAFTS_MAILBOX`       | no       | auto          | Overrides the folder found via the `\Drafts` flag            |
+| `IMAP_MAX_MESSAGES`         | no       | `100`         | Default page size                                            |
+| `IMAP_MAX_ATTACHMENT_BYTES` | no       | `1048576`     | Ceiling for returning an attachment inline                   |
+| `IMAP_MAX_DOWNLOAD_BYTES`   | no       | `26214400`    | Ceiling for writing one to disk                              |
+| `IMAP_ATTACHMENT_TYPES`     | no       | see below     | Comma-separated content-type allowlist                       |
+| `IMAP_DOWNLOAD_DIR`         | no       | —             | Setting it allows saving attachments there                   |
+| `IMAP_INSECURE_TLS`         | no       | `false`       | Exactly `true` accepts a self-signed certificate             |
+| `ELICITATION`               | no       | `true`        | `false` replaces the dialog with the token. **Not prefixed** |
 
 Booleans are compared against the literal string `true`; `1`, `yes` and `True` are not true.
 `IMAP_READ_ONLY` is the mirror image: only the literal `false` turns it off, so a typo leaves
@@ -204,6 +213,41 @@ bind mount has to be owned by it on the host: `-e IMAP_DOWNLOAD_DIR=/data -v
 "$PWD/attachments:/data"` with `chown 1000:1000 attachments`. Without
 `IMAP_DOWNLOAD_DIR` the container never writes anything.
 
+### Through mcp-hub
+
+A client that cannot spawn a local process — ChatGPT connectors, Claude on the web,
+Cursor, LibreChat — reaches imap-mcp through [mcp-hub](https://mcp-hub.ni-c.de): one
+container serves many stdio MCP servers over Streamable HTTP, with an OAuth 2.1 login
+behind a single password and long-lived tokens for the clients that cannot do OAuth. Its
+`/hub` endpoint puts every server behind six meta-tools, so one connector reaches all of
+them without N×tool schemas in the model's context, and it speaks both protocol revisions
+— a question this server asks travels through it to the person at the far end.
+
+Its `/config/mcp.json` uses Claude Code's format, so the entry is the one you already
+have:
+
+```json
+{
+  "mcpServers": {
+    "imap-mcp": {
+      "command": "npx",
+      "args": ["-y", "@ni-c/imap-mcp"],
+      "env": {
+        "IMAP_HOST": "imap.example.net",
+        "IMAP_USER": "me@example.net",
+        "IMAP_PASSWORD": "…",
+        "IMAP_ALLOW_TOOLS": "essential"
+      },
+      "denyTools": ["delete_messages"]
+    }
+  }
+}
+```
+
+`allowTools` and `denyTools` there are the hub's **own** per-server filter, which is not
+the same thing as `*_ALLOW_TOOLS` in `env` — the difference, and the mistake it invites,
+are in the [client guide](https://imap-mcp.ni-c.de/guide/clients#through-mcp-hub).
+
 ## Tools
 
 **Read** — always registered
@@ -219,13 +263,13 @@ bind mount has to be owned by it on the host: `-e IMAP_DOWNLOAD_DIR=/data -v
 
 **Mailbox** — needs `IMAP_READ_ONLY=false`
 
-| Tool                | Confirmation                                           |
-| ------------------- | ------------------------------------------------------ |
-| `set_message_flags` | none — flags are reversible, and `\Deleted` is refused |
-| `move_messages`     | 🔒 for both `move` and `copy`                          |
-| `delete_messages`   | 👤 asks the user, 🔒 where the client cannot           |
-| `manage_mailbox`    | 👤 for `delete`, 🔒 for `rename`, none for `create`    |
-| `save_draft`        | none — a draft does not leave the mailbox              |
+| Tool                | Confirmation                                              |
+| ------------------- | --------------------------------------------------------- |
+| `set_message_flags` | none — flags are reversible, and `\Deleted` is refused    |
+| `move_messages`     | 👤 for both `move` and `copy`, 🔒 where the client cannot |
+| `delete_messages`   | 👤 asks the user, 🔒 where the client cannot              |
+| `manage_mailbox`    | 👤 for `delete`, 🔒 for `rename`, none for `create`       |
+| `save_draft`        | none — a draft does not leave the mailbox                 |
 
 👤 raises a dialog the model cannot answer · 🔒 needs a confirmation token: call once to
 receive one, then again with it.
@@ -239,6 +283,41 @@ it. Use `delete_messages`, which asks.
 
 Neither a confirmation nor a dialog quotes a mailbox name inside its own sentence — folder
 names come from the account, which on a shared mailbox means a colleague chose them.
+
+### Structured output
+
+Every tool declares an `outputSchema` and answers with `structuredContent`
+alongside the text block, so a client can use the result without parsing prose:
+
+```jsonc
+{
+  "untrusted": true,
+  "source": "imap",
+  "mailbox": "INBOX",
+  "total_matching": 214,
+  "offset": 0,
+  "returned": 25,
+  "next_offset": 25,
+  "messages": [{ "uid": 4711, "subject": "…", "from": "…", "seen": false }],
+}
+```
+
+Every tool that reports anything out of the mailbox carries `untrusted: true`
+and `source: "imap"` as fields — a sender display name, a folder name a
+colleague chose and an attachment filename are all attacker-controllable, and
+they reach the model through the listing tools long before anyone opens a
+message. Only `get_server_info` and the five write tools are without it: those
+report this server's own configuration, or what it just did with the uids it was
+given.
+
+`get_message` and a text attachment keep the per-call nonce fence in the text
+block — the structured half states the same fields, so a client is not made to
+parse the fence to find them. An image attachment keeps its bytes in the content
+block, where a client renders them, rather than repeating the base64.
+
+A refusal is now an **error result**: an attachment the policy rejects, one whose
+bytes are an executable whatever it claimed, one too large to inline. Each was a
+plain result that read like an answer.
 
 Attachments are also available as MCP resources at `imap://message/{uid}/part/{partId}`, which
 matters where the server has no useful filesystem. The resource path runs the same allowlist,
@@ -282,6 +361,11 @@ knowing before concluding that a filtered install reaches less of the mailbox th
 `SECURITY.md` has the trust model, what these measures do _not_ cover, and how to report a
 vulnerability.
 
+## Documentation
+
+The full guide, tool reference and security notes live at
+**[imap-mcp.ni-c.de](https://imap-mcp.ni-c.de)** (source in [`docs/`](docs/)).
+
 ## Development
 
 ```bash
@@ -303,6 +387,13 @@ network. For a live server to point the real thing at, see
 The release workflow publishes to npm (Trusted Publishing, with provenance), creates
 the GitHub release from the CHANGELOG section and updates the MCP Registry entry.
 
+## Contributing
+
+Issues, discussions and pull requests are welcome — see
+[CONTRIBUTING.md](CONTRIBUTING.md). For vulnerabilities please use
+[private reporting](https://github.com/ni-c/imap-mcp/security/advisories/new)
+rather than a public issue; the policy is in [SECURITY.md](SECURITY.md).
+
 ## License
 
-MIT © Willi Thiel
+[MIT](LICENSE) © Willi Thiel

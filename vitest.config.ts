@@ -1,7 +1,12 @@
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
+    // The integration suite has its own config and its own command, because it
+    // needs a GreenMail in Docker. Excluding it here keeps `npm test` runnable
+    // with nothing installed, and keeps the coverage numbers below comparable
+    // to what they measured before it existed.
+    exclude: [...configDefaults.exclude, 'test/integration/**'],
     coverage: {
       provider: 'v8',
       include: ['src/**'],

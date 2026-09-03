@@ -11,21 +11,54 @@ npm test          # 400+ tests against an in-memory IMAP fake, no network
 npm run build
 ```
 
-A minimal dev environment — a throwaway IMAP server you can safely write to:
+## Running the integration suite
+
+The unit tests drive an in-memory fake, so they establish that this server
+handles the IMAP responses its author expected. The integration suite spawns
+the built server over stdio against a throwaway
+[GreenMail](https://greenmail-mail-test.github.io/greenmail/) and calls **every
+tool in the catalogue** — so what the read tools parse is an actual RFC 5322
+message with actual MIME parts, and the write tools talk to a server with its
+own opinions about flags, expunging and mailbox names.
 
 ```sh
-docker run --rm -p 3143:3143 -p 3025:3025 \
-  -e GREENMAIL_OPTS='-Dgreenmail.setup.test.all -Dgreenmail.users=demo:demo@example.net -Dgreenmail.verbose' \
-  greenmail/standalone:latest
-
-IMAP_HOST=127.0.0.1 IMAP_PORT=3143 IMAP_TLS=none \
-IMAP_USER=demo IMAP_PASSWORD=demo \
-npx @modelcontextprotocol/inspector node dist/index.js
+npm run build     # the suite runs dist/index.js, not src/
+docker compose -f test/integration/compose.yml up -d
+npm run test:integration
+docker compose -f test/integration/compose.yml down
 ```
+
+`down` rather than `down -v`: GreenMail keeps everything in memory and has no
+volume, so stopping the container is the whole reset. That is also why the
+suite needs a fresh one — it deletes and expunges.
+
+Three things about GreenMail that are not obvious and each cost a session:
+
+- **`-Dgreenmail.hostname=0.0.0.0` is required.** By default every listener
+  binds `127.0.0.1` _inside the container_, so the published port reaches
+  nothing and every tool eventually fails with "Unexpected close" after a
+  connection timeout — which reads like a bug in the IMAP client. Binding
+  `0.0.0.0` inside a container namespace is not exposure; the `ports` list is
+  what decides who can reach it, and it says `127.0.0.1`.
+- **There is no seeding and no import.** The only way to put a message into
+  GreenMail is to deliver one over SMTP, which is why the compose file
+  publishes 3025 as well and why `bootstrap.ts` speaks a short SMTP dialogue.
+  It is also the better fixture: the messages arrived the way real ones do.
+- **The account is created at startup by `-Dgreenmail.users` and cannot be
+  added afterwards**, so the credentials live in `compose.yml`.
 
 Never point a development run at a mailbox you care about. `IMAP_READ_ONLY`
 defaults to `true`, but the whole point of testing the write tools is turning
-that off.
+that off — and the harness refuses any backend that is not on this machine.
+
+For poking at one tool by hand, the inspector against the same stack:
+
+```sh
+docker compose -f test/integration/compose.yml up -d
+IMAP_HOST=127.0.0.1 IMAP_PORT=3143 IMAP_TLS=none \
+IMAP_USER=integration IMAP_PASSWORD=integration-not-a-secret \
+npx @modelcontextprotocol/inspector node dist/index.js
+```
 
 ## Expectations
 
@@ -45,7 +78,7 @@ that off.
   model treats as instruction — a confirmation prompt, an error message — is a bug.
 - **No new runtime dependencies** without a very good reason; the small tree is a
   feature.
-- Run `npm run lint` before pushing — it checks both eslint and prettier, and prettier
+- Run `npm run lint` before pushing — it checks both oxlint and prettier, and prettier
   also validates the YAML, JSON and Markdown files.
 
 ## Questions and bugs

@@ -37,13 +37,24 @@ registered at all in that state — a model cannot ask for a tool it cannot see.
 tool is never registered either, so it is absent from `tools/list` and unknown to
 `tools/call` alike. It covers **tools**; the attachment resources are not filtered.
 
-## Confirmation tokens
+## The confirmation, honestly
 
-Deleting messages is refused on the first call and answered with a short-lived,
-single-use token bound to the exact target. A model cannot mint one — it only ever
-exists in a previous result from this server — so an instruction hidden in a
-message cannot satisfy the gate. Where the client supports elicitation, the user is
-asked directly instead.
+Deleting messages, moving or copying them, and deleting a folder **ask a person**
+through MCP elicitation — a dialog the model cannot answer on its behalf, and
+which nothing proceeds without.
+
+Where the client cannot show one, they are refused on the first call and answered
+with a short-lived, single-use token bound to the exact target. A model cannot
+mint one — it only ever exists in a previous result from this server — so an
+instruction hidden in a message cannot satisfy the gate. But it proves the call
+was made twice with the same arguments and nothing more, and the fallback text
+says so rather than implying somebody approved.
+
+`ELICITATION=false` moves a capable client onto that fallback deliberately, for a
+scheduled job or a test harness. It does not remove the guard, and the server
+prints one line at startup saying it is off.
+
+See [Asking a person](/guide/approval).
 
 ## Attachments
 

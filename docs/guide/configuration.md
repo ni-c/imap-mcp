@@ -52,6 +52,18 @@ protection is in force when it is not.
      Put it directly after the read-only section — they are the same knob family,
      and that adjacency does half the explaining. -->
 
+## Turning the approval dialog off
+
+`delete_messages`, `move_messages` and deleting a folder ask a person through MCP
+elicitation before they act. `ELICITATION=false` takes them to the two-call token
+instead. It does not remove the guard; there is no setting in which a guarded
+call goes unannounced.
+
+The variable deliberately carries no `IMAP_` prefix, which means it reaches every
+MCP server in the same environment, and — like `IMAP_TLS`, unlike
+`IMAP_READ_ONLY` — a value it does not recognise **stops the server**. See
+[Asking a person](/guide/approval).
+
 ## Choosing the tools that load
 
 Read-only mode is one cut, along a line this server drew for you — and by default

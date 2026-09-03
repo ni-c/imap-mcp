@@ -62,11 +62,40 @@ directional-override characters removed, and markdown image syntax — inline, r
 shortcut style — defused so a rendering client cannot be induced to fetch a URL carrying data
 in its query string.
 
-The hidden-HTML pass is best effort, deliberately so. It is regex-based with bounded scan
-windows (an unbounded scan over crafted HTML is a CPU-exhaustion primitive), which means an
-element hidden inside a nested same-name tag, hidden via a stylesheet class, or larger than the
-window survives it. That is acceptable because nothing downstream trusts the stripping: whatever
-gets through still arrives inside the fence, marked line by line as untrusted.
+The hidden-HTML pass is best effort, deliberately so. An element hidden inside a nested same-name
+tag, hidden via a stylesheet class, or larger than the removal window survives it. That is
+acceptable because nothing downstream trusts the stripping: whatever gets through still arrives
+inside the fence, marked line by line as untrusted.
+
+It is also a **single forward pass**, and that part is not a matter of taste. This section used to
+claim the pass was safe because its scan windows were bounded. They were, and it wasn't: bounding
+how far one removal may scan bounds one factor of a product whose other factor is how many
+removals an input can start. A body of `'<style '` repeated 73 000 times is 512 000 legal bytes
+that start 73 000 bounded scans and finish none of them, and the regex chain that used to sit here
+took **33 seconds** on it — on a single-threaded process whose transport is stdio, so the whole
+server, not just that call. The command timeout could not help: it wraps IMAP commands, not
+parsing, and a `setTimeout` cannot fire on a blocked event loop. Reachable with one ordinary mail
+that has a `text/html` part and no `text/plain` one, and again through a `text/html` attachment.
+The pass now walks the input once with cursors that never rewind, plus one global budget for the
+searches that look for a closing tag, so the number of start tokens no longer multiplies anything.
+The same input is now under 20 ms.
+
+**Folder names are mailbox content too.** On a shared account, a public namespace or any mailbox
+somebody else can create a folder in, the name is chosen by whoever created it — and it reaches the
+model through `list_mailboxes` long before anyone opens a message. It used to reach it raw: not
+`sanitizeText`, not `sanitizeFilename`, nothing. So `list_mailboxes` now returns two strings per
+folder. `path` is verbatim, because it is the argument every other tool takes and a cleaned-up copy
+would name a folder the server does not have; `display_name` is the copy that is safe to read and
+to quote, and where the two differ the entry says so and spells out the difference. The mailbox
+parameter refuses C0/C1 control characters outright. It does not refuse zero-width or
+directional-override characters: a folder with those in its name exists, and a parameter that
+rejected it would leave it unreadable and undeletable through this server.
+
+**Results have a stated size and now keep to it.** `MAX_RESULT_BYTES` used to be enforced only where
+a result was JSON. Everything else grows on the way out — defusing an image rewrites four characters
+into forty-four, the per-line datamarks add ten characters a line, and a thread listing carries up
+to fifty subjects and address lists the senders chose. `get_message(include_thread: true)` came to
+570 000 characters against a stated 200 000. The check now runs on the assembled text.
 
 The SPF/DKIM/DMARC verdicts are read from the topmost `Authentication-Results` header only —
 a receiving server that adds one prepends it — and come with the authserv-id and a `forgeable`
@@ -87,7 +116,8 @@ wall.
 
 ## Confirmation
 
-Deleting messages and deleting a folder ask the person at the keyboard, using MCP elicitation.
+Deleting messages, moving or copying them, and deleting a folder ask the person at the
+keyboard, using MCP elicitation.
 That matters because the older mechanism — returning a token the caller must send back — is
 **not** a human-in-the-loop gate: the token appears in a tool result, so the model reads it and
 can call again in the same turn without anyone seeing anything. It still prevents a target set
@@ -99,9 +129,43 @@ Tokens are random, single-use, expire after five minutes, and are bound to a SHA
 fingerprint of the sorted target set: a confirmation obtained for one message cannot be
 replayed for a longer list.
 
+`ELICITATION=false` moves a capable client onto that fallback deliberately, for a scheduled
+job or a test harness. It does not remove the guard — there is no setting in which a guarded
+call goes unannounced — and the server prints one line at startup saying it is off.
+
 Confirmation text never quotes a subject, sender or body. That text is read by a human and by a
 model, and putting attacker-chosen prose into it would hand the attacker the last word at
-exactly the wrong moment.
+exactly the wrong moment. A folder name has to appear — it is what the person is deciding about —
+so it appears on its own labelled line, with its invisible characters removed and spelled out
+beside it. `Archive` and `Archive<U+200B>` are the same pixels; a dialog that renders the second
+one verbatim asks about the folder the reader recognises and acts on the one they do not.
+
+### What a confirmation binds
+
+An approval here binds an answer to **this question**, not to **this moment**. The sealed state
+carries the resource key — the operation plus a fingerprint of the exact target set — and the
+library verifies both. It does not carry a nonce that is spent on use, so within its fifteen-minute
+lifetime the same sealed state and the same accepted answer would prove the same thing twice. That
+is binding, not freshness.
+
+On this server the gap is not reachable today, and the reason is worth writing down because it is
+a property of the deployment rather than of the code above:
+
+- `src/index.ts` connects an `McpServer` to a `StdioServerTransport` directly. It does not pass
+  `supportedProtocolVersions`, and the SDK's default list ends at `2025-11-25`. A client that asks
+  for `2026-07-28` is answered `2025-11-25`, and `server/discover` is not registered at all.
+- On `2025-11-25` the question never crosses the wire. The SDK's legacy shim turns the returned
+  `input_required` into the elicitation request it used to be, waits for the reply and resumes
+  **inside the same `tools/call`**. There is no round trip for a caller to repeat, because there is
+  no state handed out.
+- The two-call token — the fallback for clients that cannot show a dialog — is single-use and
+  spent by `consume`, so it has freshness already.
+
+What would have to be built on the day this server speaks the newer revision, and only then: the
+sealed state would need a use-once marker checked and burned server-side, so that a replayed
+`requestState` with a replayed accepted answer is refused rather than honoured. Until the server
+offers `2026-07-28` there is nothing to burn, and a mechanism guarding a path that does not exist
+is a mechanism nobody maintains.
 
 ## Attachments
 
@@ -110,6 +174,14 @@ size ceiling — and then a magic-byte check on the bytes themselves. The second
 that cannot be lied to: a Windows executable renamed `invoice.pdf` and declared
 `application/pdf` clears every other gate and fails there. The same applies when writing to
 disk, where a disguised binary is more dangerous than in a transcript, not less.
+
+The extension refusal is only as long as the extractor that feeds it. `appref-ms` and `application`
+sat in the blocklist while the pattern reading an extension out of a filename accepted neither a
+hyphen nor eleven characters, so both read as no extension at all — which makes the check skip
+rather than fail. A ClickOnce manifest declared `application/xml` is valid XML by every check that
+looks at bytes, so nothing else stopped it. A test now walks the whole blocklist and requires each
+entry to be refused, because two declarations that have to agree do not announce when they stop
+agreeing.
 
 Writing to disk happens only when `IMAP_DOWNLOAD_DIR` is set. The directory comes solely from
 that variable, never from a tool argument; filenames are stripped of separators and directional

@@ -1,17 +1,33 @@
+/**
+ * What this repository still has to prove about its tool filter.
+ *
+ * The filter lives in `mcp-tool-allowlist` and is tested there: pattern syntax,
+ * the preset, how a rejected entry is quoted back, the shape of every message.
+ * Repeating that here would test the dependency.
+ *
+ * What only this repository can assert is the wiring — that the catalogue names
+ * exactly the tools the server registers, that the messages name *these*
+ * variables, and that a filtered tool is really gone rather than merely hidden.
+ */
 import { describe, expect, it, vi } from 'vitest';
-
-import { createServer } from '../src/server.js';
-import { ToolFilterError } from '../src/tool-filter.js';
 import {
   ALL_TOOLS,
   ESSENTIAL_TOOLS,
   READ_TOOLS,
   WRITE_TOOLS,
 } from '../src/tools/catalogue.js';
+
+import { createServer } from '../src/server.js';
+import { ToolFilterError } from 'mcp-tool-allowlist';
 import { connect, testConfig, toolNames } from './harness.js';
 
 /** The tools a server built with this configuration actually offers. */
-async function names(config: Parameters<typeof connect>[0]['config'] = {}) {
+async function names(
+  // `Parameters<typeof connect>[0]` is optional, so indexing it reaches
+  // through `undefined`. `NonNullable` names the object the parameter is
+  // when it is passed, which is the only case this helper has.
+  config: NonNullable<Parameters<typeof connect>[0]>['config'] = {}
+) {
   const harness = await connect({ config });
   const list = await toolNames(harness.client);
   await harness.close();
@@ -99,17 +115,6 @@ describe('selecting tools', () => {
     ).toEqual([...ESSENTIAL_TOOLS, 'delete_messages'].sort());
   });
 
-  it('trims entries, ignores case and skips empty ones', async () => {
-    expect(
-      await names({ allowTools: ' LIST_MAILBOXES ,, get_message, ' })
-    ).toEqual(['get_message', 'list_mailboxes']);
-  });
-
-  it('treats an empty value as no filter at all', async () => {
-    // `IMAP_ALLOW_TOOLS=` in a compose file must not mean "allow nothing".
-    expect(await names({ allowTools: '   ' })).toEqual([...READ_TOOLS].sort());
-  });
-
   it('leaves an unconfigured server untouched', async () => {
     expect(await names()).toEqual([...READ_TOOLS].sort());
   });
@@ -122,15 +127,15 @@ describe('a filtered-out tool', () => {
     const harness = await connect({ config: { allowTools: 'list_mailboxes' } });
     const before = harness.imap.calls.length;
 
-    const result = await harness.client.callTool({
-      name: 'get_message',
-      arguments: { uid: 1 },
-    });
-
-    expect(result.isError).toBe(true);
-    expect(JSON.stringify(result.content)).toContain(
-      'Tool get_message not found'
-    );
+    // SDK v2 reports an unknown tool as a JSON-RPC error rather than as a
+    // result carrying isError. Either way the call fails and nothing reaches
+    // the API, which is what this test is about.
+    await expect(
+      harness.client.callTool({
+        name: 'get_message',
+        arguments: { uid: 1 },
+      })
+    ).rejects.toThrow('Tool get_message not found');
     // Nothing reached the mailbox.
     expect(harness.imap.calls).toHaveLength(before);
     await harness.close();
@@ -146,21 +151,6 @@ describe('refusing an unusable list', () => {
     );
     expect(() => build({ allowTools: 'list_mailboxez' })).toThrow(
       /no tool matches "list_mailboxez".*list_mailboxes/s
-    );
-  });
-
-  it('rejects a pattern that matches nothing', () => {
-    expect(() => build({ allowTools: 'zzz_*' })).toThrow(
-      /no tool matches "zzz_\*"/
-    );
-  });
-
-  it('rejects a pattern with the star anywhere but last', () => {
-    expect(() => build({ allowTools: '*_messages' })).toThrow(
-      /single trailing "\*"/
-    );
-    expect(() => build({ allowTools: 'list_*_x' })).toThrow(
-      /single trailing "\*"/
     );
   });
 
@@ -214,7 +204,7 @@ describe('together with the read-only default', () => {
   it('says read-only is the reason when a pattern leaves nothing at all', () => {
     const warn = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     expect(() => build({ allowTools: 'delete_*' })).toThrow(
-      /only write tools, but IMAP_READ_ONLY is set/
+      /read-only mode suppresses.*IMAP_READ_ONLY is set/s
     );
     warn.mockRestore();
   });

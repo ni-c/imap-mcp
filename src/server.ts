@@ -1,11 +1,12 @@
 import { createRequire } from 'node:module';
+import { McpServer } from '@modelcontextprotocol/server';
+import { buildToolFilter, installToolFilter } from 'mcp-tool-allowlist';
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { ALL_TOOLS, ESSENTIAL_TOOLS, READ_TOOLS } from './tools/catalogue.js';
 
 import type { Config } from './config.js';
-import { ConfirmationStore } from './confirm.js';
+import { ConfirmationStore, createApproval } from 'mcp-approval';
 import { ImapClient, type ImapClientFactory } from './imap.js';
-import { buildToolFilter, installToolFilter } from './tool-filter.js';
 import { registerAttachmentResources } from './resources.js';
 import { registerReadTools } from './tools/read.js';
 import { registerWriteTools } from './tools/write.js';
@@ -39,13 +40,37 @@ export interface ServerDeps {
 export function createServer(config: Config, deps: ServerDeps = {}): McpServer {
   // Before anything is built: an unusable tool list should fail on the way in,
   // not leave a server running with tools quietly missing.
-  const filter = buildToolFilter(config);
+  const filter = buildToolFilter({
+    allowTools: config.allowTools,
+    denyTools: config.denyTools,
+    catalogue: {
+      all: ALL_TOOLS,
+      essential: ESSENTIAL_TOOLS,
+      ungated: READ_TOOLS,
+    },
+    names: {
+      allow: 'IMAP_ALLOW_TOOLS',
+      deny: 'IMAP_DENY_TOOLS',
+      server: 'imap-mcp',
+    },
+    gate: {
+      closed: config.readOnly,
+      variable: 'IMAP_READ_ONLY',
+      noun: 'read-only mode',
+    },
+  });
 
   const client =
     deps.imapFactory === undefined
       ? new ImapClient(config)
       : new ImapClient(config, deps.imapFactory);
   const confirmations = new ConfirmationStore();
+  // One approver per server: it holds the key that seals the request state
+  // carried out through the client and back.
+  const approval = createApproval({
+    server: 'imap-mcp',
+    elicitation: config.elicitation,
+  });
 
   const server = new McpServer(
     {
@@ -76,7 +101,7 @@ export function createServer(config: Config, deps: ServerDeps = {}): McpServer {
   // Rejecting them at call time would still advertise capabilities the server
   // refuses to provide, and a tool the model can see is a tool it will try.
   if (!config.readOnly) {
-    registerWriteTools(server, client, config, confirmations);
+    registerWriteTools(server, client, config, confirmations, approval);
   }
 
   return server;

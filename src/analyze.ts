@@ -111,31 +111,91 @@ export interface SecurityAssessment {
 }
 
 /**
- * Cap on the HTML handed to the removal regexes, and on the span a single one
- * of them may swallow. Both exist for the same reason: an unbounded `[\s\S]*?`
- * scanning for a closing tag that never comes is quadratic, and a crafted
- * 2 MB body full of unclosed tags turns that into minutes of CPU. Bounding the
- * scan makes the worst case a nuisance instead of a hang, at the cost that a
- * hidden element larger than the bound is no longer removed — which is why
- * this pass is best effort and the fencing in {@link wrapUntrusted} is what
- * actually carries the weight.
+ * Cap on the HTML this pass looks at, and on the span a single element may
+ * swallow.
+ *
+ * Neither of these is what keeps the pass cheap, and the previous version of
+ * this comment claimed otherwise. Removing an element means scanning forward
+ * for a closing token, and a bound on *that* scan bounds one factor of a
+ * product whose other factor is the number of scans an input can start. A body
+ * of `'<style '` repeated 73 000 times is 512 000 legal bytes that start 73 000
+ * bounded scans and finish none of them: the removal regexes this used to be
+ * built from took 33 seconds on it, on a single-threaded process whose
+ * transport is stdio. The scan below is a single left-to-right walk instead, so
+ * the number of start tokens no longer multiplies anything.
  */
 const MAX_HTML_CHARS = 512_000;
 const MAX_REMOVED_BLOCK_CHARS = 50_000;
 const MAX_HIDDEN_ELEMENT_CHARS = 10_000;
 
-const HTML_COMMENT = new RegExp(
-  `<!--[\\s\\S]{0,${MAX_REMOVED_BLOCK_CHARS}}?-->`,
-  'g'
-);
-const NON_CONTENT_ELEMENT = new RegExp(
-  `<(script|style|head|title|noscript|template)\\b[\\s\\S]{0,${MAX_REMOVED_BLOCK_CHARS}}?<\\/\\1>`,
-  'gi'
-);
-const HIDDEN_ELEMENT = new RegExp(
-  `<([a-z0-9]+)\\b[^>]*style\\s*=\\s*("|')[^"']*(display\\s*:\\s*none|visibility\\s*:\\s*hidden|opacity\\s*:\\s*0|font-size\\s*:\\s*0)[^"']*\\2[^>]*>[\\s\\S]{0,${MAX_HIDDEN_ELEMENT_CHARS}}?<\\/\\1>`,
-  'gi'
-);
+/**
+ * Total characters the walk may spend looking for closing tags, across the
+ * whole document.
+ *
+ * This is the cap on the product. Each successful removal costs the length of
+ * what it removed, and removals do not overlap, so an honest document never
+ * comes close; only an input that starts removals it never closes can exhaust
+ * it. Once it is gone the remaining elements are stripped as ordinary tags and
+ * their content stays visible — best effort degrading to less effort, never to
+ * a stalled server.
+ */
+const CLOSER_SCAN_BUDGET_FACTOR = 4;
+const CLOSER_SCAN_BUDGET_FLOOR = 100_000;
+
+/** Elements whose content the recipient never reads. */
+const NON_CONTENT_TAGS = new Set([
+  'script',
+  'style',
+  'head',
+  'title',
+  'noscript',
+  'template',
+]);
+
+/** Closing tags that end a visual block, and so earn a line break. */
+const BLOCK_TAGS = new Set([
+  'p',
+  'div',
+  'tr',
+  'li',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+]);
+
+const TAG_NAME = /^<\/?([A-Za-z][A-Za-z0-9]*)/;
+const BR_TAG = /^<br\s*\/?$/i;
+const STYLE_ATTRIBUTE = /style\s*=\s*("|')/gi;
+const HIDDEN_VALUE =
+  /display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0|font-size\s*:\s*0/i;
+
+/**
+ * Whether a start tag carries an inline style that hides it.
+ *
+ * Written as "find the attribute, then look inside its value" rather than as
+ * one pattern spanning both, because the one-pattern form has to guess where
+ * the value ends and backtrack when it guesses wrong. Here each style value is
+ * inspected once and the walk over the tag never turns around.
+ */
+function hasHiddenStyle(tag: string): boolean {
+  STYLE_ATTRIBUTE.lastIndex = 0;
+  for (
+    let match = STYLE_ATTRIBUTE.exec(tag);
+    match !== null;
+    match = STYLE_ATTRIBUTE.exec(tag)
+  ) {
+    const quote = match[1] as string;
+    const start = match.index + match[0].length;
+    const end = tag.indexOf(quote, start);
+    if (end < 0) return false;
+    if (HIDDEN_VALUE.test(tag.slice(start, end))) return true;
+    STYLE_ATTRIBUTE.lastIndex = end;
+  }
+  return false;
+}
 
 /**
  * Extracts readable text from HTML.
@@ -143,25 +203,139 @@ const HIDDEN_ELEMENT = new RegExp(
  * Deliberately not `mailparser`'s own `text` fallback: that keeps content the
  * recipient never sees. Anything hidden by inline CSS is a place to park an
  * instruction meant only for the model, so those elements are dropped before
- * the tags are stripped. Best effort, not a guarantee: nested same-name tags
- * end the non-greedy match early, and elements hidden via a stylesheet class
- * are not recognised at all.
+ * the tags are stripped.
+ *
+ * This is one pass over the input. The cursors below only ever move forward,
+ * which is the property that makes the whole function linear no matter what the
+ * sender writes: a start token that is never closed is answered once and then
+ * never looked for again, instead of restarting a bounded scan at every
+ * occurrence. Removal itself stays best effort — nested same-name tags end a
+ * block early, elements hidden via a stylesheet class are not recognised at
+ * all, and anything past the scan budget is left in place. That is acceptable
+ * for the same reason it always was: nothing downstream trusts the stripping,
+ * and the fencing in {@link wrapUntrusted} is what carries the weight.
  */
 export function htmlToText(html: string): string {
-  return html
-    .slice(0, MAX_HTML_CHARS)
-    .replace(HTML_COMMENT, ' ')
-    .replace(NON_CONTENT_ELEMENT, ' ')
-    .replace(HIDDEN_ELEMENT, ' ')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|tr|li|h[1-6])>/gi, '\n')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&amp;/gi, '&');
+  const source = html.slice(0, MAX_HTML_CHARS);
+  const out: string[] = [];
+
+  // Forward-only cursors. Each call may advance them, never rewind them, so
+  // across the whole document each scans the input at most once — the same
+  // reason a `-->` that does not exist costs one pass rather than one per
+  // `<!--`.
+  let nextGt = source.indexOf('>');
+  let nextCommentEnd = source.indexOf('-->');
+  const gtFrom = (from: number): number => {
+    while (nextGt >= 0 && nextGt < from)
+      nextGt = source.indexOf('>', nextGt + 1);
+    return nextGt;
+  };
+  const commentEndFrom = (from: number): number => {
+    while (nextCommentEnd >= 0 && nextCommentEnd < from) {
+      nextCommentEnd = source.indexOf('-->', nextCommentEnd + 1);
+    }
+    return nextCommentEnd;
+  };
+
+  let budget =
+    source.length * CLOSER_SCAN_BUDGET_FACTOR + CLOSER_SCAN_BUDGET_FLOOR;
+  /** Where `</name>` starts, or -1 when nothing closes this element in time. */
+  const closingTagFrom = (
+    name: string,
+    from: number,
+    window: number
+  ): number => {
+    if (budget <= 0) return -1;
+    const stop = Math.min(source.length, from + window);
+    const needle = `</${name}>`;
+    let at = source.indexOf('</', from);
+    while (at >= 0 && at + needle.length <= stop) {
+      if (source.slice(at, at + needle.length).toLowerCase() === needle) {
+        budget -= at - from;
+        return at;
+      }
+      at = source.indexOf('</', at + 2);
+    }
+    // Charged against how far the search actually looked, not against the
+    // window: a document with no `</` at all sends every one of these to the
+    // end of the input, and a budget that only counted the window would let an
+    // attacker buy those scans at a fiftieth of their price.
+    budget -= (at < 0 ? source.length : Math.min(at, stop)) - from;
+    return -1;
+  };
+
+  let i = 0;
+  while (i < source.length) {
+    const lt = source.indexOf('<', i);
+    if (lt < 0) {
+      out.push(source.slice(i));
+      break;
+    }
+    if (lt > i) out.push(source.slice(i, lt));
+
+    if (source.startsWith('<!--', lt)) {
+      const end = commentEndFrom(lt + 4);
+      if (end >= 0 && end - lt <= MAX_REMOVED_BLOCK_CHARS) {
+        out.push(' ');
+        i = end + 3;
+      } else {
+        // Nothing closes it anywhere ahead, so it is text that looks like
+        // markup rather than markup. Emitting it keeps the reader honest.
+        out.push('<');
+        i = lt + 1;
+      }
+      continue;
+    }
+
+    const gt = gtFrom(lt + 1);
+    if (gt < 0) {
+      // No `>` in the rest of the document: everything from here is text.
+      out.push(source.slice(lt));
+      break;
+    }
+
+    const tag = source.slice(lt, gt);
+    const name = TAG_NAME.exec(tag)?.[1]?.toLowerCase();
+    const closing = tag.startsWith('</');
+
+    if (name !== undefined && !closing) {
+      const window = NON_CONTENT_TAGS.has(name)
+        ? MAX_REMOVED_BLOCK_CHARS
+        : hasHiddenStyle(tag)
+          ? MAX_HIDDEN_ELEMENT_CHARS
+          : 0;
+      if (window > 0) {
+        const end = closingTagFrom(name, gt + 1, window);
+        if (end >= 0) {
+          out.push(' ');
+          i = end + name.length + 3;
+          continue;
+        }
+      }
+    }
+
+    if (BR_TAG.test(tag)) {
+      out.push('\n');
+    } else if (closing && name !== undefined && BLOCK_TAGS.has(name)) {
+      out.push('\n');
+    } else {
+      out.push(' ');
+    }
+    i = gt + 1;
+  }
+
+  return (
+    out
+      .join('')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;/g, "'")
+      // Last, so a decoded `&amp;lt;` does not turn into a `<` the caller never
+      // received.
+      .replace(/&amp;/gi, '&')
+  );
 }
 
 /**
@@ -172,6 +346,22 @@ export function htmlToText(html: string): string {
  */
 export function stripInvisible(input: string): string {
   return input.replace(INVISIBLE_CHARS, '').replace(CONTROL_CHARS, '');
+}
+
+/**
+ * The same characters, written out as escapes instead of removed.
+ *
+ * For the places where a string has to stay recognisable as the exact thing
+ * that was asked for — a confirmation dialog, an audit line. Stripping alone
+ * says "this is not what it looked like" and then shows something that looks
+ * like an ordinary name; this shows which characters were in it, so a person
+ * deciding whether to move mail into `Archive<U+202E>` can see that the folder is
+ * not the `Archive` they know.
+ */
+export function escapeInvisible(input: string): string {
+  const escape = (match: string): string =>
+    `\\u${(match.codePointAt(0) as number).toString(16).padStart(4, '0')}`;
+  return input.replace(INVISIBLE_CHARS, escape).replace(CONTROL_CHARS, escape);
 }
 
 /**

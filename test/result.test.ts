@@ -7,14 +7,22 @@ import {
   fencedUntrustedResult,
   jsonResult,
   MAX_RESULT_BYTES,
+  ResultTooLargeError,
   run,
   sanitizeErrorBody,
   textResult,
   untrustedResult,
 } from '../src/result.js';
 
-function textOf(result: { content: Array<{ text?: string }> }): string {
-  return result.content.map((part) => part.text ?? '').join('\n');
+// `run` answers with `CallToolResult | InputRequiredResult`, and only the
+// first half carries `content`. Typing the parameter off `run` itself keeps
+// both halves acceptable — a bare `{ content: … }` shape is one an input
+// request overlaps in no property at all — and the cast then says out loud
+// that every call in this file is on the result half.
+function textOf(result: Awaited<ReturnType<typeof run>>): string {
+  return ((result as { content?: unknown }).content as Array<{ text?: string }>)
+    .map((part) => part.text ?? '')
+    .join('\n');
 }
 
 describe('result helpers', () => {
@@ -35,6 +43,33 @@ describe('result helpers', () => {
     expect(text).toContain('BEGIN UNTRUSTED EMAIL CONTENT');
     expect(text).toContain('END UNTRUSTED EMAIL CONTENT');
     expect(text).toContain('the body');
+  });
+
+  it('holds the fenced result to the budget the server states', () => {
+    // textResult applies no budget — only budgetedJson does — so this path had
+    // none at all, and everything that reaches it grows: the per-line marks add
+    // ten characters per line, and defuseAutoFetch turns a three-character
+    // `![x]` into a forty-four-character sentence upstream. Measuring the
+    // assembled text is the only measurement that is true about a result.
+    const result = fencedUntrustedResult('METADATA', 'line\n'.repeat(60_000));
+    const text = textOf(result);
+    expect(text.length).toBeLessThanOrEqual(MAX_RESULT_BYTES);
+    // Cut with a reason, in the server's own voice and outside the fence.
+    expect(text).toContain('SERVER NOTE');
+    expect(text.indexOf('SERVER NOTE')).toBeLessThan(
+      text.indexOf('BEGIN UNTRUSTED EMAIL CONTENT')
+    );
+  });
+
+  it('keeps the header when the body has to go entirely', () => {
+    const header = `METADATA ${'h'.repeat(MAX_RESULT_BYTES / 2)}`;
+    const text = textOf(
+      fencedUntrustedResult(header, 'body '.repeat(MAX_RESULT_BYTES))
+    );
+    expect(text.length).toBeLessThanOrEqual(MAX_RESULT_BYTES);
+    // The header carries the uid and the part ids a follow-up call needs; the
+    // body is the part a caller can come back for.
+    expect(text).toContain('METADATA');
   });
 });
 
@@ -86,11 +121,14 @@ describe('budgetedJson', () => {
     expect(parsed.messages).toEqual([]);
   });
 
-  it('falls back to partial_json when nothing is array-shaped', () => {
-    const parsed = JSON.parse(
+  it('refuses when nothing is array-shaped', () => {
+    // It used to answer with an envelope carrying the oversized document as a
+    // string. That is a valid JSON document and no longer a valid *answer*:
+    // every tool declares what it returns, and the SDK refuses a result that
+    // does not fit. There is no true answer of this size.
+    expect(() =>
       budgetedJson({ body: 'x'.repeat(MAX_RESULT_BYTES * 2) })
-    ) as { partial_json: string };
-    expect(typeof parsed.partial_json).toBe('string');
+    ).toThrow(ResultTooLargeError);
   });
 
   it('carries the caller follow-up hint', () => {
@@ -108,6 +146,18 @@ describe('budgetedJson', () => {
 });
 
 describe('sanitizeErrorBody', () => {
+  it('drops markup that does not open with a doctype or <html>', () => {
+    // A WAF block page can open with a comment, and an upstream that answers
+    // errors in XML is exactly as useless to the model as one that answers in
+    // HTML. The old check required a doctype or an <html> tag first and let
+    // both of these through.
+    expect(
+      sanitizeErrorBody('<?xml version="1.0"?><error>denied</error>')
+    ).toBe('(HTML error page omitted)');
+    expect(
+      sanitizeErrorBody('<!-- blocked by policy -->\n<html>x</html>')
+    ).toBe('(HTML error page omitted)');
+  });
   it('drops an HTML error page entirely', () => {
     expect(sanitizeErrorBody('<!DOCTYPE html><html><body>...')).toBe(
       '(HTML error page omitted)'

@@ -1,3 +1,5 @@
+import { escapeInvisible } from './analyze.js';
+
 /**
  * Records every change this server makes to the mailbox.
  *
@@ -13,6 +15,13 @@
  * by the sender, but it has been through sanitizeFilename — no control or
  * invisible characters, no separators — and without it the line could not say
  * which file to go and delete.
+ *
+ * That reasoning had a hole: folder names go in these lines too, and on a
+ * shared account they are chosen by whoever created the folder. `to=Archive`
+ * for a destination of `Archive<U+202E>…` is a log entry that reads as the wrong
+ * folder, and a CR in a name rewrites the line a human is looking at. So every
+ * string value is escaped on the way out — see {@link escapeInvisible}. What
+ * cannot be seen must not be written here.
  */
 export function audit(
   operation: string,
@@ -31,8 +40,8 @@ export function audit(
 function format(value: unknown): string {
   if (Array.isArray(value)) {
     return value.length > 20
-      ? `[${value.slice(0, 20).join(',')},…+${value.length - 20}]`
-      : `[${value.join(',')}]`;
+      ? `[${escapeInvisible(value.slice(0, 20).join(','))},…+${value.length - 20}]`
+      : `[${escapeInvisible(value.join(','))}]`;
   }
-  return String(value);
+  return escapeInvisible(String(value));
 }

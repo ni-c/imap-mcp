@@ -1,18 +1,7 @@
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-
-import { requestApproval } from '../approval.js';
-import { audit } from '../audit.js';
-import type { Config } from '../config.js';
-import {
-  confirmationPrompt,
-  setResourceKey,
-  type ConfirmationStore,
-} from '../confirm.js';
-import { ToolInputError } from '../errors.js';
-import { ImapClient, withTimeout } from '../imap.js';
-import { buildDraft } from '../draft.js';
-import { jsonResult, run, textResult } from '../result.js';
+import { confirmationPrompt, setResourceKey } from 'mcp-approval';
+import type { Approver, ConfirmationStore } from 'mcp-approval';
 import {
   addressListParam,
   confirmTokenParam,
@@ -23,11 +12,39 @@ import {
   uidParam,
 } from '../schema.js';
 
+import { escapeInvisible, stripInvisible } from '../analyze.js';
+import { audit } from '../audit.js';
+import type { Config } from '../config.js';
+import { ToolInputError } from '../errors.js';
+import { ImapClient, withTimeout } from '../imap.js';
+import { buildDraft } from '../draft.js';
+import { errorResult, jsonResult, run } from '../result.js';
+
+/**
+ * A caller-chosen value as the person deciding should see it.
+ *
+ * mcp-approval already keeps these off the server's own sentence and onto their
+ * own labelled line, which answers a name that reads like an instruction. It
+ * cannot answer a name that reads like a *different name*: `Archive` and
+ * `Archive<U+200B>` occupy the same space on a screen, so a dialog that renders
+ * the second one verbatim asks about the folder the person recognises and then
+ * acts on the one they do not. Here the invisible characters are removed from
+ * what is shown and spelled out beside it, so the answer is to the question
+ * that was actually asked.
+ */
+function shownValue(raw: string): string {
+  const visible = stripInvisible(raw);
+  return visible === raw
+    ? raw
+    : `${visible} — as written: ${escapeInvisible(raw)}`;
+}
+
 export function registerWriteTools(
   server: McpServer,
   client: ImapClient,
   config: Config,
-  confirmations: ConfirmationStore
+  confirmations: ConfirmationStore,
+  approval: Approver
 ): void {
   server.registerTool(
     'set_message_flags',
@@ -41,15 +58,29 @@ export function registerWriteTools(
         'here; use delete_messages, which asks first. Removing \\Deleted is ' +
         'allowed, since that undoes one. Removing the new-mail keyword makes ' +
         'those messages show up in list_new_messages again.',
-      inputSchema: {
+      inputSchema: z.object({
         uids: uidListParam,
         mailbox: optionalMailboxParam,
         add: flagListParam.optional().describe('Flags or keywords to set.'),
         remove: flagListParam
           .optional()
           .describe('Flags or keywords to clear.'),
+      }),
+      annotations: {
+        // A flag is a marker and comes back off, so this is not destructive.
+        // freshrss-mcp answers the opposite for mark_articles and is right
+        // to: FreshRSS keeps no record of what was unread, IMAP does.
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
       },
-      annotations: { readOnlyHint: false, destructiveHint: false },
+      outputSchema: z.object({
+        mailbox: z.string(),
+        uids: z.array(z.number().int()),
+        added: z.array(z.string()),
+        removed: z.array(z.string()),
+      }),
     },
     async ({ uids, mailbox, add, remove }) =>
       run(async () => {
@@ -110,9 +141,10 @@ export function registerWriteTools(
       title: 'Move or copy messages',
       description:
         'Moves messages to another mailbox, or copies them when mode is ' +
-        '"copy". Both require confirmation: call once to receive a token, ' +
+        '"copy". Both ask the user to confirm; where the client cannot show a ' +
+        'prompt, they fall back to a two-call token — call once to receive it, ' +
         'then again with that token and the same UID list and destination.',
-      inputSchema: {
+      inputSchema: z.object({
         uids: uidListParam,
         destination: mailboxParam.describe(
           'Mailbox the messages end up in, exactly as listed by list_mailboxes.'
@@ -125,10 +157,24 @@ export function registerWriteTools(
             '"move" (default) removes the originals, "copy" keeps them.'
           ),
         confirm_token: confirmTokenParam,
+      }),
+      annotations: {
+        // Destructive: the messages keep their content but get new UIDs, so
+        // every reference to the old ones stops working. Copying into a shared
+        // folder is the irreversible half — it cannot be unread.
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
       },
-      annotations: { readOnlyHint: false, destructiveHint: false },
+      outputSchema: z.object({
+        action: z.enum(['moved', 'copied']),
+        source: z.string(),
+        destination: z.string(),
+        uids: z.array(z.number().int()),
+      }),
     },
-    async ({ uids, destination, mailbox, mode, confirm_token }) =>
+    async ({ uids, destination, mailbox, mode, confirm_token }, mcp) =>
       run(async () => {
         const copying = mode === 'copy';
         const source = mailbox ?? client.defaultMailbox;
@@ -140,29 +186,45 @@ export function registerWriteTools(
         // that folder. Disclosure is the irreversible part, and copying is the
         // mode that does it while leaving no trace in the source folder.
         //
+        // Which is also why this now goes the whole way rather than only to the
+        // token: the token proves the call was made twice, and a disclosure
+        // that cannot be taken back is exactly the case where the model
+        // agreeing with itself is not enough.
+        //
         // The key covers the exact UID set and both mailboxes: a confirmation
         // for [1] must not execute [1, 2], where the model picked the second
         // list, and one for Archive must not execute against Public/Shared.
-        const key = setResourceKey(
-          `${copying ? 'copy_messages' : 'move_messages'}:${source}:${destination}`,
-          uids.map(String)
+        const outcome = await approval.requestApproval(
+          server,
+          mcp,
+          confirmations,
+          {
+            what: `${copying ? 'copy' : 'move'} ${uids.length} message(s) between mailboxes`,
+            consequence: copying
+              ? 'Everyone with access to the destination can read the copies, and taking them back does not unsee them.'
+              : 'The messages keep their content but get new UIDs, so the current ones stop working.',
+            resourceKey: setResourceKey(
+              `${copying ? 'copy_messages' : 'move_messages'}:${source}:${destination}`,
+              uids.map(String)
+            ),
+            token: confirm_token,
+            details: [
+              { label: 'From', value: shownValue(source) },
+              { label: 'To', value: shownValue(destination) },
+            ],
+            toolName: copying ? 'copy_messages' : 'move_messages',
+          }
         );
-        if (!confirmations.consume(key, confirm_token)) {
-          return textResult(
-            confirmationPrompt(
-              `${copying ? 'copy' : 'move'} ${uids.length} message(s) between mailboxes`,
-              confirmations.issue(key),
-              confirmations.ttlMinutes,
-              copying
-                ? 'Everyone with access to the destination can read the copies, and taking them back does not unsee them.'
-                : 'The messages keep their content but get new UIDs, so the current ones stop working.',
-              [
-                { label: 'From', value: source },
-                { label: 'To', value: destination },
-              ]
-            )
+        if (outcome.decision === 'rejected') {
+          throw new ToolInputError(`imap-mcp: ${outcome.reason}`);
+        }
+        if (outcome.decision === 'declined') {
+          throw new ToolInputError(
+            'imap-mcp: the user declined. Nothing was moved.'
           );
         }
+        if (outcome.decision === 'pending') return outcome.result;
+
         return client.withMailbox(mailbox, false, async (connection) => {
           if (copying) {
             await withTimeout(
@@ -199,28 +261,54 @@ export function registerWriteTools(
         'most servers this does not go to Trash — move them there instead if ' +
         'that is what is meant. Asks the user to confirm; where the client ' +
         'cannot show a prompt, it falls back to a two-call token.',
-      inputSchema: {
+      inputSchema: z.object({
         uids: uidListParam,
         mailbox: optionalMailboxParam,
         confirm_token: confirmTokenParam,
+      }),
+      annotations: {
+        // Expunged, not moved to Trash. Idempotent by the specification's
+        // wording — the second call finds nothing, and the world is the same.
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
       },
-      annotations: { readOnlyHint: false, destructiveHint: true },
+      outputSchema: z.object({
+        action: z.literal('deleted'),
+        mailbox: z.string(),
+        uids: z.array(z.number().int()),
+      }),
     },
-    async ({ uids, mailbox, confirm_token }) =>
+    async ({ uids, mailbox, confirm_token }, mcp) =>
       run(async () => {
         const source = mailbox ?? client.defaultMailbox;
-        const approval = await requestApproval(server, confirmations, {
-          what: `Permanently delete ${uids.length} message(s) (UIDs ${uids.slice(0, 20).join(', ')}${uids.length > 20 ? ', …' : ''})`,
-          consequence:
-            'The messages are expunged, not moved to Trash. They cannot be recovered from here.',
-          resourceKey: setResourceKey(
-            `delete_messages:${source}`,
-            uids.map(String)
-          ),
-          token: confirm_token,
-          details: [{ label: 'Mailbox', value: source }],
-        });
-        if (!approval.approved) return approval.result;
+        const outcome = await approval.requestApproval(
+          server,
+          mcp,
+          confirmations,
+          {
+            what: `Permanently delete ${uids.length} message(s) (UIDs ${uids.slice(0, 20).join(', ')}${uids.length > 20 ? ', …' : ''})`,
+            consequence:
+              'The messages are expunged, not moved to Trash. They cannot be recovered from here.',
+            resourceKey: setResourceKey(
+              `delete_messages:${source}`,
+              uids.map(String)
+            ),
+            token: confirm_token,
+            toolName: 'delete_messages',
+            details: [{ label: 'Mailbox', value: shownValue(source) }],
+          }
+        );
+        if (outcome.decision === 'rejected') {
+          throw new ToolInputError(`imap-mcp: ${outcome.reason}`);
+        }
+        if (outcome.decision === 'declined') {
+          throw new ToolInputError(
+            'imap-mcp: the user declined. Nothing was changed.'
+          );
+        }
+        if (outcome.decision === 'pending') return outcome.result;
 
         return client.withMailbox(mailbox, false, async (connection) => {
           await withTimeout(
@@ -241,7 +329,7 @@ export function registerWriteTools(
         'Creates a folder, renames one, or deletes one. Deleting asks the user ' +
         'to confirm and takes every message in the folder with it; renaming ' +
         'uses the two-call token because it is reversible.',
-      inputSchema: {
+      inputSchema: z.object({
         action: z
           .enum(['create', 'rename', 'delete'])
           .describe('What to do with the mailbox.'),
@@ -252,10 +340,23 @@ export function registerWriteTools(
           .optional()
           .describe('Required for "rename": the full new path.'),
         confirm_token: confirmTokenParam,
+      }),
+      annotations: {
+        // Destructive in its delete mode, which takes every message in the
+        // folder; create and rename are the additive ones. One tool, so the
+        // annotation has to describe its strongest mode.
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
       },
-      annotations: { readOnlyHint: false, destructiveHint: true },
+      outputSchema: z.object({
+        action: z.enum(['create', 'rename', 'delete']),
+        mailbox: z.string(),
+        new_name: z.string().optional(),
+      }),
     },
-    async ({ action, mailbox, new_name, confirm_token }) =>
+    async ({ action, mailbox, new_name, confirm_token }, mcp) =>
       run(async () => {
         if (action === 'rename' && new_name === undefined) {
           throw new ToolInputError(
@@ -264,29 +365,49 @@ export function registerWriteTools(
         }
 
         if (action === 'delete') {
-          const approval = await requestApproval(server, confirmations, {
-            what: 'Delete a mailbox',
-            consequence:
-              'Every message in the folder is deleted with it, and it cannot be recovered from here.',
-            resourceKey: `manage_mailbox:delete:${mailbox}`,
-            token: confirm_token,
-            details: [{ label: 'Mailbox', value: mailbox }],
-          });
-          if (!approval.approved) return approval.result;
+          const outcome = await approval.requestApproval(
+            server,
+            mcp,
+            confirmations,
+            {
+              what: 'Delete a mailbox',
+              consequence:
+                'Every message in the folder is deleted with it, and it cannot be recovered from here.',
+              resourceKey: `manage_mailbox:delete:${mailbox}`,
+              token: confirm_token,
+              toolName: 'manage_mailbox',
+              details: [{ label: 'Mailbox', value: shownValue(mailbox) }],
+            }
+          );
+          if (outcome.decision === 'rejected') {
+            throw new ToolInputError(`imap-mcp: ${outcome.reason}`);
+          }
+          if (outcome.decision === 'declined') {
+            throw new ToolInputError(
+              'imap-mcp: the user declined. Nothing was changed.'
+            );
+          }
+          if (outcome.decision === 'pending') return outcome.result;
         } else if (action === 'rename') {
           const key = `manage_mailbox:rename:${mailbox}:${new_name ?? ''}`;
           if (!confirmations.consume(key, confirm_token)) {
-            return textResult(
-              confirmationPrompt(
-                'rename a mailbox',
-                confirmations.issue(key),
-                confirmations.ttlMinutes,
-                'Clients that cached the old path will have to resynchronise.',
-                [
-                  { label: 'Mailbox', value: mailbox },
-                  { label: 'New name', value: new_name ?? '' },
-                ]
-              )
+            // An error result, like `mcp-approval`'s own prompt: the rename
+            // was asked for and did not happen. It is also what lets this tool
+            // declare an output schema — the SDK requires `structuredContent`
+            // from a tool that has one, and a prompt has none to give.
+            return errorResult(
+              confirmationPrompt({
+                what: 'rename a mailbox',
+                token: confirmations.issue(key),
+                ttlMinutes: confirmations.ttlMinutes,
+                consequence:
+                  'Clients that cached the old path will have to resynchronise.',
+                details: [
+                  { label: 'Mailbox', value: shownValue(mailbox) },
+                  { label: 'New name', value: shownValue(new_name ?? '') },
+                ],
+                toolName: 'manage_mailbox',
+              })
             );
           }
         }
@@ -322,7 +443,7 @@ export function registerWriteTools(
         'person opens it in their own mail client and sends it from there. ' +
         'That is deliberate: it keeps the composing useful while leaving the ' +
         'decision to send with a human.',
-      inputSchema: {
+      inputSchema: z.object({
         to: addressListParam,
         cc: addressListParam.optional(),
         bcc: addressListParam.optional(),
@@ -344,8 +465,21 @@ export function registerWriteTools(
         mailbox: optionalMailboxParam.describe(
           'Where to look for reply_to_uid. Defaults to the configured mailbox.'
         ),
+      }),
+      annotations: {
+        // Additive: it appends a message to the drafts folder. Two calls
+        // leave two drafts.
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
       },
-      annotations: { readOnlyHint: false, destructiveHint: false },
+      outputSchema: z.object({
+        action: z.literal('draft_saved'),
+        mailbox: z.string().describe('The Drafts folder this server found.'),
+        recipients: z.array(z.string()),
+        note: z.string(),
+      }),
     },
     async ({ to, cc, bcc, subject, body, reply_to_uid, mailbox }) =>
       run(async () => {

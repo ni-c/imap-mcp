@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { call, connect, jsonOf, textOf, tokenOf } from './harness.js';
+import {
+  call,
+  connect,
+  connectModern,
+  jsonOf,
+  textOf,
+  tokenOf,
+} from './harness.js';
 import { message } from './fake-imap.js';
 
 function mailboxes() {
@@ -63,6 +70,10 @@ describe('delete_messages with elicitation', () => {
   });
 
   it('deletes nothing when the dialog cannot be shown at all', async () => {
+    // The wording is the SDK's here, not ours: the question is a RETURN value
+    // now, so by the time the round trip fails this handler has finished and
+    // the seam is the only thing left to answer. What has to hold is that it is
+    // an error and that nothing was deleted, and both do.
     const harness = await connect({
       config: writeConfig,
       mailboxes: mailboxes(),
@@ -72,7 +83,7 @@ describe('delete_messages with elicitation', () => {
       uids: [2],
     });
     expect(result.isError).toBe(true);
-    expect(textOf(result)).toContain('Nothing was changed');
+    expect(textOf(result)).toContain('dialog unavailable');
     expect(
       harness.imap.calls.some((entry) => entry.name === 'messageDelete')
     ).toBe(false);
@@ -142,7 +153,10 @@ describe('fallback where the client cannot ask', () => {
       uids: [2, 3],
       confirm_token: tokenOf(first),
     });
-    expect(textOf(result)).toContain('confirm_token');
+    // A token that does not match these arguments is refused with the
+    // reason rather than answered with a fresh prompt. The binding is the
+    // same; the wording is the library's, so every server agrees.
+    expect(textOf(result)).toContain('invalid, expired');
     expect(
       harness.imap.calls.some((entry) => entry.name === 'messageDelete')
     ).toBe(false);
@@ -222,8 +236,14 @@ describe('manage_mailbox approval', () => {
   });
 });
 
-describe('moving stays on the token', () => {
-  it('does not raise a dialog for a move', async () => {
+describe('moving asks too, and it used not to', () => {
+  // It was on the token alone, on the grounds that a move destroys nothing. Its
+  // own comment already said what is wrong with that: `destination` is a
+  // free-form mailbox name, so on a shared account one call hands every named
+  // message to everyone with access to that folder. Disclosure is the part that
+  // cannot be taken back, and a token only proves the model agreed with itself.
+
+  it('raises a dialog for a move and does not offer the token', async () => {
     const harness = await connect({
       config: writeConfig,
       mailboxes: mailboxes(),
@@ -233,8 +253,40 @@ describe('moving stays on the token', () => {
       uids: [2],
       destination: 'Archive',
     });
-    expect(textOf(first)).toContain('confirm_token');
-    expect(harness.prompts).toHaveLength(0);
+    expect(harness.prompts).toHaveLength(1);
+    expect(harness.prompts[0]).toContain('new UIDs');
+    expect(textOf(first)).not.toContain('confirm_token');
+    await harness.close();
+  });
+
+  it('says what a copy discloses, rather than what a move renumbers', async () => {
+    const harness = await connect({
+      config: writeConfig,
+      mailboxes: mailboxes(),
+      elicit: 'decline',
+    });
+    const result = await call(harness.client, 'move_messages', {
+      uids: [2],
+      destination: 'Public/Shared',
+      mode: 'copy',
+    });
+    expect(harness.prompts[0]).toContain('does not unsee them');
+    expect(result.isError).toBe(true);
+    await harness.close();
+  });
+
+  it('moves nothing when the person declines', async () => {
+    const harness = await connect({
+      config: writeConfig,
+      mailboxes: mailboxes(),
+      elicit: 'decline',
+    });
+    const result = await call(harness.client, 'move_messages', {
+      uids: [2],
+      destination: 'Archive',
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('Nothing was moved');
     await harness.close();
   });
 });
@@ -292,5 +344,147 @@ describe('audit log', () => {
 
     const entry = lines.find((line) => line.includes('imap-mcp audit')) ?? '';
     expect(entry).toContain('+20]');
+  });
+
+  it('escapes a folder name that would misrepresent itself in the log', async () => {
+    // The comment on audit() says attacker-chosen text stays out of an
+    // operator's log viewer, and then wrote folder names into it raw. A
+    // destination of "Archive<U+202E>…" logs as an entirely different folder, and
+    // a CR in a name rewrites the line a human is reading.
+    const lines: string[] = [];
+    const spy = vi
+      .spyOn(console, 'error')
+      .mockImplementation((...args: unknown[]) => {
+        lines.push(args.map(String).join(' '));
+      });
+
+    const evil = 'Archive\u202edlofretsam';
+    const harness = await connect({
+      config: writeConfig,
+      mailboxes: [
+        { path: 'INBOX', messages: [message(2)] },
+        { path: evil, messages: [] },
+      ],
+      elicit: 'accept',
+    });
+    await call(harness.client, 'move_messages', {
+      uids: [2],
+      destination: evil,
+    });
+    await harness.close();
+    spy.mockRestore();
+
+    const entry = lines.find((line) => line.includes(' move from=')) ?? '';
+    expect(entry).toContain('to=Archive\\u202edlofretsam');
+    expect(entry).not.toContain('\u202e');
+  });
+});
+
+describe('delete_messages on the 2026-07-28 revision', () => {
+  // Here the question is a RETURN value: the call ends, the person decides, and
+  // the client retries carrying the answer. Which means the answer arrives as
+  // ordinary request content -- attacker-controlled input, in the SDK's own
+  // words -- so an accepted reply on its own must not be enough to expunge a
+  // mailbox.
+
+  const accepted = {
+    confirm: { action: 'accept', content: { confirm: true } },
+  };
+  const deleted = (harness: Awaited<ReturnType<typeof connectModern>>) =>
+    harness.imap.calls.some((entry) => entry.name === 'messageDelete');
+
+  it('asks, then deletes once the answer comes back with the state it minted', async () => {
+    const harness = await connectModern({
+      config: writeConfig,
+      mailboxes: mailboxes(),
+    });
+    const asked = await harness.del({ uids: [2] });
+    expect(asked.resultType).toBe('input_required');
+    expect(asked.requestState).toBeTruthy();
+    expect(asked.inputRequests?.confirm?.params.message).toContain(
+      'cannot be recovered'
+    );
+    expect(deleted(harness)).toBe(false);
+
+    const done = await harness.del(
+      { uids: [2] },
+      { inputResponses: accepted, requestState: asked.requestState }
+    );
+    expect(done.resultType).not.toBe('input_required');
+    expect(deleted(harness)).toBe(true);
+    await harness.close();
+  });
+
+  it('deletes nothing when the box was left unticked', async () => {
+    const harness = await connectModern({
+      config: writeConfig,
+      mailboxes: mailboxes(),
+    });
+    const asked = await harness.del({ uids: [2] });
+    const done = await harness.del(
+      { uids: [2] },
+      {
+        inputResponses: {
+          confirm: { action: 'accept', content: { confirm: false } },
+        },
+        requestState: asked.requestState,
+      }
+    );
+    expect(done.isError).toBe(true);
+    expect(textOf(done as never)).toContain('declined');
+    expect(deleted(harness)).toBe(false);
+    await harness.close();
+  });
+
+  it('asks again rather than deleting when the answer carries no state', async () => {
+    // Without a seal this bare object would be all it took to expunge a
+    // mailbox, and anything that can shape a tool call can produce it.
+    const harness = await connectModern({
+      config: writeConfig,
+      mailboxes: mailboxes(),
+    });
+    await harness.del({ uids: [2] });
+    const again = await harness.del(
+      { uids: [2] },
+      { inputResponses: accepted }
+    );
+    expect(again.resultType).toBe('input_required');
+    expect(deleted(harness)).toBe(false);
+    await harness.close();
+  });
+
+  it('asks again when the state was not minted here', async () => {
+    const harness = await connectModern({
+      config: writeConfig,
+      mailboxes: mailboxes(),
+    });
+    const asked = await harness.del({ uids: [2] });
+    const again = await harness.del(
+      { uids: [2] },
+      {
+        inputResponses: accepted,
+        requestState: `${asked.requestState?.slice(0, -4)}AAAA`,
+      }
+    );
+    expect(again.resultType).toBe('input_required');
+    expect(deleted(harness)).toBe(false);
+    await harness.close();
+  });
+
+  it('asks again when the state belongs to a different set of messages', async () => {
+    // The seal names the exact UIDs and mailbox that were approved. Approval of
+    // one message is not approval of another.
+    const harness = await connectModern({
+      config: writeConfig,
+      mailboxes: mailboxes(),
+    });
+    const asked = await harness.del({ uids: [2] });
+    const again = await harness.del(
+      { uids: [3] },
+      { inputResponses: accepted, requestState: asked.requestState }
+    );
+    expect(again.resultType).toBe('input_required');
+    expect(deleted(harness)).toBe(false);
+    await harness.close();
   });
 });
