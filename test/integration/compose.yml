@@ -13,7 +13,7 @@ services:
   greenmail:
     # Overridable so the weekly CI run can point at :latest and report drift
     # without changing what the PR gate tests.
-    image: ${GREENMAIL_IMAGE:-greenmail/standalone:2.1.6}
+    image: ${GREENMAIL_IMAGE:-greenmail/standalone:2.1.13}
     environment:
       # `setup.test.all` starts SMTP, IMAP, POP3 and their TLS variants on the
       # 3000-offset ports. The account is created at startup; GreenMail has no
