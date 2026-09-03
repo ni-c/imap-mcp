@@ -10,6 +10,7 @@ import {
 } from './harness.js';
 import { message } from './fake-imap.js';
 import { MAX_RESULT_BYTES } from '../src/result.js';
+import { expectPortableToolSchemas } from 'mcp-integration-harness';
 
 const READ_TOOLS = [
   'get_attachments',
@@ -110,6 +111,18 @@ describe('tool registration', () => {
       // depending on who asked.
       expect(tool.outputSchema?.type, tool.name).toBe('object');
     }
+    await harness.close();
+  });
+
+  it('advertises schemas every client can read', async () => {
+    // Legal JSON Schema is not enough. `{}` in a schema position — what zod
+    // writes for `looseObject`, `catchall` and `z.unknown()` — and `type` as an
+    // array are both refused, or silently dropped, by some clients. Neither is
+    // a contract: each has an equivalent spelling that says the same thing, so
+    // there is nothing here to excuse.
+    const harness = await connect({ config: { readOnly: false } });
+    const { tools } = await harness.client.listTools();
+    expectPortableToolSchemas(tools);
     await harness.close();
   });
 
