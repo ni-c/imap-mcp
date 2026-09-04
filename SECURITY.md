@@ -191,3 +191,75 @@ predictable attachment name is never followed.
 
 Images are returned as images, with a warning. Text rendered inside a picture is still text a
 stranger wrote, and no amount of sanitising reaches it — the warning is the only honest answer.
+
+### Parsing a document
+
+`mode: "text"` reads the text of a PDF, Office or OpenDocument attachment. It is the third
+thing that happens to an attachment here, and unlike the other two it _parses_ the bytes: a
+bundled PDF.js and a ZIP reader, both fed by a stranger. That is a genuinely new attack
+surface for this server, and the answer is containment rather than trust.
+
+**Where it runs.** A `worker_thread` with `resourceLimits`, a twenty-second timeout, and an
+unconditional `terminate()` in a `finally`. Without the memory ceiling a runaway parse is a
+cgroup OOM kill of the whole process; with it, it is an error this server answers. Without the
+timeout a parse that spins is a server that stops answering with nothing in the log. One
+extraction runs at a time, because a per-call memory ceiling that multiplies by a number the
+caller chooses is not a ceiling.
+
+**Its stdout is detached.** The transport is stdio JSON-RPC and PDF.js logs. A worker's stdout
+is piped into the parent's by default, so one line from inside the parser would corrupt the
+framing and hang the session. PDF.js is also run at `verbosity: 0`; one guard is not a guard.
+
+**What crosses back is a code, never a message.** PDF.js and fflate quote the document in their
+exceptions — byte offsets, object fragments, what they found where they expected something
+else. An error message is read in the server's own voice, outside the fence every other piece
+of message content passes through, so the worker returns a reason code and the sentences are
+written here.
+
+**PDF.js runs with `isEvalSupported: false`**, which gates its construction of `Function`
+objects from font and calculator programs taken from the document — the primitive that turned a
+parser bug into remote code execution in CVE-2024-4367. `enableXfa`, `useSystemFonts` and font
+faces are off for the same reason. Four calls are used — `getDocument`, `getPage`,
+`getTextContent`, `destroy` — and that is enforced by nothing but this paragraph and the
+comment beside them: `getJSActions` surfaces the document's own JavaScript, `getAttachments`
+returns embedded files, which is how a PDF can carry an executable past a magic-byte check that
+only ever looks at the outer `%PDF`. The page loop is sequential and capped, because the page
+count is a number the sender wrote.
+
+**The ZIP reader decides before it allocates.** `unzipSync` sizes an entry's output buffer from
+the _declared_ uncompressed size in the central directory, checked against nothing, so the
+filter callback — the last point before that allocation — carries every guard: a fixed
+allowlist of entry names, an entry count, a per-entry and cumulative size budget, a compression
+ratio, and a refusal of anything but stored and deflate. Nothing outside the allowlist is ever
+decompressed, which is also why a nested archive is not descended into and an entry called
+`__proto__` is never used as a key.
+
+**There is no XML parser, and that is the defence.** A real one resolves entities, which would
+hand a mail attachment billion-laughs expansion and an `<!ENTITY … SYSTEM "file:///etc/passwd">`
+that reads a file. The markup walk builds no entity table and resolves no system identifier, so
+those are not defended against — they are not implemented, and `&lol9;` comes back as six
+literal characters. The walk itself is the one already used for HTML mail: a single forward-only
+pass with a global closing-tag budget. The obvious alternative, `/<w:t[^>]*>([\s\S]*?)<\/w:t>/g`,
+is the exact shape of the 33-second denial of service recorded above.
+
+**Nothing in the path reaches the network or the filesystem.** The document is passed as bytes,
+never as a URL, so PDF.js never constructs its network stream; the standard-font and CMap URLs
+it would otherwise fetch stay unset, because `pdfjs-dist` is not resolvable in this tree.
+Pointing them at a CDN is the most-suggested workaround online for the resulting font warnings
+and would give this server its first outbound HTTP client. The known cost is stated instead: a
+PDF needing a predefined CJK CMap does not extract.
+
+**Extracted text is fenced like a message body**, and carries one thing a body does not need.
+Extraction returns every text-drawing instruction in the file — including text set below one
+point, hanging off the page, or drawn in the colour of the paper — and returns nothing that was
+drawn as a picture. The set the model reads and the set the user sees are different sets, in
+both directions. Fill colour is not exposed by the text API at all, and text render mode 3 is
+how every OCR'd scan stores its text layer, so filtering is not available; the count of runs
+placed where a reader cannot see them is reported as a signal, and the result states plainly
+above the fence that "the document says X" is not a claim the user can check.
+
+**One supply-chain consequence, stated rather than discovered.** `unpdf` vendors PDF.js into its
+own published bundle, so `pdfjs-dist` does not appear in this package's dependency tree — and
+`npm audit`, Dependabot and the Trivy job all resolve the tree. **A future PDF.js advisory will
+not raise an alert on this repository.** Watching PDF.js releases is manual, and an `unpdf`
+version bump is a security bump.

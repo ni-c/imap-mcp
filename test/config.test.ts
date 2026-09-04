@@ -84,6 +84,7 @@ describe('loadConfig', () => {
     // rest of the family, and deliberately so: this reaches a mailbox.
     expect(config.readOnly).toBe(true);
     expect(config.imap.downloadDir).toBeUndefined();
+    expect(config.imap.maxExtractBytes).toBe(10 * 1024 * 1024);
   });
 
   it('removes the password from the environment', () => {
@@ -184,6 +185,16 @@ describe('loadConfig', () => {
     ['IMAP_SEEN_KEYWORD', { IMAP_SEEN_KEYWORD: 'Ai Seen' }],
     ['IMAP_MAX_MESSAGES', { IMAP_MAX_MESSAGES: 'lots' }],
     ['IMAP_MAX_MESSAGES zero', { IMAP_MAX_MESSAGES: '0' }],
+    ['IMAP_MAX_EXTRACT_BYTES', { IMAP_MAX_EXTRACT_BYTES: 'ten megabytes' }],
+    ['IMAP_MAX_EXTRACT_BYTES zero', { IMAP_MAX_EXTRACT_BYTES: '0' }],
+    // Named rather than clamped, and fatal rather than ignored: the other
+    // two size variables buy a big answer, this one buys a buffer inside a
+    // parser working on bytes a stranger chose. A typo there would leave an
+    // operator believing there is a limit.
+    [
+      'IMAP_MAX_EXTRACT_BYTES over the ceiling',
+      { IMAP_MAX_EXTRACT_BYTES: String(1024 * 1024 * 1024) },
+    ],
   ])('exits on a malformed %s', (_name, overrides) => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     const exit = vi.spyOn(process, 'exit').mockImplementation((() => {

@@ -116,6 +116,7 @@ guard. See [Asking a person](https://imap-mcp.ni-c.de/guide/approval).
 | `IMAP_MAX_MESSAGES`         | no       | `100`         | Default page size                                            |
 | `IMAP_MAX_ATTACHMENT_BYTES` | no       | `1048576`     | Ceiling for returning an attachment inline                   |
 | `IMAP_MAX_DOWNLOAD_BYTES`   | no       | `26214400`    | Ceiling for writing one to disk                              |
+| `IMAP_MAX_EXTRACT_BYTES`    | no       | `10485760`    | Ceiling for reading a document's text; max `67108864`        |
 | `IMAP_ATTACHMENT_TYPES`     | no       | see below     | Comma-separated content-type allowlist                       |
 | `IMAP_DOWNLOAD_DIR`         | no       | —             | Setting it allows saving attachments there                   |
 | `IMAP_INSECURE_TLS`         | no       | `false`       | Exactly `true` accepts a self-signed certificate             |
@@ -155,8 +156,11 @@ answer — its `/hub` endpoint replaces every server's tools with six meta-tools
 The password is deleted from the process environment as soon as it is read, so it is not
 visible to child processes or in `/proc/<pid>/environ`.
 
-Without `IMAP_DOWNLOAD_DIR` this server never writes to the filesystem. The two size limits are
-separate on purpose: one protects the model's context window, the other protects your disk.
+Without `IMAP_DOWNLOAD_DIR` this server never writes to the filesystem. The three size limits are
+separate on purpose, because they answer three different questions:
+`IMAP_MAX_ATTACHMENT_BYTES` protects the model's context window,
+`IMAP_MAX_DOWNLOAD_BYTES` protects your disk, and `IMAP_MAX_EXTRACT_BYTES` bounds how much
+hostile input one parser is handed. Raising any one of them is not a request to raise the others.
 
 The server starts without credentials on purpose — it completes the handshake and lists its
 tools, and every call then fails with setup instructions instead of reaching a server.
@@ -259,7 +263,7 @@ are in the [client guide](https://imap-mcp.ni-c.de/guide/clients#through-mcp-hub
 | `list_messages`     | Lists and searches: sender, recipient, subject, body, date range, flags                  |
 | `list_new_messages` | Messages not handed over yet; marks them afterwards, `dry_run` to preview                |
 | `get_message`       | Headers and body, fenced untrusted, plus the security assessment; `include_thread`       |
-| `get_attachments`   | Without `part_id` lists them, with `part_id` reads or saves one                          |
+| `get_attachments`   | Without `part_id` lists them, with `part_id` reads, extracts or saves one                |
 
 **Mailbox** — needs `IMAP_READ_ONLY=false`
 
@@ -326,7 +330,8 @@ size limit and magic-byte check as the tool — it is not a second, unguarded do
 ## Not exposed, on purpose
 
 No sending, no SMTP, no raw IMAP passthrough, no `APPEND` of arbitrary MIME, no HTML
-composition, no OAuth2. The first is the whole security argument (see `SECURITY.md`); the
+composition, no OAuth2, and **no OCR** — a scanned PDF has no text to extract and says so
+rather than guessing. The first is the whole security argument (see `SECURITY.md`); the
 second would make every guard here optional; the last is planned but needs a test account
 before it ships.
 
@@ -346,6 +351,16 @@ knowing before concluding that a filtered install reaches less of the mailbox th
   saving to disk, where it would be more dangerous, not less.
 - **A `part_id` must come from a listing call**, so the body cannot be pulled out through the
   attachment tool and escape its framing.
+- **Documents are parsed in a thread that can be stopped.** `mode: "text"` reads a PDF or
+  Office file with a bundled PDF.js and a ZIP reader — the only place this server parses a
+  binary a stranger sent. It runs in a worker with a memory ceiling and a timeout, its stdout
+  detached from the JSON-RPC transport, PDF.js's `eval` support off, and an entry allowlist
+  that decides what is decompressed _before_ the buffer is sized. Nothing in that path
+  touches the network or the filesystem.
+- **Extracted text says what it is.** Extraction returns every text-drawing instruction in a
+  file, including text set below one point or drawn in the colour of the paper, and returns
+  nothing that was drawn as a picture. The result says so above the fence, because "the
+  document says X" is otherwise a claim the user has no way to check.
 - **Downloads cannot escape their directory.** The target comes only from the environment, the
   filename is sanitised, the resolved path is re-checked, and the file is opened with `wx` and
   mode `0600` — so nothing is overwritten and no planted symlink is followed.

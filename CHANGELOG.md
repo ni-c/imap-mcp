@@ -12,6 +12,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      last in the file so the link definitions come along. -->
 <!-- #region changelog -->
 
+## [0.4.0] - 2026-09-04
+
+### Added
+
+- `get_attachments` takes `mode: "text"`: the text of a PDF, Word, Excel,
+  PowerPoint or OpenDocument attachment, extracted on the server and returned
+  fenced as untrusted content.
+
+  This is the only way to read a document from a client that cannot reach this
+  server's filesystem — which is every remote one. `IMAP_DOWNLOAD_DIR` does not
+  help there: the file lands wherever the server runs, and the result is a path
+  the caller cannot open. Without it the same attachment fell through to base64
+  and was refused for not fitting the result budget, which is a correct refusal
+  and a useless one.
+
+  `offset` and `max_chars` page through anything longer than one result can
+  hold. The answer carries `next_offset`, `total_chars` and `returned_chars`,
+  and the notes spell out the exact follow-up call. Injection signals are
+  computed over the whole document rather than the window, so a payload on the
+  first page still raises the banner on the call that reads the third.
+
+  Spreadsheets come back as tab-separated values with a `== Sheet: name ==`
+  heading per tab; presentations get one per slide. There is no OCR: a scan has
+  no text layer, and the refusal says so and names the two ways to get the bytes
+  instead of returning an empty string that reads like an empty document.
+
+- `IMAP_MAX_EXTRACT_BYTES`, default 10 MB, ceiling 64 MB. A third size limit
+  because there is a third question: `IMAP_MAX_ATTACHMENT_BYTES` bounds what may
+  enter the model's context, `IMAP_MAX_DOWNLOAD_BYTES` bounds what may be
+  written to your disk, and this one bounds how much input a parser is handed.
+  It is the one with a hard maximum, and a value above it refuses to start
+  rather than being clamped: the other two buy a big answer, this one buys a
+  buffer inside a parser working on bytes a stranger chose.
+
+- Attachment listings carry `extractable`, and `get_server_info` reports
+  `attachment_text_extraction`. Both exist so the option can be seen before
+  anything is fetched — which matters most where `IMAP_DOWNLOAD_DIR` points
+  somewhere the caller cannot reach.
+
+### Fixed
+
+- **The size limits other than `IMAP_MAX_ATTACHMENT_BYTES` did not apply.** The
+  declaration check ran with the inline ceiling regardless of what the call
+  asked for, and it runs before the destination is chosen — so `mode: "file"`
+  could never save anything larger than the inline cap, although the code said
+  it could. The policy now takes the mode. A listing, which has no mode, uses
+  the widest ceiling any mode could reach for that part, so `allowed` answers
+  "is this reachable at all".
+
+- Numeric character references are decoded. `&#8217;` in HTML mail, and the
+  numeric umlauts OOXML writes throughout, used to arrive as literal text.
+
+- `</w:p>` and friends: the tag-name pattern did not match a colon, so a
+  namespaced closing tag read as its prefix alone.
+
+### Changed
+
+- `mode: "auto"` extracts the text of a document when there is no download
+  directory to save it to. With one configured it still saves, so no existing
+  installation changes behaviour; the `saved` result now names `mode: "text"`
+  for the case where that directory is not reachable from where the caller runs.
+
+- Two new runtime dependencies, `unpdf` and `fflate`, both MIT and both with no
+  dependencies of their own. Note that `unpdf` vendors PDF.js into its own
+  bundle, so `pdfjs-dist` does not appear in this package's dependency tree and
+  a PDF.js advisory raises no Dependabot, `npm audit` or Trivy alert here. An
+  `unpdf` bump is a security bump; see `CONTRIBUTING.md`.
+
 ## [0.3.0] - 2026-09-03
 
 ### Added
@@ -378,6 +446,7 @@ package page for the first time — including the parts that changed weeks ago.
 - Every change to the mailbox is logged to stderr with UIDs and folder, never
   subjects.
 
+[0.4.0]: https://github.com/ni-c/imap-mcp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/ni-c/imap-mcp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/ni-c/imap-mcp/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ni-c/imap-mcp/releases/tag/v0.1.0

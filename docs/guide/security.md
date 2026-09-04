@@ -63,6 +63,39 @@ there: the caller does not choose the directory, so bytes from a stranger cannot
 land somewhere of their choosing. Types are checked against an allowlist and sizes
 against a cap.
 
+## Reading a document
+
+`mode: "text"` is the only place this server parses a binary a stranger sent — a
+bundled PDF.js for PDFs, a ZIP reader for Office and OpenDocument files. That is real
+attack surface, and it is contained rather than trusted:
+
+- it runs in a **worker thread with a memory ceiling and a timeout**, so a parse that
+  spins or grows is stopped instead of taking the server with it;
+- the worker's **stdout is detached**. The transport here is stdio JSON-RPC and PDF.js
+  logs; one line reaching the parent's stdout would corrupt the framing;
+- **PDF.js runs with `isEvalSupported: false`.** That flag gates the construction of
+  `Function` objects from font programs in the document, which is the primitive that
+  turned a parser bug into remote code execution in CVE-2024-4367;
+- only four PDF.js calls are used. Embedded JavaScript, embedded files and annotations
+  are never asked for;
+- the ZIP reader decides **what to decompress before the buffer is sized**, from a fixed
+  list of entry names. Nothing else in the container is read, and nothing recurses;
+- there is **no XML parser**, on purpose. The markup walk never builds an entity table
+  and never resolves a system identifier, so billion-laughs and XXE are not defended
+  against — they are not implemented. `&lol9;` comes back as six literal characters;
+- **nothing in the path reaches the network or the filesystem.** The document is passed
+  as bytes, never as a URL, and the font and CMap paths PDF.js would otherwise fetch are
+  deliberately left unset. Do not "fix" a font warning by pointing them at a CDN: it is
+  the most-suggested workaround online and would give this server its first outbound
+  HTTP client.
+
+Extracted text is the sender's text and goes through the same nonce fence as a message
+body. It also carries something a mail body does not need: extraction returns every
+text-drawing instruction in a file — including text set below one point, hanging off the
+page, or drawn in the colour of the paper — and returns nothing that was drawn as a
+picture. The result states that above the fence, because otherwise "the document says X"
+is a claim the reader has no way to check.
+
 ## Reporting a vulnerability
 
 Use

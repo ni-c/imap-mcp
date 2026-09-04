@@ -142,7 +142,14 @@ const MAX_HIDDEN_ELEMENT_CHARS = 10_000;
 const CLOSER_SCAN_BUDGET_FACTOR = 4;
 const CLOSER_SCAN_BUDGET_FLOOR = 100_000;
 
-/** Elements whose content the recipient never reads. */
+/**
+ * Elements whose content the recipient never reads.
+ *
+ * The `w:`-prefixed name is WordprocessingML, not HTML: this walk is also how
+ * the text of a .docx attachment is read, and a Word field code
+ * (`INCLUDEPICTURE "http://…"`, a DDE command) is markup the reader never sees
+ * for exactly the same reason a `<script>` body is.
+ */
 const NON_CONTENT_TAGS = new Set([
   'script',
   'style',
@@ -150,9 +157,16 @@ const NON_CONTENT_TAGS = new Set([
   'title',
   'noscript',
   'template',
+  'w:instrtext',
 ]);
 
-/** Closing tags that end a visual block, and so earn a line break. */
+/**
+ * Closing tags that end a visual block, and so earn a line break.
+ *
+ * The namespaced names are the OOXML and OpenDocument paragraph, heading and
+ * row elements. Without them a whole .docx comes back as one line, because
+ * nothing else in a document part ever closes a block.
+ */
 const BLOCK_TAGS = new Set([
   'p',
   'div',
@@ -164,9 +178,20 @@ const BLOCK_TAGS = new Set([
   'h4',
   'h5',
   'h6',
+  'w:p',
+  'w:tr',
+  'a:p',
+  'text:p',
+  'text:h',
+  'table:table-row',
 ]);
 
-const TAG_NAME = /^<\/?([A-Za-z][A-Za-z0-9]*)/;
+// The name may carry a namespace prefix and a hyphen: `</w:p>`, `</text:h>`,
+// `</table:table-row>`. Without the colon and the hyphen this matched `w` for
+// `</w:p>`, so every namespaced entry in the sets above would be dead code.
+// HTML is unaffected — no HTML element name contains either character, and a
+// custom element (`<my-widget>`) is in none of the sets under either reading.
+const TAG_NAME = /^<\/?([A-Za-z][A-Za-z0-9:_.-]*)/;
 const BR_TAG = /^<br\s*\/?$/i;
 const STYLE_ATTRIBUTE = /style\s*=\s*("|')/gi;
 const HIDDEN_VALUE =
@@ -198,12 +223,32 @@ function hasHiddenStyle(tag: string): boolean {
 }
 
 /**
- * Extracts readable text from HTML.
+ * Extracts readable text from HTML — and from the XML inside an OOXML or
+ * OpenDocument attachment, which is the same problem with different tag names.
+ *
+ * Reused there rather than reimplemented, and that is a security decision, not
+ * a tidiness one. The obvious `document.xml` reader is
+ * `/<w:t[^>]*>([\s\S]*?)<\/w:t>/g` — which is the exact shape of the bug
+ * recorded above this function: *n* start tokens each paying for a scan that
+ * never finds its end. A `document.xml` of `'<w:t '` repeated 200 000 times is
+ * a tiny, deflate-friendly ZIP entry. This walk is immune for the reason it was
+ * written, so the second parser is the one not to write.
+ *
+ * It is also why nothing here parses XML properly. A real parser resolves
+ * entities, and would hand a mail attachment billion-laughs expansion and an
+ * `<!ENTITY … SYSTEM "file:///etc/passwd">` that reads a file. Those are not
+ * defended against below; they are simply not implemented. `&lol9;` comes out
+ * as seven literal characters, and it must stay that way — reaching for
+ * `fast-xml-parser` here would reintroduce all three at once.
  *
  * Deliberately not `mailparser`'s own `text` fallback: that keeps content the
  * recipient never sees. Anything hidden by inline CSS is a place to park an
  * instruction meant only for the model, so those elements are dropped before
  * the tags are stripped.
+ *
+ * `maxChars` overrides the input slice. The default suits a mail body; a
+ * document part needs more, because OOXML spends most of its bytes on
+ * formatting and the readable text is a small fraction of it.
  *
  * This is one pass over the input. The cursors below only ever move forward,
  * which is the property that makes the whole function linear no matter what the
@@ -215,8 +260,8 @@ function hasHiddenStyle(tag: string): boolean {
  * for the same reason it always was: nothing downstream trusts the stripping,
  * and the fencing in {@link wrapUntrusted} is what carries the weight.
  */
-export function htmlToText(html: string): string {
-  const source = html.slice(0, MAX_HTML_CHARS);
+export function htmlToText(html: string, maxChars = MAX_HTML_CHARS): string {
+  const source = html.slice(0, maxChars);
   const out: string[] = [];
 
   // Forward-only cursors. Each call may advance them, never rewind them, so
@@ -332,10 +377,37 @@ export function htmlToText(html: string): string {
       .replace(/&gt;/gi, '>')
       .replace(/&quot;/gi, '"')
       .replace(/&#39;/g, "'")
+      // Numeric character references. Common in HTML mail (`&#8217;` for a
+      // curly apostrophe) and near-universal in OOXML, where a German document
+      // may write every umlaut this way — without this they arrive as literal
+      // `&#228;`. Bounded digit counts so the pattern cannot be made to scan,
+      // and out-of-range values produce nothing rather than a guess.
+      .replace(/&#x([0-9a-f]{1,6});/gi, (match, hex: string) =>
+        fromCodePoint(parseInt(hex, 16), match)
+      )
+      .replace(/&#(\d{1,7});/g, (match, digits: string) =>
+        fromCodePoint(Number(digits), match)
+      )
       // Last, so a decoded `&amp;lt;` does not turn into a `<` the caller never
       // received.
       .replace(/&amp;/gi, '&')
   );
+}
+
+/**
+ * One character from a numeric reference, or the reference itself.
+ *
+ * Returning the original text for anything out of range is the conservative
+ * half: a reference nobody can render is better left visible than turned into a
+ * replacement character that reads as content. Surrogates are excluded because
+ * a lone one is not a character and only makes the string harder to handle
+ * downstream.
+ */
+function fromCodePoint(value: number, original: string): string {
+  if (!Number.isInteger(value) || value < 1 || value > 0x10ffff)
+    return original;
+  if (value >= 0xd800 && value <= 0xdfff) return original;
+  return String.fromCodePoint(value);
 }
 
 /**

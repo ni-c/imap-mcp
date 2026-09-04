@@ -64,6 +64,22 @@ MCP server in the same environment, and — like `IMAP_TLS`, unlike
 `IMAP_READ_ONLY` — a value it does not recognise **stops the server**. See
 [Asking a person](/guide/approval).
 
+## Reading documents
+
+Nothing needs to be configured for it: `get_attachments` with `mode: "text"` reads
+the text out of a PDF, Word, Excel, PowerPoint or OpenDocument attachment.
+
+It is worth knowing which of the three size limits applies, because they are
+separate on purpose. `IMAP_MAX_ATTACHMENT_BYTES` (1 MB) bounds what may come back
+inline, `IMAP_MAX_DOWNLOAD_BYTES` (25 MB) bounds what may be written to disk, and
+`IMAP_MAX_EXTRACT_BYTES` (10 MB, maximum 64 MB) bounds what is handed to the
+parser. Raising one is not a request to raise the others, and the last has a hard
+ceiling — a value above it stops the server rather than being quietly clamped.
+
+If you run this server in a container or on another machine, prefer `mode: "text"`
+over `IMAP_DOWNLOAD_DIR`. A download directory is a path on the machine the server
+runs on; a client somewhere else gets that path back and can do nothing with it.
+
 ## Choosing the tools that load
 
 Read-only mode is one cut, along a line this server drew for you — and by default

@@ -18,7 +18,7 @@ Registered always.
 | `list_new_messages` | What the assistant has not seen yet, tracked with its own IMAP keyword rather than `\Seen`. **essential** |
 | `list_messages`     | Search and list a mailbox: by sender, subject, date range, flags. **essential**                           |
 | `get_message`       | One message, body fenced as untrusted content. **essential**                                             |
-| `get_attachments`   | Attachment metadata, and small ones inline within the size and type caps                                 |
+| `get_attachments`   | Attachment metadata, small ones inline, and the text of a PDF or Office file with `mode: "text"`         |
 | `get_server_info`   | Capabilities, the mailbox in use, and whether the write tools are registered                             |
 
 ## Write tools
@@ -51,8 +51,32 @@ Every tool declares all four MCP annotations — `readOnlyHint`, `destructiveHin
 the family: it is `readOnlyHint: true` until `IMAP_DOWNLOAD_DIR` is set, because from
 then on it writes files.
 
+## Reading a document
+
+`get_attachments` takes a `mode`. `auto` reads small text and images inline, saves to
+disk where `IMAP_DOWNLOAD_DIR` is set, and otherwise extracts the text of a PDF, Word,
+Excel, PowerPoint or OpenDocument file. `inline` always returns the content, `file`
+always saves it, and `text` always extracts.
+
+`mode: "text"` is the only way to read a document from a client that cannot reach this
+server's filesystem — which is every remote one. It returns the text fenced as untrusted
+content, with `offset` and `max_chars` to page through anything longer than one result
+can hold; the answer carries `next_offset`, `total_chars` and `returned_chars`, and the
+notes spell out the exact follow-up call. The listing marks each part `extractable`, so
+the choice can be made before anything is fetched.
+
+Spreadsheets come back as tab-separated values with a `== Sheet: name ==` heading per
+tab; presentations get a heading per slide.
+
+There is no OCR. A scanned PDF has no text layer, and the refusal says so and names the
+two ways to get the bytes instead — rather than returning an empty string that reads
+like an empty document.
+
 ## Resources, which the filter does not cover
 
 Attachments are also exposed as MCP **resources**. `IMAP_ALLOW_TOOLS` narrows
 `tools/list`, not `resources/list`, so a filtered server still serves those.
-`IMAP_DOWNLOAD_DIR` and the attachment type allowlist are what constrain them.
+`IMAP_DOWNLOAD_DIR` and the attachment type allowlist are what constrain them. Note that
+resources carry the raw bytes: the text extraction above is on the tool only, because
+extracted text is the sender's text and belongs inside the nonce fence, which a resource
+has nowhere to put.

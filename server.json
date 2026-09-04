@@ -8,12 +8,12 @@
     "url": "https://github.com/ni-c/imap-mcp",
     "source": "github"
   },
-  "version": "0.2.0",
+  "version": "0.4.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@ni-c/imap-mcp",
-      "version": "0.2.0",
+      "version": "0.4.0",
       "transport": {
         "type": "stdio"
       },
@@ -112,6 +112,12 @@
         {
           "name": "IMAP_MAX_DOWNLOAD_BYTES",
           "description": "Ceiling for writing an attachment to disk (default: 26214400)",
+          "isRequired": false,
+          "format": "number"
+        },
+        {
+          "name": "IMAP_MAX_EXTRACT_BYTES",
+          "description": "Ceiling for reading a document's text with mode=text (default: 10485760, maximum: 67108864)",
           "isRequired": false,
           "format": "number"
         },
@@ -131,7 +137,7 @@
     },
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/ni-c/imap-mcp:0.2.0",
+      "identifier": "ghcr.io/ni-c/imap-mcp:0.4.0",
       "transport": {
         "type": "stdio"
       },
@@ -230,6 +236,12 @@
         {
           "name": "IMAP_MAX_DOWNLOAD_BYTES",
           "description": "Ceiling for writing an attachment to disk (default: 26214400)",
+          "isRequired": false,
+          "format": "number"
+        },
+        {
+          "name": "IMAP_MAX_EXTRACT_BYTES",
+          "description": "Ceiling for reading a document's text with mode=text (default: 10485760, maximum: 67108864)",
           "isRequired": false,
           "format": "number"
         },

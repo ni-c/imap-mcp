@@ -10,9 +10,19 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       include: ['src/**'],
-      // Entry point: only wires config and server to the stdio transport and
-      // exits the process; not reachable from unit tests.
-      exclude: ['src/index.ts'],
+      exclude: [
+        // Entry point: only wires config and server to the stdio transport and
+        // exits the process; not reachable from unit tests.
+        'src/index.ts',
+        // Runs inside a worker thread, where v8 coverage does not reach. It is
+        // a dozen lines of dispatch, and everything it calls lives in
+        // src/extract/pdf.ts and src/extract/ooxml.ts, which the unit tests
+        // import and drive directly on the main thread — so the logic is
+        // measured even though this file would read 0%. Keep it that way: if
+        // logic moves *into* this file, excluding it turns the number into a
+        // lie.
+        'src/extract/worker.ts',
+      ],
       // Measured on 2026-08-24 at 93.79 / 83.65 / 95.32 / 95.82, with roughly
       // five points of headroom on functions. Write the missing tests instead
       // of lowering them.

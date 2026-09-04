@@ -78,6 +78,18 @@ npx @modelcontextprotocol/inspector node dist/index.js
   model treats as instruction — a confirmation prompt, an error message — is a bug.
 - **No new runtime dependencies** without a very good reason; the small tree is a
   feature.
+- **`unpdf` bumps are security bumps.** It vendors PDF.js into its own published bundle,
+  so `pdfjs-dist` is not in this package's dependency tree — and `npm audit`, Dependabot
+  and Trivy all resolve the tree. A PDF.js advisory raises no alert here. Watch
+  [PDF.js releases](https://github.com/mozilla/pdf.js/releases) and treat an `unpdf`
+  update as one, not as a routine minor.
+- **`src/extract/worker.ts` and everything it reaches may not use relative value
+  imports.** The worker is started from its own source file — `.ts` under vitest, `.js`
+  from `dist/` — so Node loads it directly, and Node's type stripping does not rewrite a
+  `./x.js` specifier to the `.ts` beside it. `import type` is erased and is fine; a value
+  import is not. Getting this wrong in one direction fails every test, and in the other
+  it passes every test and ships a broken package, so `npm run build` is followed by a
+  real extraction against `dist/`.
 - Run `npm run lint` before pushing — it checks both oxlint and prettier, and prettier
   also validates the YAML, JSON and Markdown files.
 

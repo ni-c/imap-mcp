@@ -35,6 +35,17 @@ export interface ImapConfig {
    */
   downloadDir: string | undefined;
   maxDownloadBytes: number;
+  /**
+   * Ceiling on the bytes handed to the text-extraction worker.
+   *
+   * A third limit because it answers a third question. `maxAttachmentBytes`
+   * bounds what may enter the model's context — extraction does not, since only
+   * the extracted text comes back and `max_chars` bounds that. `maxDownloadBytes`
+   * bounds what may be written to the filesystem. This one bounds how much
+   * hostile input a parser is asked to chew on inside a thread that can be
+   * terminated, which is a memory question and neither of the other two.
+   */
+  maxExtractBytes: number;
 }
 
 export interface Config {
@@ -95,6 +106,18 @@ const DEFAULT_MAX_MESSAGES = 100;
 const DEFAULT_MAX_ATTACHMENT_BYTES = 1024 * 1024;
 /** Disk cap: this one protects the filesystem, which is a different concern. */
 const DEFAULT_MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024;
+/** Extraction cap: how much hostile input one parser is asked to chew on. */
+const DEFAULT_MAX_EXTRACT_BYTES = 10 * 1024 * 1024;
+/**
+ * Hard ceiling on `IMAP_MAX_EXTRACT_BYTES`.
+ *
+ * The other two size variables have no maximum because their cost is linear and
+ * paid somewhere visible — a big result, a big file. This one buys a buffer
+ * inside a parser working on bytes a stranger chose, so a typo of "104857600000"
+ * would not produce a big answer, it would produce an operator who believes
+ * there is a limit. 64 MiB is past any document that arrives by mail.
+ */
+const MAX_MAX_EXTRACT_BYTES = 64 * 1024 * 1024;
 const DEFAULT_SEEN_KEYWORD = 'AiSeen';
 
 /** Shown when the configuration is incomplete — at startup and on every call. */
@@ -187,6 +210,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         DEFAULT_MAX_DOWNLOAD_BYTES,
         'IMAP_MAX_DOWNLOAD_BYTES'
       ),
+      maxExtractBytes: parseCount(
+        env.IMAP_MAX_EXTRACT_BYTES,
+        DEFAULT_MAX_EXTRACT_BYTES,
+        'IMAP_MAX_EXTRACT_BYTES',
+        MAX_MAX_EXTRACT_BYTES
+      ),
     },
     // Defaults to true, unlike the rest of the family — see the field comment.
     readOnly: env.IMAP_READ_ONLY !== 'false',
@@ -272,12 +301,20 @@ function parsePort(
 function parseCount(
   raw: string | undefined,
   fallback: number,
-  name: string
+  name: string,
+  max?: number
 ): number {
   if (raw === undefined || raw === '') return fallback;
   const value = Number(raw);
   if (!Number.isInteger(value) || value < 1) {
     console.error(`imap-mcp: ${name} must be a positive integer`);
+    process.exit(1);
+  }
+  if (max !== undefined && value > max) {
+    // The limit is named rather than clamped to: an operator who asked for more
+    // than the server will do should learn that here, not from a refusal later
+    // that looks like the document was the problem.
+    console.error(`imap-mcp: ${name} must not exceed ${max}`);
     process.exit(1);
   }
   return value;
