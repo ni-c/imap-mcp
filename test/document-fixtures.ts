@@ -121,7 +121,23 @@ export function buildMultiPagePdf(count: number): Buffer {
   return assemblePdf(objects);
 }
 
-export type StreamFilter = 'flate' | 'lzw' | 'runlength' | 'ascii85+flate';
+export type StreamFilter =
+  | 'flate'
+  | 'lzw'
+  | 'runlength'
+  | 'ascii85+flate'
+  | 'asciihex+flate'
+  /** An image codec: the pre-scan must leave it alone. Stored raw. */
+  | 'dct';
+
+interface FilteredPdfOptions {
+  /**
+   * How the stream dictionary states its length. `indirect` puts the number
+   * in its own object, as most writers do; `wrong` declares ten bytes, which
+   * is what forces the pre-scan back onto the `endstream` keyword.
+   */
+  length?: 'direct' | 'indirect' | 'wrong';
+}
 
 /**
  * A one-page PDF whose content stream is `megabytes` of text behind `filter`.
@@ -133,7 +149,8 @@ export type StreamFilter = 'flate' | 'lzw' | 'runlength' | 'ascii85+flate';
  */
 export function buildFilteredPdf(
   filter: StreamFilter,
-  megabytes: number
+  megabytes: number,
+  options: FilteredPdfOptions = {}
 ): Buffer {
   const operator = `(${'A'.repeat(80)}) Tj\n`;
   const body = Buffer.alloc(Math.round(megabytes * 1024 * 1024)).fill(
@@ -166,12 +183,23 @@ export function buildFilteredPdf(
       data = ascii85Encode(deflateSync(raw, { level: 9 }));
       name = '[/ASCII85Decode /FlateDecode]';
       break;
+    case 'asciihex+flate':
+      data = hexEncode(deflateSync(raw, { level: 9 }));
+      name = '[/ASCIIHexDecode /FlateDecode]';
+      break;
+    case 'dct':
+      data = raw;
+      name = '/DCTDecode';
+      break;
   }
+  const length =
+    options.length === 'indirect'
+      ? '6 0 R'
+      : options.length === 'wrong'
+        ? '10'
+        : String(data.length);
   const contents = Buffer.concat([
-    Buffer.from(
-      `<< /Length ${data.length} /Filter ${name} >>\nstream\n`,
-      'latin1'
-    ),
+    Buffer.from(`<< /Length ${length} /Filter ${name} >>\nstream\n`, 'latin1'),
     data,
     Buffer.from('\nendstream', 'latin1'),
   ]);
@@ -182,7 +210,22 @@ export function buildFilteredPdf(
       '/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>',
     contents,
     '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    ...(options.length === 'indirect' ? [String(data.length)] : []),
   ]);
+}
+
+/**
+ * ASCIIHex as a writer might really produce it: mixed case, folded into
+ * lines, closed with `>`. The decoder has a branch for each of those.
+ */
+function hexEncode(data: Buffer): Buffer {
+  const hex = data.toString('hex');
+  const lines: string[] = [];
+  for (let i = 0; i < hex.length; i += 64) {
+    const line = hex.slice(i, i + 64);
+    lines.push((i / 64) % 2 === 0 ? line.toUpperCase() : line);
+  }
+  return Buffer.from(`${lines.join('\n')}>`, 'latin1');
 }
 
 /** Cross-reference table and trailer around a list of object bodies. */
@@ -216,6 +259,13 @@ function assemblePdf(objects: (string | Buffer)[]): Buffer {
  * width growing one entry early (`EarlyChange` 1, the default). Mirrors what
  * pdf.js decodes, so the extractor's length counter is checked against the
  * real thing rather than against itself.
+ *
+ * The table is keyed on `prefix code × 256 + byte` rather than on the string
+ * the entry stands for. The string form built a new string and hashed it for
+ * every input byte, which was fine at forty megabytes without instrumentation
+ * and took twelve seconds — past the test timeout — with V8 coverage counting
+ * every one of those operations. The numeric form is the same automaton, and
+ * the stream it writes is byte-for-byte the same.
  */
 function lzwEncode(data: Buffer): Buffer {
   const out: number[] = [];
@@ -232,22 +282,25 @@ function lzwEncode(data: Buffer): Buffer {
     }
   };
 
-  let table = new Map<string, number>();
+  let table = new Map<number, number>();
   let next = 258;
   emit(256);
-  let current = '';
+  // The code for the sequence read so far: a byte value while it is one byte
+  // long, a table entry after that. -1 before the first byte.
+  let prefix = -1;
   for (const byte of data) {
-    const extended = current + String.fromCharCode(byte);
-    if (extended.length === 1 || table.has(extended)) {
-      current = extended;
+    if (prefix < 0) {
+      prefix = byte;
       continue;
     }
-    emit(
-      current.length === 1
-        ? current.charCodeAt(0)
-        : (table.get(current) as number)
-    );
-    table.set(extended, next);
+    const key = prefix * 256 + byte;
+    const known = table.get(key);
+    if (known !== undefined) {
+      prefix = known;
+      continue;
+    }
+    emit(prefix);
+    table.set(key, next);
     next += 1;
     // The decoder is one entry behind the encoder, and `EarlyChange` 1 is what
     // lines the two width switches up: the encoder switches on `next` alone.
@@ -258,15 +311,9 @@ function lzwEncode(data: Buffer): Buffer {
       next = 258;
       width = 9;
     }
-    current = String.fromCharCode(byte);
+    prefix = byte;
   }
-  if (current !== '') {
-    emit(
-      current.length === 1
-        ? current.charCodeAt(0)
-        : (table.get(current) as number)
-    );
-  }
+  if (prefix >= 0) emit(prefix);
   emit(257);
   if (held > 0) out.push((bits << (8 - held)) & 255);
   return Buffer.from(out);

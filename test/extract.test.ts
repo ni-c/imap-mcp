@@ -168,6 +168,59 @@ describe('extractPdf', () => {
     const response = await extractPdf(buildFilteredPdf('lzw', 0.01), MAX);
     expect(textOf(response)).toContain('AAAA');
   });
+
+  it('measures a Flate stream behind an ASCIIHex wrapper', async () => {
+    // The hex form a writer really produces: mixed case, folded into lines,
+    // closed with `>`. Each of those is a branch in the decoder, and pdf.js
+    // reading the small one is the proof that the fixture's encoder is real.
+    const bomb = await expandsTooFar(
+      new Uint8Array(buildFilteredPdf('asciihex+flate', 40))
+    );
+    expect(bomb).toBe(true);
+    const honest = await expandsTooFar(
+      new Uint8Array(buildFilteredPdf('asciihex+flate', 2))
+    );
+    expect(honest).toBe(false);
+    const response = await extractPdf(
+      buildFilteredPdf('asciihex+flate', 0.01),
+      MAX
+    );
+    expect(textOf(response)).toContain('AAAA');
+  });
+
+  it('resolves an indirect /Length before measuring', async () => {
+    // Most writers put the length in its own object. A pre-scan that only
+    // understood a direct number would fall back to the keyword for every one
+    // of them, and the keyword is what a sender can plant inside the data.
+    const bomb = await expandsTooFar(
+      new Uint8Array(buildFilteredPdf('flate', 40, { length: 'indirect' }))
+    );
+    expect(bomb).toBe(true);
+    const honest = await expandsTooFar(
+      new Uint8Array(buildFilteredPdf('flate', 2, { length: 'indirect' }))
+    );
+    expect(honest).toBe(false);
+  });
+
+  it('falls back to the endstream keyword when /Length lies', async () => {
+    // Ten declared bytes that do not land on `endstream` are not a length,
+    // and pdf.js would not treat them as one either. The whole stream is
+    // measured, so the bomb is still a bomb.
+    const bomb = await expandsTooFar(
+      new Uint8Array(buildFilteredPdf('flate', 40, { length: 'wrong' }))
+    );
+    expect(bomb).toBe(true);
+  });
+
+  it('leaves an image codec alone', async () => {
+    // Text extraction never decodes a JPEG, so neither does the pre-scan: a
+    // DCT stream contributes nothing to the total, whatever its filter chain
+    // would expand to.
+    const image = await expandsTooFar(
+      new Uint8Array(buildFilteredPdf('dct', 0.01))
+    );
+    expect(image).toBe(false);
+  });
 });
 
 describe('extractZipDocument', () => {
@@ -354,6 +407,79 @@ describe('extractZipDocument', () => {
   it('refuses bytes that are not an archive', async () => {
     const response = await run('docx', Buffer.from('not a zip'));
     expect(response).toEqual({ ok: false, reason: 'corrupt' });
+  });
+
+  it('decodes the entity forms a cell value carries, and no others', async () => {
+    // A plain `<v>` value is where the numeric references Excel writes for
+    // anything non-ASCII arrive. The named five and both numeric forms are
+    // decoded; a reference nobody can render — a surrogate, zero, past the
+    // last code point — stays as it was written, because a replacement
+    // character would read as content. `&amp;` is decoded last, so `&amp;lt;`
+    // is the four characters `&lt;` and not a second-round `<`.
+    const xml = '<?xml version="1.0" encoding="UTF-8"?>';
+    const response = await run(
+      'xlsx',
+      zip({
+        'xl/workbook.xml': `${xml}<workbook><sheets><sheet name="S" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+        'xl/_rels/workbook.xml.rels': `${xml}<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>`,
+        // An empty string, and a rich-text one whose `<tab/>` is not a `<t>`.
+        'xl/sharedStrings.xml':
+          `${xml}<sst><si><t/></si>` +
+          '<si><r><tab/><t>Tab</t></r><r><t xml:space="preserve"> run</t></r></si></sst>',
+        'xl/worksheets/sheet1.xml':
+          `${xml}<worksheet><sheetData><row r="1">` +
+          '<c r="A1"><v>1 &amp; 2 &lt;3&gt; &quot;q&quot; &apos;a&apos; &#65;&#x42; &amp;lt; &#xD800; &#0; &#1114112;</v></c>' +
+          '<c r="B1" t="s"><v>1</v></c>' +
+          '<c r="C1" t="s"><v>7</v></c>' +
+          '<c r="D1" t="s"><v>0</v></c>' +
+          '</row><row r="2"></row><row r="3"></row></sheetData></worksheet>',
+      })
+    );
+    const text = textOf(response);
+    expect(text).toContain(
+      '1 & 2 <3> "q" \'a\' AB &lt; &#xD800; &#0; &#1114112;'
+    );
+    expect(text).toContain('Tab run');
+    // Index 7 names no string; the cell is empty rather than an error, and the
+    // two empty rows at the end are padding, not data.
+    expect(text.trimEnd().endsWith('Tab run')).toBe(true);
+  });
+
+  it('stops reading sheets once the budget is spent', async () => {
+    // The first sheet spends the whole budget; the second is never opened,
+    // and the result says it was cut rather than pretending it had one sheet.
+    const response = await extractZipDocument(
+      'xlsx',
+      new Uint8Array(
+        buildXlsx([
+          { name: 'Erste', rows: [['a'.repeat(40)]] },
+          { name: 'Zweite', rows: [['zweite']] },
+        ])
+      ),
+      20,
+      htmlToText
+    );
+    expect(response.ok).toBe(true);
+    expect(response.ok && response.clipped).toBe(true);
+    expect(textOf(response)).not.toContain('zweite');
+  });
+
+  it('counts Word runs past a paragraph-level rPr and stops at an unclosed one', async () => {
+    // `<w:pPr><w:rPr>` is the paragraph mark's own formatting, not a run; a
+    // reader that took its `<w:rPr>` for the next run's would count the run
+    // after it as hidden. And a run whose `<w:rPr>` never closes ends the
+    // count rather than the walk.
+    const response = await run(
+      'docx',
+      buildDocxRaw(
+        '<w:document><w:body>' +
+          '<w:p><w:pPr><w:rPr><w:vanish/></w:rPr></w:pPr><w:r><w:t>sichtbar</w:t></w:r></w:p>' +
+          '<w:p><w:r><w:rPr><w:vanish/><w:t>offen</w:t></w:r></w:p>' +
+          '</w:body></w:document>'
+      )
+    );
+    expect(textOf(response)).toContain('sichtbar');
+    expect(response.ok && response.hiddenRuns).toBe(0);
   });
 });
 
@@ -587,6 +713,45 @@ describe('extractDocumentText', () => {
       maxChars: MAX,
     });
     expect(after.ok).toBe(true);
+  });
+
+  it('answers busy past the in-flight cap instead of queueing a ninth process', async () => {
+    // The queue is what bounds memory: one child at a time, the next when
+    // the previous is gone. The cap on the queue is what bounds latency —
+    // a caller who fires nine at once gets eight answers and one "busy",
+    // not a ninth process and a wait it never chose.
+    const request = {
+      kind: 'docx' as const,
+      bytes: new Uint8Array(buildDocx(['neun'])),
+      maxChars: MAX,
+    };
+    const results = await Promise.all(
+      Array.from({ length: 9 }, () => extractDocumentText(request))
+    );
+    expect(results.filter((r) => !r.ok && r.reason === 'busy')).toHaveLength(1);
+    expect(results.filter((r) => r.ok)).toHaveLength(8);
+  }, 30_000);
+
+  it('reports a child that could not start as internal, with a code on stderr', async () => {
+    // A heap flag node refuses is the one failure of this kind that can be
+    // produced on demand: the process exits before the IPC channel carries
+    // anything, so the answer has to come from the exit itself.
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const response = await extractDocumentText(
+        { kind: 'pdf', bytes: new Uint8Array(buildPdf()), maxChars: MAX },
+        { memoryMb: Number.NaN }
+      );
+      expect(response).toEqual({ ok: false, reason: 'internal' });
+      expect(error).toHaveBeenCalled();
+      // A code, never the message: the message is where a parser quotes the
+      // document.
+      expect(String(error.mock.calls[0]?.[0])).toMatch(
+        /extraction (process|request)/
+      );
+    } finally {
+      error.mockRestore();
+    }
   });
 
   it('writes nothing to stdout', async () => {

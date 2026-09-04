@@ -1,4 +1,5 @@
 import {
+  chmod,
   mkdtemp,
   readFile,
   rm,
@@ -63,6 +64,32 @@ describe('saveAttachment', () => {
     await writeFile(join(directory, 'a (2).txt'), '2');
     const saved = await saveAttachment(directory, 'a.txt', Buffer.from('3'));
     expect(saved.path).toBe(join(directory, 'a (3).txt'));
+  });
+
+  it('gives up after fifty names rather than counting forever', async () => {
+    // Fifty files with this name already exist. The fifty-first is not an
+    // attachment worth a fifty-second stat call: the directory is full of
+    // this name, and the caller should hear that instead of waiting.
+    await writeFile(join(directory, 'a.txt'), '1');
+    for (let n = 2; n <= 50; n += 1) {
+      await writeFile(join(directory, `a (${n}).txt`), String(n));
+    }
+    await expect(
+      saveAttachment(directory, 'a.txt', Buffer.from('x'))
+    ).rejects.toThrow('50 files with this name');
+  });
+
+  it('explains a directory it may not write to', async () => {
+    // Root writes anywhere; the case cannot be produced under it.
+    if (process.getuid?.() === 0) return;
+    await chmod(directory, 0o500);
+    try {
+      await expect(
+        saveAttachment(directory, 'a.txt', Buffer.from('x'))
+      ).rejects.toThrow('permission denied');
+    } finally {
+      await chmod(directory, 0o700);
+    }
   });
 
   it('handles a name with no extension', async () => {
@@ -350,6 +377,27 @@ describe('attachment resources', () => {
     await expect(
       harness.client.readResource({ uri: 'imap://message/999/part/2' })
     ).rejects.toThrow();
+    await harness.close();
+  });
+
+  it('refuses a URI whose UID or part id is not one, before any FETCH', async () => {
+    // The template matches any text in either slot. What reaches the
+    // connection has to be an integer and a dotted part number, the same
+    // shapes the tool's schema enforces — validated here because a resource
+    // has no schema.
+    const harness = await harnessWithPdf();
+    for (const uri of [
+      'imap://message/seven/part/2',
+      'imap://message/0/part/2',
+      'imap://message/7/part/2a',
+    ]) {
+      await expect(harness.client.readResource({ uri }), uri).rejects.toThrow(
+        /no valid (UID|MIME part id)/
+      );
+    }
+    expect(harness.imap.calls.some((entry) => entry.name === 'download')).toBe(
+      false
+    );
     await harness.close();
   });
 
