@@ -1,3 +1,5 @@
+import { deflateSync } from 'node:zlib';
+
 import { zipSync } from 'fflate';
 
 /**
@@ -85,6 +87,269 @@ export function buildPdf(options: PdfOptions = {}): Buffer {
 
 function escapePdf(text: string): string {
   return text.replace(/([\\()])/g, '\\$1');
+}
+
+/**
+ * A PDF with `count` real pages, each carrying one line of text.
+ *
+ * Distinct from `buildPdf({ declaredPages })`, which lies in `/Count`: pdf.js
+ * corrects a `/Count` that does not match the page tree, so a lie cannot reach
+ * the page loop. These pages are real, which is what exercises the cap.
+ */
+export function buildMultiPagePdf(count: number): Buffer {
+  const objects: (string | Buffer)[] = ['<< /Type /Catalog /Pages 2 0 R >>'];
+  // Objects: 1 catalog, 2 pages, then a page and a content object per page,
+  // then the shared font last.
+  const fontNumber = 3 + count * 2;
+  const kids: string[] = [];
+  for (let page = 0; page < count; page += 1) kids.push(`${3 + page * 2} 0 R`);
+  objects.push(`<< /Type /Pages /Kids [${kids.join(' ')}] /Count ${count} >>`);
+  for (let page = 0; page < count; page += 1) {
+    const contentNumber = 4 + page * 2;
+    objects.push(
+      '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ' +
+        `/Resources << /Font << /F1 ${fontNumber} 0 R >> >> /Contents ${contentNumber} 0 R >>`
+    );
+    const stream = `BT /F1 24 Tf 72 720 Td (Seite ${page + 1}) Tj ET`;
+    objects.push(
+      `<< /Length ${Buffer.byteLength(stream, 'latin1')} >>\nstream\n${stream}\nendstream`
+    );
+  }
+  objects.push(
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>'
+  );
+  return assemblePdf(objects);
+}
+
+export type StreamFilter = 'flate' | 'lzw' | 'runlength' | 'ascii85+flate';
+
+/**
+ * A one-page PDF whose content stream is `megabytes` of text behind `filter`.
+ *
+ * The file itself stays small — kilobytes — while the stream decodes to the
+ * size asked for. Past the pre-scan's ceiling this is the bomb it exists to
+ * catch before pdf.js materialises it; below the ceiling it is an ordinary,
+ * if wordy, document that must still be read.
+ */
+export function buildFilteredPdf(
+  filter: StreamFilter,
+  megabytes: number
+): Buffer {
+  const operator = `(${'A'.repeat(80)}) Tj\n`;
+  const body = Buffer.alloc(Math.round(megabytes * 1024 * 1024)).fill(
+    operator,
+    0,
+    undefined,
+    'latin1'
+  );
+  const raw = Buffer.concat([
+    Buffer.from('BT /F1 12 Tf 72 720 Td\n', 'latin1'),
+    body,
+    Buffer.from('\nET', 'latin1'),
+  ]);
+  let data: Buffer;
+  let name: string;
+  switch (filter) {
+    case 'flate':
+      data = deflateSync(raw, { level: 9 });
+      name = '/FlateDecode';
+      break;
+    case 'lzw':
+      data = lzwEncode(raw);
+      name = '/LZWDecode';
+      break;
+    case 'runlength':
+      data = runLengthEncode(raw);
+      name = '/RunLengthDecode';
+      break;
+    case 'ascii85+flate':
+      data = ascii85Encode(deflateSync(raw, { level: 9 }));
+      name = '[/ASCII85Decode /FlateDecode]';
+      break;
+  }
+  const contents = Buffer.concat([
+    Buffer.from(
+      `<< /Length ${data.length} /Filter ${name} >>\nstream\n`,
+      'latin1'
+    ),
+    data,
+    Buffer.from('\nendstream', 'latin1'),
+  ]);
+  return assemblePdf([
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ' +
+      '/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>',
+    contents,
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+  ]);
+}
+
+/** Cross-reference table and trailer around a list of object bodies. */
+function assemblePdf(objects: (string | Buffer)[]): Buffer {
+  const parts: Buffer[] = [Buffer.from('%PDF-1.4\n', 'latin1')];
+  let length = parts[0]!.length;
+  const offsets: number[] = [];
+  objects.forEach((body, index) => {
+    offsets.push(length);
+    const chunk = Buffer.concat([
+      Buffer.from(`${index + 1} 0 obj\n`, 'latin1'),
+      typeof body === 'string' ? Buffer.from(body, 'latin1') : body,
+      Buffer.from('\nendobj\n', 'latin1'),
+    ]);
+    parts.push(chunk);
+    length += chunk.length;
+  });
+  let tail = `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (const offset of offsets) {
+    tail += `${String(offset).padStart(10, '0')} 00000 n \n`;
+  }
+  tail +=
+    `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\n` +
+    `startxref\n${length}\n%%EOF\n`;
+  parts.push(Buffer.from(tail, 'latin1'));
+  return Buffer.concat(parts);
+}
+
+/**
+ * PDF LZW: 9- to 12-bit codes, MSB first, 256 clears, 257 ends, the code
+ * width growing one entry early (`EarlyChange` 1, the default). Mirrors what
+ * pdf.js decodes, so the extractor's length counter is checked against the
+ * real thing rather than against itself.
+ */
+function lzwEncode(data: Buffer): Buffer {
+  const out: number[] = [];
+  let bits = 0;
+  let held = 0;
+  let width = 9;
+  const emit = (code: number): void => {
+    bits = (bits << width) | code;
+    held += width;
+    while (held >= 8) {
+      out.push((bits >>> (held - 8)) & 255);
+      held -= 8;
+      bits &= (1 << held) - 1;
+    }
+  };
+
+  let table = new Map<string, number>();
+  let next = 258;
+  emit(256);
+  let current = '';
+  for (const byte of data) {
+    const extended = current + String.fromCharCode(byte);
+    if (extended.length === 1 || table.has(extended)) {
+      current = extended;
+      continue;
+    }
+    emit(
+      current.length === 1
+        ? current.charCodeAt(0)
+        : (table.get(current) as number)
+    );
+    table.set(extended, next);
+    next += 1;
+    // The decoder is one entry behind the encoder, and `EarlyChange` 1 is what
+    // lines the two width switches up: the encoder switches on `next` alone.
+    if (width < 12 && next >= 1 << width) width += 1;
+    if (next >= 4096) {
+      emit(256);
+      table = new Map();
+      next = 258;
+      width = 9;
+    }
+    current = String.fromCharCode(byte);
+  }
+  if (current !== '') {
+    emit(
+      current.length === 1
+        ? current.charCodeAt(0)
+        : (table.get(current) as number)
+    );
+  }
+  emit(257);
+  if (held > 0) out.push((bits << (8 - held)) & 255);
+  return Buffer.from(out);
+}
+
+/** PackBits, as `/RunLengthDecode` reads it: runs and literal batches. */
+function runLengthEncode(data: Buffer): Buffer {
+  const out: number[] = [];
+  let i = 0;
+  while (i < data.length) {
+    const byte = data[i] as number;
+    let run = 1;
+    while (run < 128 && i + run < data.length && data[i + run] === byte)
+      run += 1;
+    if (run >= 2) {
+      out.push(257 - run, byte);
+      i += run;
+      continue;
+    }
+    let literal = 1;
+    while (
+      literal < 128 &&
+      i + literal < data.length &&
+      !(
+        i + literal + 1 < data.length &&
+        data[i + literal] === data[i + literal + 1]
+      )
+    ) {
+      literal += 1;
+    }
+    out.push(literal - 1);
+    for (let k = 0; k < literal; k += 1) out.push(data[i + k] as number);
+    i += literal;
+  }
+  out.push(128);
+  return Buffer.from(out);
+}
+
+function ascii85Encode(data: Buffer): Buffer {
+  let out = '';
+  for (let i = 0; i < data.length; i += 4) {
+    const group = data.subarray(i, i + 4);
+    const padded = Buffer.concat([group, Buffer.alloc(4 - group.length)]);
+    let value = padded.readUInt32BE(0);
+    if (group.length === 4 && value === 0) {
+      out += 'z';
+      continue;
+    }
+    const digits: string[] = [];
+    for (let k = 0; k < 5; k += 1) {
+      digits.unshift(String.fromCharCode(33 + (value % 85)));
+      value = Math.floor(value / 85);
+    }
+    out += digits.slice(0, group.length + 1).join('');
+  }
+  return Buffer.from(`${out}~>`, 'latin1');
+}
+
+/**
+ * An .xlsx amplification bomb: one long shared string behind a grid of cells.
+ *
+ * A shared string is stored once and referenced by index, so a kilobyte of
+ * archive stands for `stringChars * rows * cols` characters of output. This is
+ * the shape that took the whole process down before the per-row budget.
+ */
+export function buildXlsxBomb(
+  stringChars: number,
+  rows: number,
+  cols: number
+): Buffer {
+  let sheet = `${XML}<worksheet><sheetData>`;
+  for (let r = 1; r <= rows; r += 1) {
+    sheet += `<row r="${r}">`;
+    for (let c = 0; c < cols; c += 1) sheet += '<c t="s"><v>0</v></c>';
+    sheet += '</row>';
+  }
+  sheet += '</sheetData></worksheet>';
+  return zip({
+    'xl/workbook.xml': `${XML}<workbook><sheets><sheet name="S" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+    'xl/_rels/workbook.xml.rels': `${XML}<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>`,
+    'xl/sharedStrings.xml': `${XML}<sst><si><t>${'A'.repeat(stringChars)}</t></si></sst>`,
+    'xl/worksheets/sheet1.xml': sheet,
+  });
 }
 
 const XML = '<?xml version="1.0" encoding="UTF-8"?>';

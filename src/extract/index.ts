@@ -1,4 +1,5 @@
-import { Worker } from 'node:worker_threads';
+import { fork } from 'node:child_process';
+import { once } from 'node:events';
 
 import type { ExtractKind, ExtractRequest, ExtractResponse } from './types.js';
 
@@ -10,37 +11,44 @@ export type {
 } from './types.js';
 
 /**
- * How long a document may be parsed before the thread doing it is stopped.
+ * How long a document may be parsed before the process doing it is killed.
  *
- * Below the IMAP command timeout, so an extraction never outlives the fetch
- * that fed it. Generous next to the five seconds a regular expression gets in
- * the sibling servers, because a hundred-page PDF is honest work — and finite,
- * because a document that has not finished by now is not going to.
+ * Generous next to the five seconds a regular expression gets in the sibling
+ * servers, because a hundred-page PDF is honest work — and finite, because a
+ * document that has not finished by now is not going to.
  */
 export const EXTRACT_TIMEOUT_MS = 20_000;
 
 /**
- * Characters the worker may return, before any of the paging below.
+ * Characters the child may return, before any of the paging below.
  *
  * Not a context budget — that is `max_chars` at the tool, and it is much
- * smaller. This is the ceiling on what is held in memory and paged through.
+ * smaller. This is the ceiling on what is held in memory and paged through,
+ * and the child enforces it for every format: nothing larger is ever built
+ * there, let alone sent back.
  */
 export const MAX_EXTRACT_CHARS = 1_000_000;
 
 /**
- * Memory the parsing thread may use.
+ * V8 heap the parsing process may use.
  *
- * Exceeding it kills the thread with `ERR_WORKER_OUT_OF_MEMORY`, which arrives
- * as an event this module can answer. Without it, the same runaway parse is a
- * cgroup OOM kill of the whole process — and in the deployment this feature was
- * written for, that process is the server.
- *
- * It bounds V8's heap, so it bounds a pathological object graph. It does not
- * reliably bound one enormous typed array, which is external memory; the entry
- * caps in `ooxml.ts` are what cover that.
+ * Best effort, and named as such. It bounds a pathological object graph, and
+ * when it fires the child aborts — on its own, which is the whole reason the
+ * parse is in a process. It does not bound typed arrays, which are external
+ * memory; the deflate pre-scan in `pdf.ts` and the entry caps in `ooxml.ts`
+ * are what cover those.
  */
-const WORKER_MEMORY_MB = 256;
-const WORKER_YOUNG_MEMORY_MB = 32;
+const CHILD_MEMORY_MB = 256;
+
+/**
+ * Requests admitted at once, running and waiting together.
+ *
+ * Extractions run one at a time (see {@link queue}), so a request that arrives
+ * behind seven others would wait up to seven timeouts for its turn, holding
+ * its mailbox lock throughout. Past this many it is refused outright, which is
+ * an answer the caller can act on.
+ */
+const MAX_IN_FLIGHT = 8;
 
 /** Content types this server can read text out of, and what each one is. */
 const EXTRACTABLE = new Map<string, ExtractKind>([
@@ -84,23 +92,30 @@ export function expectedSignature(kind: ExtractKind): string {
 /**
  * Serialises extractions.
  *
- * One worker per call and no limit would mean N concurrent tool calls holding N
- * isolates of {@link WORKER_MEMORY_MB} each, which is a memory limit that
+ * One process per call and no limit would mean N concurrent tool calls holding
+ * N processes of {@link CHILD_MEMORY_MB} each, which is a memory limit that
  * multiplies by a number the caller chooses. The queue is the whole mechanism:
- * the next extraction starts when the previous thread is gone.
+ * the next extraction starts when the previous process is gone.
  */
 let queue: Promise<unknown> = Promise.resolve();
+let inFlight = 0;
 
 export async function extractDocumentText(
   request: ExtractRequest,
-  limits: WorkerLimits = {}
+  limits: ChildLimits = {}
 ): Promise<ExtractResponse> {
-  const run = queue.then(
-    () => runInWorker(request, limits),
-    () => runInWorker(request, limits)
-  );
-  queue = run.catch(() => undefined);
-  return run;
+  if (inFlight >= MAX_IN_FLIGHT) return { ok: false, reason: 'busy' };
+  inFlight += 1;
+  try {
+    const run = queue.then(
+      () => runInChild(request, limits),
+      () => runInChild(request, limits)
+    );
+    queue = run.catch(() => undefined);
+    return await run;
+  } finally {
+    inFlight -= 1;
+  }
 }
 
 /**
@@ -112,76 +127,104 @@ export async function extractDocumentText(
  * gigabyte. Making them arguments is what lets the failure paths be exercised
  * in milliseconds; nothing in `src/` passes them.
  */
-export interface WorkerLimits {
+export interface ChildLimits {
   timeoutMs?: number;
   memoryMb?: number;
 }
 
-async function runInWorker(
+/** A code for the log, never a message. */
+function codeOf(error: unknown): string {
+  const value = error as { code?: unknown; name?: unknown } | null;
+  if (typeof value?.code === 'string') return value.code;
+  if (typeof value?.name === 'string') return value.name;
+  return 'unknown';
+}
+
+async function runInChild(
   request: ExtractRequest,
-  limits: WorkerLimits = {}
+  limits: ChildLimits = {}
 ): Promise<ExtractResponse> {
   const timeoutMs = limits.timeoutMs ?? EXTRACT_TIMEOUT_MS;
-  // A copy this function owns. `readCapped` builds its buffer with
-  // `Buffer.concat`, which is pool-backed below 4 kB — transferring that
-  // ArrayBuffer would detach the shared allocator pool and quietly corrupt
-  // every unrelated Buffer sitting in it.
-  const bytes = new Uint8Array(request.bytes);
+  const memoryMb = limits.memoryMb ?? CHILD_MEMORY_MB;
 
-  const worker = new Worker(
+  const child = fork(
     new URL(
-      import.meta.url.endsWith('.ts') ? './worker.ts' : './worker.js',
+      import.meta.url.endsWith('.ts') ? './child.ts' : './child.js',
       import.meta.url
     ),
+    [],
     {
-      workerData: { ...request, bytes } satisfies ExtractRequest,
-      transferList: [bytes.buffer],
-      resourceLimits: {
-        maxOldGenerationSizeMb: limits.memoryMb ?? WORKER_MEMORY_MB,
-        maxYoungGenerationSizeMb: WORKER_YOUNG_MEMORY_MB,
-      },
-      // Not tidiness — correctness. A worker's stdout is piped into the
-      // parent's by default, the parent's stdout is this server's JSON-RPC
-      // transport, and pdf.js logs. One line from inside the parser would
-      // corrupt the framing and hang the session. Held open and dropped;
-      // stderr is forwarded, because that is where every other diagnostic in
-      // this server already goes.
-      stdout: true,
-      stderr: true,
+      // Stated rather than inherited. The parent's own flags may be ones a
+      // child cannot take — `--input-type` is one — and an inherited flag that
+      // fails to parse would turn every extraction into a silent `internal`.
+      execArgv: [`--max-old-space-size=${memoryMb}`],
+      // Not tidiness — correctness. The parent's stdout is this server's
+      // JSON-RPC transport, and pdf.js logs. One line from inside the parser
+      // would corrupt the framing and hang the session. Discarded; stderr is
+      // shared, because that is where every other diagnostic in this server
+      // already goes.
+      stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
+      // Structured clone rather than JSON: the request carries the document as
+      // a typed array, and JSON would turn it into an array of numbers ten
+      // times its size.
+      serialization: 'advanced',
     }
   );
-  worker.stdout.resume();
-  worker.stderr.pipe(process.stderr);
 
   let timer: NodeJS.Timeout | undefined;
   try {
     return await new Promise<ExtractResponse>((resolve) => {
-      timer = setTimeout(() => {
-        resolve({ ok: false, reason: 'timeout' });
-      }, timeoutMs);
-      worker.once('message', (value: ExtractResponse) => {
+      // The first answer wins. Everything after it — the exit of a child that
+      // was killed because it had already answered, most of all — is silence,
+      // not a second verdict.
+      let settled = false;
+      const settle = (value: ExtractResponse): void => {
+        if (settled) return;
+        settled = true;
         resolve(value);
+      };
+      timer = setTimeout(() => {
+        settle({ ok: false, reason: 'timeout' });
+      }, timeoutMs);
+      child.once('message', (value) => {
+        settle(value as ExtractResponse);
       });
-      worker.once('error', (error: NodeJS.ErrnoException) => {
-        resolve({
-          ok: false,
-          reason:
-            error.code === 'ERR_WORKER_OUT_OF_MEMORY'
-              ? 'out-of-memory'
-              : 'internal',
-        });
+      child.once('error', (error) => {
+        if (settled) return;
+        console.error(`imap-mcp: extraction process failed: ${codeOf(error)}`);
+        settle({ ok: false, reason: 'internal' });
       });
-      worker.once('exit', () => {
-        // Only reached when the worker left without answering; a normal run has
-        // already resolved above and this is ignored.
-        resolve({ ok: false, reason: 'internal' });
+      child.once('exit', (code, signal) => {
+        // Only reached when the child left without answering. An abort is what
+        // V8 does when the heap limit is hit — and what the process does
+        // *instead of* taking the server with it, which is the property being
+        // bought here.
+        if (settled) return;
+        if (signal === 'SIGABRT' || code === 134) {
+          settle({ ok: false, reason: 'out-of-memory' });
+          return;
+        }
+        console.error(
+          `imap-mcp: extraction process exited early: ${signal ?? `code ${code}`}`
+        );
+        settle({ ok: false, reason: 'internal' });
       });
+      try {
+        child.send(request);
+      } catch (error) {
+        console.error(`imap-mcp: extraction request failed: ${codeOf(error)}`);
+        settle({ ok: false, reason: 'internal' });
+      }
     });
   } finally {
     if (timer) clearTimeout(timer);
-    // Unconditional: on the timeout path the thread is still inside the parse
-    // and will never exit on its own, and a leaked worker holds its heap and
-    // its copy of the document for the lifetime of the process.
-    await worker.terminate();
+    // Unconditional: on the timeout path the process is still inside the parse
+    // and will never exit on its own. SIGKILL, because a parser stuck in native
+    // code does not check for anything gentler — and because a process, unlike
+    // a thread, can be killed from outside whatever it is doing.
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL');
+      await once(child, 'exit');
+    }
   }
 }

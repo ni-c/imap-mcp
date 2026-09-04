@@ -83,8 +83,8 @@ npx @modelcontextprotocol/inspector node dist/index.js
   and Trivy all resolve the tree. A PDF.js advisory raises no alert here. Watch
   [PDF.js releases](https://github.com/mozilla/pdf.js/releases) and treat an `unpdf`
   update as one, not as a routine minor.
-- **`src/extract/worker.ts` and everything it reaches may not use relative value
-  imports.** The worker is started from its own source file — `.ts` under vitest, `.js`
+- **`src/extract/child.ts` and everything it reaches may not use relative value
+  imports.** The child is started from its own source file — `.ts` under vitest, `.js`
   from `dist/` — so Node loads it directly, and Node's type stripping does not rewrite a
   `./x.js` specifier to the `.ts` beside it. `import type` is erased and is fine; a value
   import is not. Getting this wrong in one direction fails every test, and in the other

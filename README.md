@@ -351,12 +351,13 @@ knowing before concluding that a filtered install reaches less of the mailbox th
   saving to disk, where it would be more dangerous, not less.
 - **A `part_id` must come from a listing call**, so the body cannot be pulled out through the
   attachment tool and escape its framing.
-- **Documents are parsed in a thread that can be stopped.** `mode: "text"` reads a PDF or
+- **Documents are parsed in a process that can be killed.** `mode: "text"` reads a PDF or
   Office file with a bundled PDF.js and a ZIP reader — the only place this server parses a
-  binary a stranger sent. It runs in a worker with a memory ceiling and a timeout, its stdout
-  detached from the JSON-RPC transport, PDF.js's `eval` support off, and an entry allowlist
-  that decides what is decompressed _before_ the buffer is sized. Nothing in that path
-  touches the network or the filesystem.
+  binary a stranger sent. It runs in a child process with a heap limit and a timeout, its
+  stdout discarded rather than shared with the JSON-RPC transport, PDF.js's `eval` support
+  off, compressed streams measured against a ceiling _before_ PDF.js inflates them, and an
+  entry allowlist that decides what is decompressed _before_ the buffer is sized. Nothing in
+  that path touches the network or the filesystem.
 - **Extracted text says what it is.** Extraction returns every text-drawing instruction in a
   file, including text set below one point or drawn in the colour of the paper, and returns
   nothing that was drawn as a picture. The result says so above the fence, because "the

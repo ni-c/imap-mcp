@@ -199,22 +199,37 @@ thing that happens to an attachment here, and unlike the other two it _parses_ t
 bundled PDF.js and a ZIP reader, both fed by a stranger. That is a genuinely new attack
 surface for this server, and the answer is containment rather than trust.
 
-**Where it runs.** A `worker_thread` with `resourceLimits`, a twenty-second timeout, and an
-unconditional `terminate()` in a `finally`. Without the memory ceiling a runaway parse is a
-cgroup OOM kill of the whole process; with it, it is an error this server answers. Without the
-timeout a parse that spins is a server that stops answering with nothing in the log. One
-extraction runs at a time, because a per-call memory ceiling that multiplies by a number the
-caller chooses is not a ceiling.
+**Where it runs.** A child process of its own, with a V8 heap limit, a twenty-second timeout,
+and an unconditional `SIGKILL` in a `finally`. A process rather than a worker thread, and that
+was measured rather than chosen: a worker's `resourceLimits` promise to turn a runaway parse
+into `ERR_WORKER_OUT_OF_MEMORY`, and for the allocation pattern a three-kilobyte spreadsheet
+produced they did not — the whole server died with `FATAL ERROR: Reached heap limit`. A thread
+also cannot give back what a terminated parse left behind; a gigabyte stayed resident after
+`terminate()`. A killed process takes its memory with it, and a process that aborts aborts
+alone: the server answers "out of memory" and carries on. Without the timeout a parse that
+spins is a server that stops answering with nothing in the log. One extraction runs at a time,
+because a per-call memory ceiling that multiplies by a number the caller chooses is not a
+ceiling, and past eight requests in flight the ninth is refused rather than queued behind seven
+timeouts.
 
-**Its stdout is detached.** The transport is stdio JSON-RPC and PDF.js logs. A worker's stdout
-is piped into the parent's by default, so one line from inside the parser would corrupt the
-framing and hang the session. PDF.js is also run at `verbosity: 0`; one guard is not a guard.
+**The heap limit is best effort, and the guards that matter sit in front of it.** It bounds a
+pathological object graph; it does not bound a typed array, which is external memory, and both
+parsers produce those. The ceilings below — on what a ZIP entry may inflate to, on what a PDF
+stream may decode to, and on the characters the child may build for any format — are what
+bound memory. The process boundary is what bounds the damage if one of them is wrong.
+
+**Its stdout is discarded.** The transport is stdio JSON-RPC and PDF.js logs. One line from
+inside the parser reaching the parent's stdout would corrupt the framing and hang the session,
+so the child is started without one. PDF.js is also run at `verbosity: 0`; one guard is not a
+guard. Its flags are stated rather than inherited, because a flag the parent was started with
+and a child cannot take would turn every extraction into a silent failure.
 
 **What crosses back is a code, never a message.** PDF.js and fflate quote the document in their
 exceptions — byte offsets, object fragments, what they found where they expected something
 else. An error message is read in the server's own voice, outside the fence every other piece
-of message content passes through, so the worker returns a reason code and the sentences are
-written here.
+of message content passes through, so the child returns a reason code and the sentences are
+written here. The code — never the message — also goes to stderr, so an extraction that fails
+for a reason nobody anticipated leaves one line an operator can act on.
 
 **PDF.js runs with `isEvalSupported: false`**, which gates its construction of `Function`
 objects from font and calculator programs taken from the document — the primitive that turned a
@@ -226,13 +241,36 @@ returns embedded files, which is how a PDF can carry an executable past a magic-
 only ever looks at the outer `%PDF`. The page loop is sequential and capped, because the page
 count is a number the sender wrote.
 
+**PDF streams are measured before PDF.js inflates them.** PDF.js decodes a stream into memory
+in full, that memory is a typed array no heap limit sees, and Deflate reaches a thousand to one
+on repetitive input — so a 3.4 MB attachment whose one content stream inflates to a gigabyte
+took the process to 2.1 GB resident within a second, and the timeout only decided when that
+stopped growing. A linear pass over the file now decodes every Flate, LZW and RunLength stream
+(behind an ASCIIHex or ASCII85 wrapper or not) only as far as a ceiling — 32 MB for one
+stream, 128 MB for all of them — and refuses the document as "too large" the moment one
+crosses it. The work that costs is bounded by the ceiling, whatever the file holds. Streams are
+delimited the way PDF.js delimits them, by a `/Length` that lands on `endstream` and by the
+keyword otherwise, so a sender cannot end the measurement early by writing the keyword inside
+their own compressed bytes. Image codecs are not measured, because text extraction never
+decodes them either.
+
 **The ZIP reader decides before it allocates.** `unzipSync` sizes an entry's output buffer from
 the _declared_ uncompressed size in the central directory, checked against nothing, so the
 filter callback — the last point before that allocation — carries every guard: a fixed
-allowlist of entry names, an entry count, a per-entry and cumulative size budget, a compression
-ratio, and a refusal of anything but stored and deflate. Nothing outside the allowlist is ever
-decompressed, which is also why a nested archive is not descended into and an entry called
-`__proto__` is never used as a key.
+allowlist of entry names, a count of the entries that allowlist admits, a per-entry and a
+cumulative size ceiling, and a refusal of anything but stored and deflate. Nothing outside the
+allowlist is ever decompressed, which is also why a nested archive is not descended into, an
+entry called `__proto__` is never used as a key, and six hundred embedded pictures are neither
+read nor counted against a report. Measured on fflate 0.8.3: a declared size below the real one
+truncates rather than grows, so lying in either direction buys nothing.
+
+**Spreadsheets are budgeted per row, and every cell is capped.** A shared string is stored once
+and referenced by index, so one long string behind a grid of cells is a kilobyte of archive
+standing for gigabytes of output; a repeated cell in an OpenDocument sheet is the same trick in
+a different syntax. The character budget is charged row by row and stops the walk, no cell may
+exceed four kilobytes, and nothing larger than the character ceiling is ever built in the
+child — the contract "the child returns at most a million characters" holds for every format,
+not most of them.
 
 **There is no XML parser, and that is the defence.** A real one resolves entities, which would
 hand a mail attachment billion-laughs expansion and an `<!ENTITY … SYSTEM "file:///etc/passwd">`

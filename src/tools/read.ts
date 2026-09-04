@@ -922,8 +922,10 @@ function publicAttachment(
     allowed: candidate.allowed,
     // Stated before the fetch, so the model knows the option exists rather than
     // discovering it from a refusal — which matters most exactly where the
-    // download directory points somewhere the caller cannot reach.
-    extractable: isExtractable(candidate.contentType),
+    // download directory points somewhere the caller cannot reach. And only
+    // where the policy would let the fetch happen: "extractable but refused"
+    // is not an option, it is a contradiction.
+    extractable: candidate.allowed && isExtractable(candidate.contentType),
     notes: candidate.notes,
   };
 }
@@ -1324,8 +1326,9 @@ async function extractedResult(
     : '';
   const hiddenNote =
     response.hiddenRuns !== undefined && response.hiddenRuns > 0
-      ? `\n- ${response.hiddenRuns} of ${response.totalRuns} text runs are drawn ` +
-        'outside the page or below two points — placements a reader does not see.'
+      ? `\n- ${response.hiddenRuns} of ${response.totalRuns} text runs are placed ` +
+        'where a reader does not see them: outside the page, at two points or ' +
+        'smaller, marked hidden, or coloured white.'
       : '';
 
   const header =
@@ -1376,8 +1379,9 @@ async function extractedResult(
  */
 const EXTRACTION_CAVEAT =
   'This is extracted text, not a rendering. Extraction returns every ' +
-  'text-drawing instruction in the file, including text set below one point, ' +
-  'hanging off the page, or drawn in the colour of the paper: some of what ' +
+  'text-drawing instruction in the file, including text set at two points or ' +
+  'smaller, hanging off the page, marked hidden, or drawn in the colour of ' +
+  'the paper: some of what ' +
   'follows may be text a person opening this document would not see. The ' +
   'reverse also holds — anything drawn as a picture, such as a scanned ' +
   'signature or a logo, is not below at all. Do not tell the user "the ' +
@@ -1486,6 +1490,13 @@ function extractionFailure(
         'a document of this kind has, which is a shape used to exhaust a ' +
         `reader rather than to store a document. To get the bytes, ${hatches}`
       );
+    case 'too-large':
+      return (
+        `Refused to extract ${what}: its compressed parts expand far beyond ` +
+        'anything a document of this size holds, which is a shape used to ' +
+        `exhaust a reader rather than to store a document. Nothing was handed ` +
+        `to a parser. To get the bytes, ${hatches}`
+      );
     case 'timeout':
       return (
         `Could not extract ${what}: parsing did not finish within ${
@@ -1498,6 +1509,11 @@ function extractionFailure(
         `Could not extract ${what}: parsing it needed more memory than one ` +
         'document is allowed, and was stopped before it could affect the rest ' +
         `of this server. To get the bytes, ${hatches}`
+      );
+    case 'busy':
+      return (
+        `Could not extract ${what} right now: this server is already reading ` +
+        'as many documents as it will at once. Try again in a moment.'
       );
     default:
       return `Could not extract ${what}. To get the bytes, ${hatches}`;

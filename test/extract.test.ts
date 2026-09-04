@@ -11,16 +11,19 @@ import {
   extractKindOf,
   isExtractable,
 } from '../src/extract/index.js';
-import { extractPdf } from '../src/extract/pdf.js';
+import { expandsTooFar, extractPdf } from '../src/extract/pdf.js';
 import { extractZipDocument } from '../src/extract/ooxml.js';
 import {
   buildDocx,
   buildDocxRaw,
+  buildFilteredPdf,
+  buildMultiPagePdf,
   buildOds,
   buildOdt,
   buildPdf,
   buildPptx,
   buildXlsx,
+  buildXlsxBomb,
   patchDeclaredSize,
   zip,
 } from './document-fixtures.js';
@@ -102,6 +105,68 @@ describe('extractPdf', () => {
     const response = await extractPdf(buildPdf({ text: 'x'.repeat(200) }), 20);
     expect(textOf(response)).toHaveLength(20);
     expect(response.ok && response.clipped).toBe(true);
+  });
+
+  it('reads a document with more pages than the cap', async () => {
+    // The page loop used to be entered only while `clipped` was false, and
+    // `clipped` was initialised from `declared > pageCount` — so any PDF past
+    // a hundred real pages was read as zero pages and reported as a scan.
+    const response = await extractPdf(buildMultiPagePdf(101), MAX);
+    expect(textOf(response)).toContain('Seite 1');
+    expect(textOf(response)).toContain('Seite 100');
+    expect(textOf(response)).not.toContain('Seite 101');
+    expect(response.ok && response.unitCount).toBe(100);
+    // The page cap is reported as what was declared versus what was read;
+    // `clipped` is reserved for the character cap.
+    expect(response.ok && response.declaredUnitCount).toBe(101);
+    expect(response.ok && response.clipped).toBe(false);
+  });
+
+  it('reads every page of a document within the cap', async () => {
+    const response = await extractPdf(buildMultiPagePdf(100), MAX);
+    expect(textOf(response)).toContain('Seite 100');
+    expect(response.ok && response.unitCount).toBe(100);
+    expect(response.ok && response.declaredUnitCount).toBeUndefined();
+  });
+
+  it('refuses a deflate bomb before the parser inflates it', async () => {
+    // Kilobytes on disk, far more once inflated — external memory no heap
+    // limit bounds. Answered by the pre-scan, before pdf.js sees it.
+    const started = Date.now();
+    const response = await extractPdf(buildFilteredPdf('flate', 96), MAX);
+    expect(response).toEqual({ ok: false, reason: 'too-large' });
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
+
+  it('reads an honest PDF whose stream is comfortably large', async () => {
+    // The pre-scan must not refuse a real document: a few megabytes of text is
+    // an ordinary report, well under the per-stream ceiling.
+    const response = await extractPdf(buildFilteredPdf('flate', 4), MAX);
+    expect(response.ok).toBe(true);
+  });
+
+  for (const filter of ['lzw', 'runlength', 'ascii85+flate'] as const) {
+    it(`measures a ${filter} stream the way pdf.js would decode it`, async () => {
+      // Deflate is not the only filter that grows. LZW grows faster on
+      // repetitive input, RunLength up to 64:1, and either may sit behind an
+      // ASCII wrapper. Each counter is checked against a real stream on both
+      // sides of the ceiling.
+      const bomb = await expandsTooFar(
+        new Uint8Array(buildFilteredPdf(filter, 40))
+      );
+      expect(bomb).toBe(true);
+      const honest = await expandsTooFar(
+        new Uint8Array(buildFilteredPdf(filter, 2))
+      );
+      expect(honest).toBe(false);
+    });
+  }
+
+  it('reads text through an LZW-compressed stream', async () => {
+    // The counter and pdf.js must agree on what the stream holds; the text
+    // coming out of pdf.js is the proof that the fixture's encoder is real.
+    const response = await extractPdf(buildFilteredPdf('lzw', 0.01), MAX);
+    expect(textOf(response)).toContain('AAAA');
   });
 });
 
@@ -307,13 +372,42 @@ describe('extractZipDocument refuses hostile archives', () => {
     expect(Date.now() - started).toBeLessThan(1_000);
   });
 
-  it('stops after too many entries', async () => {
+  it('stops after too many entries it would actually read', async () => {
+    // Counted on the entries the allowlist admits, not on everything the
+    // archive lists — a slide per file, past the cap.
     const files: Record<string, string> = {};
-    for (let i = 0; i < 600; i += 1) files[`part${i}.xml`] = '<x/>';
-    files['word/document.xml'] =
-      '<w:document><w:body><w:p><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>';
-    const response = await run('docx', zip(files));
+    for (let i = 1; i <= 600; i += 1) {
+      files[`ppt/slides/slide${i}.xml`] =
+        '<p:sld><a:p><a:t>x</a:t></a:p></p:sld>';
+    }
+    const response = await run('pptx', zip(files));
     expect(response).toEqual({ ok: false, reason: 'too-many-parts' });
+  });
+
+  it('does not count entries it will never read', async () => {
+    // Six hundred embedded pictures make a report, not an attack: they are
+    // outside the allowlist, so they are neither read nor counted.
+    const files: Record<string, string | Buffer> = {};
+    for (let i = 1; i <= 600; i += 1) files[`word/media/image${i}.png`] = 'x';
+    files['word/document.xml'] =
+      '<w:document><w:body><w:p><w:r><w:t>Bericht</w:t></w:r></w:p></w:body></w:document>';
+    const response = await run('docx', zip(files));
+    expect(textOf(response)).toContain('Bericht');
+  });
+
+  it('reads a document part far larger than one result window', async () => {
+    // A long contract with tracked changes writes a multi-megabyte
+    // document.xml. maxChars used to be the per-entry budget, so this refused
+    // itself as "not a document"; the entry budget is separate now.
+    const paragraphs: string[] = [];
+    for (let i = 0; i < 40_000; i += 1) {
+      paragraphs.push(`Absatz ${i} eines langen Vertrags mit etwas Text.`);
+    }
+    const response = await run('docx', buildDocx(paragraphs));
+    const text = textOf(response);
+    expect(text).toContain('Absatz 0 ');
+    expect(text.length).toBeLessThanOrEqual(MAX);
+    expect(response.ok && response.clipped).toBe(true);
   });
 
   it('never reads an entry outside the allowlist', async () => {
@@ -376,6 +470,37 @@ describe('extractZipDocument refuses hostile archives', () => {
     );
     expect(Date.now() - started).toBeLessThan(1_000);
     expect(textOf(response).length).toBeLessThan(1_000);
+  });
+
+  it('caps a shared-string amplification instead of building the whole string', async () => {
+    // One 200 kB shared string behind 200 x 128 cells is 5 GB of output from
+    // two kilobytes of archive. It used to build all of it and, through the
+    // process, take the server down; now the per-row budget stops it at the
+    // cap. The cell cap keeps any single value short as well.
+    const started = Date.now();
+    const response = await run('xlsx', buildXlsxBomb(200_000, 200, 128));
+    expect(response.ok).toBe(true);
+    expect(textOf(response).length).toBeLessThanOrEqual(MAX);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it('caps a repeated-cell amplification in a spreadsheet', async () => {
+    // A 4 kB cell carrying number-columns-repeated, across 200 rows: hundreds
+    // of megabytes from under two kilobytes. The per-row budget and the cell
+    // cap bound it.
+    const cellText = 'B'.repeat(4_000);
+    const row =
+      `<table:table-row><table:table-cell table:number-columns-repeated="256">` +
+      `<text:p>${cellText}</text:p></table:table-cell></table:table-row>`;
+    const content =
+      `${'<?xml version="1.0"?>'}<office:document-content>` +
+      `<table:table table:name="T">${row.repeat(200)}</table:table>` +
+      `</office:document-content>`;
+    const started = Date.now();
+    const response = await run('ods', zip({ 'content.xml': content }));
+    expect(response.ok).toBe(true);
+    expect(textOf(response).length).toBeLessThanOrEqual(MAX);
+    expect(Date.now() - started).toBeLessThan(2_000);
   });
 
   it('is linear in the number of unclosed start tags', async () => {

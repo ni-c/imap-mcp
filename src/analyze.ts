@@ -145,10 +145,12 @@ const CLOSER_SCAN_BUDGET_FLOOR = 100_000;
 /**
  * Elements whose content the recipient never reads.
  *
- * The `w:`-prefixed name is WordprocessingML, not HTML: this walk is also how
- * the text of a .docx attachment is read, and a Word field code
+ * The `w:`-prefixed names are WordprocessingML, not HTML: this walk is also how
+ * the text of a .docx attachment is read. A Word field code
  * (`INCLUDEPICTURE "http://…"`, a DDE command) is markup the reader never sees
- * for exactly the same reason a `<script>` body is.
+ * for exactly the same reason a `<script>` body is, and `w:delText` is text a
+ * tracked change deleted — shown struck through at most, and not at all in the
+ * view a document is read in.
  */
 const NON_CONTENT_TAGS = new Set([
   'script',
@@ -158,6 +160,7 @@ const NON_CONTENT_TAGS = new Set([
   'noscript',
   'template',
   'w:instrtext',
+  'w:deltext',
 ]);
 
 /**
@@ -238,7 +241,7 @@ function hasHiddenStyle(tag: string): boolean {
  * entities, and would hand a mail attachment billion-laughs expansion and an
  * `<!ENTITY … SYSTEM "file:///etc/passwd">` that reads a file. Those are not
  * defended against below; they are simply not implemented. `&lol9;` comes out
- * as seven literal characters, and it must stay that way — reaching for
+ * as six literal characters, and it must stay that way — reaching for
  * `fast-xml-parser` here would reintroduce all three at once.
  *
  * Deliberately not `mailparser`'s own `text` fallback: that keeps content the

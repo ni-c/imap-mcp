@@ -4,18 +4,34 @@ import type { ExtractKind, ExtractResponse } from './types.js';
  * Turns markup into readable text. Injected rather than imported.
  *
  * `htmlToText` lives in `../analyze.ts`, and this module is reached from the
- * extraction worker, which Node loads directly — where a `../analyze.js`
+ * extraction child, which Node loads directly — where a `../analyze.js`
  * specifier does not resolve to the `.ts` beside it. Passing the function in
  * keeps this file free of relative value imports, which is the property that
- * lets it run in the worker at all. It also makes the seam explicit: the tests
- * hand it the same `htmlToText` the worker does.
+ * lets it run in the child at all. It also makes the seam explicit: the tests
+ * hand it the same `htmlToText` the child does.
  */
 export type MarkupToText = (markup: string, maxChars: number) => string;
 
 /**
- * Central-directory entries examined at all. A real .docx has eight to fifteen.
+ * Entries this reader will inflate from one container. Counted on the entries
+ * the allowlist below admits, not on everything the archive lists: a report
+ * with six hundred embedded pictures is a report, not an attack, and the
+ * pictures are never read anyway.
  */
 const MAX_ZIP_ENTRIES = 512;
+
+/**
+ * How large one admitted entry may declare itself, and how large all of them
+ * may together.
+ *
+ * Separate from `maxChars`, which used to be the per-entry budget — and a long
+ * contract with tracked changes writes a `document.xml` of several megabytes,
+ * far past the million characters that will ever be read from it. The reader
+ * slices what it inflates to `maxChars` anyway; these numbers bound the
+ * allocation, not the answer.
+ */
+const MAX_ENTRY_BYTES = 16 * 1024 * 1024;
+const MAX_INFLATED_BYTES = 48 * 1024 * 1024;
 
 /**
  * How far the cell walk may scan for a closing tag it never finds, per sheet.
@@ -30,7 +46,7 @@ const MAX_COLS = 128;
 const MAX_SLIDES = 200;
 
 /**
- * Ceiling on a `number-columns-repeated` / `number-rows-repeated` count.
+ * Ceiling on a `number-columns-repeated` count.
  *
  * LibreOffice writes `16384` on the trailing empty cell of every single row.
  * Honouring that verbatim turns a 40 kB spreadsheet into hundreds of megabytes
@@ -39,8 +55,27 @@ const MAX_SLIDES = 200;
  */
 const MAX_REPEAT = 256;
 
-/** A spreadsheet cell holds a value, not a chapter. */
+/**
+ * A spreadsheet cell holds a value, not a chapter.
+ *
+ * Applied to every cell, shared strings included. A shared string is written
+ * once and referenced by index, so one long string behind sixty thousand
+ * cells is a kilobyte of archive standing for gigabytes of output — and the
+ * per-row budget below only helps if a single row cannot be that large.
+ */
 const MAX_CELL_CHARS = 4_096;
+
+/**
+ * Characters left to spend, shared by every row of every sheet.
+ *
+ * The one object that makes the sheet readers honour `maxChars`. Before it,
+ * the budget was checked between sheets only, so a single sheet could — and,
+ * measured, did — produce a hundred megabytes from two kilobytes of archive.
+ */
+interface CharBudget {
+  left: number;
+  clipped: boolean;
+}
 
 /**
  * Reads the text of an OOXML or OpenDocument container.
@@ -54,9 +89,11 @@ const MAX_CELL_CHARS = 4_096;
  *
  * Measured on fflate 0.8.3: a declared size far past the real one does not blow
  * up resident memory on Linux, because the allocation is virtual and untouched
- * pages cost nothing. The guard stays regardless — it is free, it is the only
- * thing standing between an *honest* high-ratio entry and its real expansion,
- * and a host that does not overcommit would pay the full price.
+ * pages cost nothing; and a declared size *below* the real one truncates the
+ * output to what was declared, because fflate does not grow a caller-sized
+ * buffer. The guard stays regardless — it is free, it is the only thing
+ * standing between an *honest* high-ratio entry and its real expansion, and a
+ * host that does not overcommit would pay the full price.
  *
  * This never recurses. An entry that is itself an archive is not in the name
  * allowlist, so a nested bomb is not descended into; that is a property to keep
@@ -70,8 +107,8 @@ export async function extractZipDocument(
 ): Promise<ExtractResponse> {
   const { unzipSync, strFromU8 } = await import('fflate');
 
-  let seen = 0;
-  let budget = maxChars;
+  let admitted = 0;
+  let bytesLeft = MAX_INFLATED_BYTES;
   let tooManyParts = false;
   let entries;
 
@@ -79,23 +116,26 @@ export async function extractZipDocument(
     entries = unzipSync(bytes, {
       filter: (file) => {
         if (tooManyParts) return false;
-        seen += 1;
-        if (seen > MAX_ZIP_ENTRIES) {
-          tooManyParts = true;
-          return false;
-        }
         // Nothing here writes to disk, so this is not a traversal fix. The
         // paths below are matched by prefix, and `xl/worksheets/../../x.xml`
         // would match one of them; refusing the name is cheaper than reasoning
-        // about what it would mean. It also disposes of an entry called
-        // `__proto__`, which fflate would happily use as an object key.
+        // about what it would mean.
         if (!isSafeName(file.name)) return false;
+        // The allowlist. It is also what disposes of an entry called
+        // `__proto__`, which fflate would otherwise use as an object key: no
+        // document part is called that, so it is never admitted.
         if (!wanted(kind, file.name)) return false;
+        admitted += 1;
+        if (admitted > MAX_ZIP_ENTRIES) {
+          tooManyParts = true;
+          return false;
+        }
         // Deflate and stored only. fflate throws on any other method once the
         // filter has said yes, and an error is a worse answer than a skip.
         if (file.compression !== 0 && file.compression !== 8) return false;
-        if (file.originalSize > budget) return false;
-        budget -= file.originalSize;
+        if (file.originalSize > MAX_ENTRY_BYTES) return false;
+        if (file.originalSize > bytesLeft) return false;
+        bytesLeft -= file.originalSize;
         return true;
       },
     });
@@ -112,33 +152,41 @@ export async function extractZipDocument(
     return raw === undefined ? undefined : strFromU8(raw);
   };
 
-  if (kind === 'xlsx')
-    return sheetsResult(readXlsx(entries, strFromU8, maxChars));
+  if (kind === 'xlsx') {
+    return sheetsResult(readXlsx(entries, strFromU8, maxChars), maxChars);
+  }
   if (kind === 'ods') {
     const content = read('content.xml');
     if (content === undefined) return { ok: false, reason: 'not-a-document' };
-    return sheetsResult(readOds(content, maxChars, toText));
+    return sheetsResult(readOds(content, maxChars, toText), maxChars);
   }
 
   const parts: string[] = [];
   let units = 0;
+  let declared: number | undefined;
+  let clipped = false;
+  let runs: { total: number; hidden: number } | undefined;
 
   if (kind === 'docx') {
     const document = read('word/document.xml');
     if (document === undefined) return { ok: false, reason: 'not-a-document' };
+    clipped = document.length > maxChars;
+    runs = wordRuns(document.slice(0, maxChars));
     parts.push(toText(document, maxChars));
   } else if (kind === 'odt') {
     const content = read('content.xml');
     if (content === undefined) return { ok: false, reason: 'not-a-document' };
+    clipped = content.length > maxChars;
     parts.push(toText(content, maxChars));
   } else {
     // pptx: one heading per slide, in slide order rather than in whatever order
     // the archive happens to list them.
-    const slides = Object.keys(entries)
+    const all = Object.keys(entries)
       .filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
-      .sort((a, b) => slideNumber(a) - slideNumber(b))
-      .slice(0, MAX_SLIDES);
-    if (slides.length === 0) return { ok: false, reason: 'not-a-document' };
+      .sort((a, b) => slideNumber(a) - slideNumber(b));
+    if (all.length === 0) return { ok: false, reason: 'not-a-document' };
+    const slides = all.slice(0, MAX_SLIDES);
+    if (all.length > slides.length) declared = all.length;
     for (const name of slides) {
       units += 1;
       parts.push(
@@ -154,9 +202,16 @@ export async function extractZipDocument(
     ok: true,
     text,
     ...(kind === 'pptx'
-      ? { unitLabel: 'slides' as const, unitCount: units }
+      ? {
+          unitLabel: 'slides' as const,
+          unitCount: units,
+          ...(declared === undefined ? {} : { declaredUnitCount: declared }),
+        }
       : {}),
-    clipped: joined.length > text.length,
+    ...(runs === undefined
+      ? {}
+      : { hiddenRuns: runs.hidden, totalRuns: runs.total }),
+    clipped: clipped || joined.length > text.length,
   };
 }
 
@@ -165,22 +220,33 @@ interface Sheet {
   rows: string[][];
 }
 
-function sheetsResult(sheets: Sheet[] | undefined): ExtractResponse {
-  if (sheets === undefined) return { ok: false, reason: 'not-a-document' };
-  const text = sheets
+interface Sheets {
+  sheets: Sheet[];
+  clipped: boolean;
+}
+
+function sheetsResult(
+  result: Sheets | undefined,
+  maxChars: number
+): ExtractResponse {
+  if (result === undefined) return { ok: false, reason: 'not-a-document' };
+  const joined = result.sheets
     .map(
       (sheet) =>
         `== Sheet: ${sheet.name} ==\n` +
         sheet.rows.map((row) => row.join('\t')).join('\n')
     )
     .join('\n\n');
+  // The row budget keeps this within a heading or two of `maxChars`; the slice
+  // is what makes the contract exact rather than approximate.
+  const text = joined.slice(0, maxChars);
   if (text.trim() === '') return { ok: false, reason: 'no-text-layer' };
   return {
     ok: true,
     text,
     unitLabel: 'sheets',
-    unitCount: sheets.length,
-    clipped: false,
+    unitCount: result.sheets.length,
+    clipped: result.clipped || joined.length > text.length,
   };
 }
 
@@ -190,7 +256,7 @@ function readXlsx(
   entries: Record<string, Uint8Array>,
   strFromU8: (data: Uint8Array) => string,
   maxChars: number
-): Sheet[] | undefined {
+): Sheets | undefined {
   const at = (name: string): string | undefined => {
     const raw = entries[name];
     return raw === undefined ? undefined : strFromU8(raw);
@@ -220,17 +286,18 @@ function readXlsx(
       ? planned
       : available.map((path, index) => ({ name: `Sheet ${index + 1}`, path }));
 
-  let budget = maxChars;
+  const budget: CharBudget = { left: maxChars, clipped: false };
   const sheets: Sheet[] = [];
   for (const entry of plan.slice(0, MAX_SHEETS)) {
-    if (budget <= 0) break;
+    if (budget.left <= 0) {
+      budget.clipped = true;
+      break;
+    }
     const xml = at(entry.path);
     if (xml === undefined) continue;
-    const rows = worksheetRows(xml, shared);
-    budget -= rows.reduce((sum, row) => sum + row.join('\t').length + 1, 0);
-    sheets.push({ name: entry.name, rows });
+    sheets.push({ name: entry.name, rows: worksheetRows(xml, shared, budget) });
   }
-  return sheets;
+  return { sheets, clipped: budget.clipped };
 }
 
 /** `<si>` entries in document order; a run-split string is its `<t>` pieces. */
@@ -243,7 +310,7 @@ function sharedStrings(xml: string | undefined): string[] {
     if (open < 0) break;
     const close = xml.indexOf('</si>', open);
     if (close < 0) break;
-    out.push(textRuns(xml.slice(open, close)));
+    out.push(cell(textRuns(xml.slice(open, close))));
     i = close + 5;
   }
   return out;
@@ -319,11 +386,23 @@ function sheetOrder(
   return out;
 }
 
-function worksheetRows(xml: string, shared: string[]): string[][] {
+function worksheetRows(
+  xml: string,
+  shared: string[],
+  budget: CharBudget
+): string[][] {
   const rows: string[][] = [];
-  let budget = xml.length * CLOSER_SCAN_BUDGET_FACTOR;
+  let scan = xml.length * CLOSER_SCAN_BUDGET_FACTOR;
   let i = 0;
   let row: string[] | undefined;
+
+  const finish = (cells: string[]): boolean => {
+    rows.push(cells);
+    budget.left -= cells.reduce((sum, value) => sum + value.length + 1, 0);
+    if (budget.left > 0) return true;
+    budget.clipped = true;
+    return false;
+  };
 
   while (i < xml.length && rows.length < MAX_ROWS) {
     const lt = xml.indexOf('<', i);
@@ -332,13 +411,14 @@ function worksheetRows(xml: string, shared: string[]): string[][] {
     if (gt < 0) break;
     const tag = xml.slice(lt, gt + 1);
 
-    if (tag.startsWith('<row')) {
+    // `<row>` and `<row r="3">`, not `<rowBreaks>`.
+    if (tag === '<row>' || tag.startsWith('<row ')) {
       row = [];
       i = gt + 1;
       continue;
     }
-    if (tag.startsWith('</row')) {
-      if (row !== undefined) rows.push(row);
+    if (tag === '</row>') {
+      if (row !== undefined && !finish(row)) return rows;
       row = undefined;
       i = gt + 1;
       continue;
@@ -353,8 +433,8 @@ function worksheetRows(xml: string, shared: string[]): string[][] {
     let body = '';
     if (!selfClosing) {
       const close = xml.indexOf('</c>', gt);
-      if (close < 0 || budget <= 0) break;
-      budget -= close - gt;
+      if (close < 0 || scan <= 0) break;
+      scan -= close - gt;
       body = xml.slice(gt + 1, close);
       end = close + 4;
     }
@@ -370,20 +450,20 @@ function worksheetRows(xml: string, shared: string[]): string[][] {
     }
     i = end;
   }
-  if (row !== undefined) rows.push(row);
+  if (row !== undefined) finish(row);
   return rows;
 }
 
 function cellValue(tag: string, body: string, shared: string[]): string {
   const type = attribute(tag, 't');
-  if (type === 'inlineStr') return clean(textRuns(body));
+  if (type === 'inlineStr') return cell(textRuns(body));
   if (type === 's') {
     const index = Number(between(body, '<v>', '</v>') ?? '');
-    return Number.isInteger(index) ? clean(shared[index] ?? '') : '';
+    return Number.isInteger(index) ? (shared[index] ?? '') : '';
   }
   const value = between(body, '<v>', '</v>');
-  if (value !== undefined) return clean(decodeEntities(value));
-  return clean(textRuns(body));
+  if (value !== undefined) return cell(decodeEntities(value));
+  return cell(textRuns(body));
 }
 
 /** `B` → 1, `AA4` → 26. The row part is ignored; the walk supplies it. */
@@ -400,12 +480,16 @@ function columnIndex(reference: string | undefined): number | undefined {
 
 /* -------------------------------------------------------------------- ods -- */
 
-function readOds(xml: string, maxChars: number, toText: MarkupToText): Sheet[] {
+function readOds(xml: string, maxChars: number, toText: MarkupToText): Sheets {
   const sheets: Sheet[] = [];
-  let budget = maxChars;
+  const budget: CharBudget = { left: maxChars, clipped: false };
   let i = 0;
 
-  while (sheets.length < MAX_SHEETS && budget > 0) {
+  while (sheets.length < MAX_SHEETS) {
+    if (budget.left <= 0) {
+      budget.clipped = true;
+      break;
+    }
     const open = xml.indexOf('<table:table ', i);
     if (open < 0) break;
     const gt = xml.indexOf('>', open);
@@ -416,16 +500,18 @@ function readOds(xml: string, maxChars: number, toText: MarkupToText): Sheet[] {
     );
     const close = xml.indexOf('</table:table>', gt);
     const body = xml.slice(gt + 1, close < 0 ? xml.length : close);
-    const rows = odsRows(body, toText);
-    budget -= rows.reduce((sum, row) => sum + row.join('\t').length + 1, 0);
-    sheets.push({ name, rows });
+    sheets.push({ name, rows: odsRows(body, toText, budget) });
     if (close < 0) break;
     i = close + 14;
   }
-  return sheets;
+  return { sheets, clipped: budget.clipped };
 }
 
-function odsRows(xml: string, toText: MarkupToText): string[][] {
+function odsRows(
+  xml: string,
+  toText: MarkupToText,
+  budget: CharBudget
+): string[][] {
   const rows: string[][] = [];
   let i = 0;
 
@@ -438,11 +524,11 @@ function odsRows(xml: string, toText: MarkupToText): string[][] {
 
     let j = 0;
     while (row.length < MAX_COLS) {
-      const cell = body.indexOf('<table:table-cell', j);
-      if (cell < 0) break;
-      const gt = body.indexOf('>', cell);
+      const at = body.indexOf('<table:table-cell', j);
+      if (at < 0) break;
+      const gt = body.indexOf('>', at);
       if (gt < 0) break;
-      const tag = body.slice(cell, gt + 1);
+      const tag = body.slice(at, gt + 1);
       const cellClose = tag.endsWith('/>')
         ? -1
         : body.indexOf('</table:table-cell>', gt);
@@ -453,7 +539,7 @@ function odsRows(xml: string, toText: MarkupToText): string[][] {
       const value =
         cellClose < 0
           ? ''
-          : clean(toText(body.slice(gt + 1, cellClose), MAX_CELL_CHARS)).trim();
+          : cell(toText(body.slice(gt + 1, cellClose), MAX_CELL_CHARS)).trim();
       // Clamped, and this is the guard that matters most in this file: every
       // row an office suite writes ends in a cell repeated 16 384 times.
       const repeat = Math.min(
@@ -471,6 +557,11 @@ function odsRows(xml: string, toText: MarkupToText): string[][] {
     // Trailing empty cells are padding, not data.
     while (row.length > 0 && row[row.length - 1] === '') row.pop();
     rows.push(row);
+    budget.left -= row.reduce((sum, value) => sum + value.length + 1, 0);
+    if (budget.left <= 0) {
+      budget.clipped = true;
+      break;
+    }
     if (close < 0) break;
     i = close + 18;
   }
@@ -478,6 +569,58 @@ function odsRows(xml: string, toText: MarkupToText): string[][] {
   while (rows.length > 0 && (rows[rows.length - 1] as string[]).length === 0)
     rows.pop();
   return rows;
+}
+
+/* ------------------------------------------------------------------- docx -- */
+
+/**
+ * Counts the runs of a Word document, and how many of them a reader would not
+ * see: marked hidden, set at two points or below, or coloured white.
+ *
+ * The same signal the PDF reader reports, for the same reason — the text
+ * still goes to the model, and the header says that some of it was placed
+ * where a person would not have found it. Forward-only cursors, so a document
+ * of a hundred thousand runs with no closing tags costs one pass, not one pass
+ * per run.
+ */
+function wordRuns(xml: string): { total: number; hidden: number } {
+  let total = 0;
+  let hidden = 0;
+  let i = 0;
+  let nextProps = xml.indexOf('<w:rPr>');
+  let nextPropsEnd = xml.indexOf('</w:rPr>');
+  let nextClose = xml.indexOf('</w:r>');
+  const advance = (cursor: number, needle: string, from: number): number => {
+    let at = cursor;
+    while (at >= 0 && at < from) at = xml.indexOf(needle, at + 1);
+    return at;
+  };
+
+  for (;;) {
+    const open = xml.indexOf('<w:r', i);
+    if (open < 0) break;
+    i = open + 4;
+    const next = xml[open + 4];
+    // `<w:r>` and `<w:r w:rsidR="…">`, not `<w:rPr>` or `<w:rFonts>`.
+    if (next !== '>' && next !== ' ') continue;
+    total += 1;
+    nextProps = advance(nextProps, '<w:rPr>', open);
+    nextClose = advance(nextClose, '</w:r>', open);
+    if (nextProps < 0 || (nextClose >= 0 && nextClose < nextProps)) continue;
+    nextPropsEnd = advance(nextPropsEnd, '</w:rPr>', nextProps);
+    if (nextPropsEnd < 0) break;
+    if (isHiddenRun(xml.slice(nextProps, nextPropsEnd))) hidden += 1;
+  }
+  return { total, hidden };
+}
+
+function isHiddenRun(properties: string): boolean {
+  return (
+    properties.includes('<w:vanish') ||
+    properties.includes('<w:webHidden') ||
+    /<w:color\b[^>]*w:val="(?:ffffff|white)"/i.test(properties) ||
+    /<w:sz\b[^>]*w:val="[1-4]"/.test(properties)
+  );
 }
 
 /* ------------------------------------------------------------------ misc -- */
@@ -531,18 +674,20 @@ function between(
 }
 
 /**
- * A tab or a newline inside a cell would end the column or the row it is in,
- * and the reader has no way to tell that from real structure.
+ * A cell value: no tab or newline, because either would end the column or the
+ * row it is in and the reader has no way to tell that from real structure; and
+ * no more than {@link MAX_CELL_CHARS}, because a cell is a value.
  */
-function clean(value: string): string {
-  return value.replace(/[\t\r\n]+/g, ' ');
+function cell(value: string): string {
+  const flat = value.replace(/[\t\r\n]+/g, ' ');
+  return flat.length > MAX_CELL_CHARS ? flat.slice(0, MAX_CELL_CHARS) : flat;
 }
 
 /**
  * The five predefined XML entities and bounded numeric references.
  *
  * Deliberately nothing else. There is no entity table here, so a document that
- * declares `<!ENTITY lol …>` gets its `&lol;` back as four literal characters —
+ * declares `<!ENTITY lol …>` gets its `&lol;` back as five literal characters —
  * which is what makes billion-laughs and `SYSTEM "file:///etc/passwd"` non-events
  * rather than defended-against attacks.
  */
@@ -565,7 +710,7 @@ function decodeEntities(value: string): string {
  * Same rule as `fromCodePoint` in `../analyze.ts`, and deliberately the same
  * answer: a reference nobody can render stays visible rather than becoming a
  * replacement character that reads as content. Duplicated rather than shared
- * because this module is reached from the worker, where a relative import of
+ * because this module is reached from the child, where a relative import of
  * `../analyze.js` does not resolve.
  */
 function codePoint(value: number, original: string): string {

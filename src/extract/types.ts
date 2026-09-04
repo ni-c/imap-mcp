@@ -1,11 +1,11 @@
 /**
  * The vocabulary shared between the extraction host and the worker.
  *
- * Types only, and that is a constraint rather than a preference. The worker is
- * spawned from its own source file — `worker.ts` under vitest, `worker.js` from
- * `dist/` — so everything it reaches is loaded by Node directly, and Node's type
- * stripping does not rewrite a `./x.js` specifier to the `./x.ts` that exists
- * next to it. A type-only import is erased before that can matter. A value
+ * Types only, and that is a constraint rather than a preference. The child
+ * process is started from its own source file — `child.ts` under vitest,
+ * `child.js` from `dist/` — so everything it reaches is loaded by Node
+ * directly, and Node's type stripping does not rewrite a `./x.js` specifier to
+ * the `./x.ts` that exists next to it. A type-only import is erased before that can matter. A value
  * exported from here would not be, and would break `npm test` while leaving the
  * build green.
  */
@@ -27,10 +27,14 @@ export type ExtractReason =
   | 'corrupt'
   | 'not-a-document'
   | 'too-many-parts'
-  // The last two are written by the host, not by a parser: the worker that
-  // would have reported them is the one that was stopped.
+  // A document whose compressed parts expand far beyond any honest document:
+  // decided before a parser sees them, by the size the expansion would reach.
+  | 'too-large'
+  // The next three are written by the host, not by a parser: the child that
+  // would have reported them is the one that was stopped, or never started.
   | 'timeout'
   | 'out-of-memory'
+  | 'busy'
   | 'internal';
 
 export interface ExtractRequest {
@@ -55,8 +59,10 @@ export interface ExtractOk {
   /** True when `maxChars` cut the document short inside the worker. */
   clipped: boolean;
   /**
-   * Text runs drawn where a reader cannot see them: outside the page box, or
-   * below two points. A count, never a filter — see the note in `pdf.ts`.
+   * Text runs drawn where a reader cannot see them: outside the page box or
+   * below two points in a PDF; marked hidden, set below two points or coloured
+   * white in a Word document. A count, never a filter — see the note in
+   * `pdf.ts`.
    */
   hiddenRuns?: number;
   totalRuns?: number;

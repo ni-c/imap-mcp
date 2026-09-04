@@ -69,9 +69,15 @@ against a cap.
 bundled PDF.js for PDFs, a ZIP reader for Office and OpenDocument files. That is real
 attack surface, and it is contained rather than trusted:
 
-- it runs in a **worker thread with a memory ceiling and a timeout**, so a parse that
-  spins or grows is stopped instead of taking the server with it;
-- the worker's **stdout is detached**. The transport here is stdio JSON-RPC and PDF.js
+- it runs in a **child process with a heap limit and a timeout**, so a parse that spins
+  or grows is killed instead of taking the server with it. A process rather than a
+  thread, because a thread's memory limit was measured to fail for one allocation
+  pattern — and a process that dies dies alone;
+- **compressed streams are measured before PDF.js inflates them.** A PDF stream that
+  would decode past 32 MB, or a set of them past 128 MB, is refused as too large before
+  any of it is materialised; ZIP entries are bounded the same way, and spreadsheet
+  output is budgeted per row with every cell capped;
+- the child's **stdout is discarded**. The transport here is stdio JSON-RPC and PDF.js
   logs; one line reaching the parent's stdout would corrupt the framing;
 - **PDF.js runs with `isEvalSupported: false`.** That flag gates the construction of
   `Function` objects from font programs in the document, which is the primitive that

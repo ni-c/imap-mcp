@@ -38,6 +38,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no text layer, and the refusal says so and names the two ways to get the bytes
   instead of returning an empty string that reads like an empty document.
 
+  Parsing happens in a child process with a heap limit and a timeout — a
+  process rather than a worker thread, because a thread's memory limit was
+  measured to fail for one allocation pattern and to keep a gigabyte resident
+  after termination. In front of that boundary sit the guards that actually
+  bound memory: a PDF's compressed streams are measured before PDF.js inflates
+  them and refused past 32 MB for one stream or 128 MB for all of them (Flate,
+  LZW and RunLength, behind an ASCII wrapper or not); a container's entries are
+  bounded per entry and in total, counting only the entries the allowlist
+  admits; and spreadsheet output is budgeted per row with every cell capped at
+  four kilobytes, so the child never builds more than the million characters it
+  may return. A document with more pages than the reader walks, or more slides,
+  reports how many it declared. Word documents count the runs a reader would
+  not see — hidden, white, or set at two points or smaller — the way PDFs count
+  text drawn off the page, and text a tracked change deleted is not returned as
+  content. `SECURITY.md` has the measurements.
+
 - `IMAP_MAX_EXTRACT_BYTES`, default 10 MB, ceiling 64 MB. A third size limit
   because there is a third question: `IMAP_MAX_ATTACHMENT_BYTES` bounds what may
   enter the model's context, `IMAP_MAX_DOWNLOAD_BYTES` bounds what may be
