@@ -9,8 +9,14 @@ import {
   toolNames,
 } from './harness.js';
 import { message, type FakeAttachment } from './fake-imap.js';
-import { buildDocx, buildPdf } from './document-fixtures.js';
+import {
+  buildDocx,
+  buildFilteredPdf,
+  buildPdf,
+  zip,
+} from './document-fixtures.js';
 import { MAX_RESULT_BYTES } from '../src/result.js';
+import { MAX_BODY_CHARS } from '../src/analyze.js';
 import { expectPortableToolSchemas } from 'mcp-integration-harness';
 
 const READ_TOOLS = [
@@ -527,6 +533,25 @@ describe('get_message', () => {
     await harness.close();
   });
 
+  it('answers promptly on a body that is one long delimiter', async () => {
+    // The injection scan runs on the whole body in this process. A body of
+    // hyphens at the body cap used to cost about two seconds per call in the
+    // scan alone — reachable with one ordinary mail.
+    const harness = await connect({
+      mailboxes: [
+        {
+          path: 'INBOX',
+          messages: [message(9, { body: '-'.repeat(MAX_BODY_CHARS) })],
+        },
+      ],
+    });
+    const started = performance.now();
+    const text = textOf(await call(harness.client, 'get_message', { uid: 9 }));
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(text).toContain('BEGIN UNTRUSTED EMAIL CONTENT');
+    await harness.close();
+  });
+
   it('prefers the plain-text part over hidden HTML', async () => {
     const harness = await connect({
       mailboxes: [
@@ -996,6 +1021,86 @@ describe('get_attachments mode=text', () => {
     expect(text).toContain('Vertragsbeginn ist der 1. Oktober');
     await harness.close();
   });
+
+  it('answers promptly on a document that is nothing but a delimiter', async () => {
+    // Every size guard bounds bytes and characters; none bounds what a regex
+    // costs per character. A document of hyphens is a few kilobytes in the
+    // ZIP and used to hold this process — after the parser child had already
+    // exited, so no timeout covered it — for as long as the injection scan
+    // backtracked. Measured here end to end, child spawn included.
+    const harness = await connect({
+      mailboxes: withDocuments([
+        {
+          partId: '4',
+          filename: 'linie.docx',
+          contentType:
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          content: buildDocx(['-'.repeat(300_000)]),
+        },
+      ]),
+    });
+    const started = performance.now();
+    const result = await call(harness.client, 'get_attachments', {
+      uid: 11,
+      part_id: '4',
+      mode: 'text',
+    });
+    const elapsed = performance.now() - started;
+    expect(fields(result).encoding).toBe('extracted_text');
+    expect(elapsed).toBeLessThan(5000);
+    await harness.close();
+  });
+
+  it.each([
+    [
+      'a damaged PDF',
+      'application/pdf',
+      Buffer.from('%PDF-1.4\nnothing that pdf.js can make sense of'),
+      'damaged',
+    ],
+    [
+      'a container with far too many parts',
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      zip(
+        Object.fromEntries(
+          Array.from({ length: 600 }, (_, i) => [
+            `ppt/slides/slide${i + 1}.xml`,
+            '<p:sld><a:p><a:t>x</a:t></a:p></p:sld>',
+          ])
+        )
+      ),
+      'far more entries',
+    ],
+    [
+      'a stream that expands past the ceiling',
+      'application/pdf',
+      buildFilteredPdf('flate', 40),
+      'expand far beyond',
+    ],
+  ])(
+    'names why it would not read %s, and the way to the bytes',
+    async (_what, contentType, content, phrase) => {
+      // Each refusal is a different sentence because each asks the caller to
+      // do something different: nothing, for a bomb; look for themselves,
+      // for a damaged file. All of them say how to get the bytes anyway.
+      const harness = await connect({
+        mailboxes: withDocuments([
+          { partId: '4', filename: 'doc.bin', contentType, content },
+        ]),
+      });
+      const text = textOf(
+        await call(harness.client, 'get_attachments', {
+          uid: 11,
+          part_id: '4',
+          mode: 'text',
+        })
+      );
+      expect(text).toContain(phrase);
+      expect(text).toContain('mode="file"');
+      expect(text).toContain('imap://message/11/part/4');
+      await harness.close();
+    }
+  );
 
   it('refuses a scan with no text layer and names the way out', async () => {
     const harness = await connect({

@@ -203,8 +203,14 @@ export function registerWriteTools(
             consequence: copying
               ? 'Everyone with access to the destination can read the copies, and taking them back does not unsee them.'
               : 'The messages keep their content but get new UIDs, so the current ones stop working.',
+            // The two names are JSON-encoded rather than joined with ':'. A
+            // mailbox name may contain ':' — the parameter allows it on
+            // purpose, see schema.ts — and with a bare join the pair
+            // ("A:B", "C") and the pair ("A", "B:C") produced the same key, so
+            // a token or sealed answer issued for one would have executed the
+            // other, a pair nobody was ever asked about.
             resourceKey: setResourceKey(
-              `${copying ? 'copy_messages' : 'move_messages'}:${source}:${destination}`,
+              `${copying ? 'copy_messages' : 'move_messages'}:${JSON.stringify([source, destination])}`,
               uids.map(String)
             ),
             token: confirm_token,
@@ -389,7 +395,9 @@ export function registerWriteTools(
           }
           if (outcome.decision === 'pending') return outcome.result;
         } else if (action === 'rename') {
-          const key = `manage_mailbox:rename:${mailbox}:${new_name ?? ''}`;
+          // JSON-encoded for the same reason as the move key above: a ':' in
+          // either name must not let two different renames share a token.
+          const key = `manage_mailbox:rename:${JSON.stringify([mailbox, new_name ?? ''])}`;
           if (!confirmations.consume(key, confirm_token)) {
             // An error result, like `mcp-approval`'s own prompt: the rename
             // was asked for and did not happen. It is also what lets this tool

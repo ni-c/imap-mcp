@@ -217,6 +217,40 @@ describe('manage_mailbox approval', () => {
     await harness.close();
   });
 
+  it('does not let a ":" in a folder name make two renames share a token', async () => {
+    // The rename key joined the old and the new name with ':', and a mailbox
+    // name may contain one. ("A:B" → "C") and ("A" → "B:C") were the same key,
+    // so a token issued for one rename performed the other.
+    const harness = await connect({
+      config: writeConfig,
+      mailboxes: [
+        { path: 'A:B', messages: [] },
+        { path: 'A', messages: [] },
+        ...mailboxes(),
+      ],
+      elicit: 'accept',
+    });
+    const first = await call(harness.client, 'manage_mailbox', {
+      action: 'rename',
+      mailbox: 'A:B',
+      new_name: 'C',
+    });
+    const result = await call(harness.client, 'manage_mailbox', {
+      action: 'rename',
+      mailbox: 'A',
+      new_name: 'B:C',
+      confirm_token: tokenOf(first),
+    });
+    // A rename that did not happen answers with a fresh prompt for *this*
+    // pair, and nothing was renamed on the strength of the other one.
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('confirm_token');
+    expect(
+      harness.imap.calls.some((entry) => entry.name === 'mailboxRename')
+    ).toBe(false);
+    await harness.close();
+  });
+
   it('creates without asking anyone', async () => {
     const harness = await connect({
       config: writeConfig,

@@ -80,6 +80,17 @@ The pass now walks the input once with cursors that never rewind, plus one globa
 searches that look for a closing tag, so the number of start tokens no longer multiplies anything.
 The same input is now under 20 ms.
 
+The injection heuristics below are held to the same rule, and one of them broke it. The pattern
+that looks for a fake delimiter — `---`, `===` or `###` before a word like `system` — began with an
+unbounded run and no anchor, so from every position inside a run of hyphens the engine tried
+every possible length before giving up: quadratic, 1.5 s on 40 000 hyphens, and the million
+characters an extracted document may carry would have taken about a quarter of an hour. That scan
+runs in this process on text the parser child has already handed back, so the child's timeout and
+memory ceiling were no help, and every size guard passed because a document of hyphens is a few
+kilobytes. The pattern is now anchored to the start of a run, which is linear, and
+`analyze.test.ts` times every pattern on a million characters of its own trigger. A pattern that
+cannot pass that test does not go in the list.
+
 **Folder names are mailbox content too.** On a shared account, a public namespace or any mailbox
 somebody else can create a folder in, the name is chosen by whoever created it — and it reaches the
 model through `list_mailboxes` long before anyone opens a message. It used to reach it raw: not
@@ -128,6 +139,13 @@ did not happen.
 Tokens are random, single-use, expire after five minutes, and are bound to a SHA-256
 fingerprint of the sorted target set: a confirmation obtained for one message cannot be
 replayed for a longer list.
+
+The key also names the mailboxes, and how it names them matters. It used to join source and
+destination with `:`, and a mailbox name may contain one — the parameter allows it on purpose,
+because a folder somebody else created may have one. So `("Inbox:Old" → "Archive")` and
+`("Inbox" → "Old:Archive")` were the same key for the same messages, and a token or an accepted
+dialog for the first pair executed the second, a pair nobody had been asked about. The names are
+JSON-encoded now, for the move, the copy and the rename, and a test holds the two pairs apart.
 
 `ELICITATION=false` moves a capable client onto that fallback deliberately, for a scheduled
 job or a test harness. It does not remove the guard — there is no setting in which a guarded

@@ -69,6 +69,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **One injection pattern was quadratic, and it ran in the main process.** The
+  `fake-delimiter` heuristic (`---`, `===`, `###` before a word like `system`)
+  backtracked once per possible length at every position of a run: 40 000
+  hyphens took 1.5 s, and the million characters an extracted document may
+  carry would have held the whole server — its transport is stdio — for about
+  a quarter of an hour, after the parser child had exited and outside every
+  timeout. A message body at its 50 000-character cap cost about two seconds
+  per `get_message` in released versions. The pattern is now anchored to the
+  start of a run, which makes it linear without capping the length of rule it
+  recognises, and a test times every pattern on a million characters of its
+  own trigger.
+
+- **A `:` in a folder name could make two moves share one confirmation.** The
+  confirmation key joined source and destination with `:`, and mailbox names
+  may contain one. `("Inbox:Old" → "Archive")` and `("Inbox" → "Old:Archive")`
+  produced the same key for the same messages, so a token or an accepted
+  dialog for the first pair executed the second, which nobody was asked
+  about. Same for a rename. Both keys now JSON-encode their names.
+
+- An IMAP server's error text reached the model unlabelled, as if it were the
+  next sentence of this server's own message. It is now introduced as the mail
+  server's words, and any invisible character in it is spelled out.
+
 - **The size limits other than `IMAP_MAX_ATTACHMENT_BYTES` did not apply.** The
   declaration check ran with the inline ceiling regardless of what the call
   asked for, and it runs before the destination is chosen — so `mode: "file"`

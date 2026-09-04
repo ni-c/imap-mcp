@@ -50,9 +50,18 @@ const INJECTION_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
     'role-injection',
     /(?:^|[-\u2014|>\])]\s{0,3})(system|assistant|developer)\s*:/im,
   ],
+  // Anchored at the start of the run. Without the lookbehind, `-{3,}` was
+  // tried from every position inside a run and backtracked once per possible
+  // length each time, which is quadratic on text that is nothing but hyphens:
+  // 40 000 of them took 1.5 s, and the million characters an extracted
+  // document may carry would have held this process — the whole server, its
+  // transport is stdio — for a quarter of an hour. A few kilobytes on the
+  // wire. With it, a run is one attempt from its first character and the
+  // positions inside it fail in constant time: a million hyphens in 5 ms,
+  // and a delimiter of any length is still found.
   [
     'fake-delimiter',
-    /(-{3,}|={3,}|#{3,})\s*(begin|end|system|instruction|prompt)/i,
+    /(?<![-=#])(-{3,}|={3,}|#{3,})\s*(begin|end|system|instruction|prompt)/i,
   ],
   [
     'tool-coercion',
@@ -463,7 +472,16 @@ export function sanitizeText(input: string, maxChars = MAX_BODY_CHARS): string {
     : normalized;
 }
 
-/** Names of the injection shapes present in `text`. */
+/**
+ * Names of the injection shapes present in `text`.
+ *
+ * Runs in this process on text the sender wrote, up to a million characters
+ * of it for an extracted document — after the parser child has exited, so no
+ * timeout covers it. Every pattern above therefore has to be linear on a
+ * hostile repetition of its own trigger, and `analyze.test.ts` times each one
+ * on such input. A new pattern gets a line in that test before it gets a line
+ * in the list.
+ */
 export function detectSuspicious(text: string): string[] {
   return INJECTION_PATTERNS.filter(([, pattern]) => pattern.test(text)).map(
     ([name]) => name
