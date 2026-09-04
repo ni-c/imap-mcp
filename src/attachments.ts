@@ -139,7 +139,18 @@ export interface AttachmentCandidate {
 
 export interface AttachmentPolicy {
   allowedTypes: string[];
+  /**
+   * Size ceiling for the destination this check is for.
+   *
+   * Per destination, because there are three of them and they answer different
+   * questions: what may enter the model's context, what may be written to disk,
+   * what a parser may be handed. The caller picks the number; naming it here
+   * keeps the refusal pointing at the variable an operator would actually
+   * change.
+   */
   maxBytes: number;
+  /** Environment variable behind {@link maxBytes}, for the refusal text. */
+  maxBytesName: string;
 }
 
 /**
@@ -273,7 +284,7 @@ export function checkPolicy(
   if (candidate.size !== undefined && candidate.size > policy.maxBytes) {
     allowed = false;
     notes.push(
-      `refused: declared size ${candidate.size} exceeds IMAP_MAX_ATTACHMENT_BYTES (${policy.maxBytes})`
+      `refused: declared size ${candidate.size} exceeds ${policy.maxBytesName} (${policy.maxBytes})`
     );
   }
 

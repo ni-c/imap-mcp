@@ -82,5 +82,13 @@ export const attachmentEntry = z
     filename: z.string().optional(),
     content_type: z.string().optional(),
     size: z.number().optional(),
+    // A loose object would carry this either way; declared because the whole
+    // value of the field is that a reader sees it before deciding what to call.
+    extractable: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when get_attachments with mode "text" can read this part as text.'
+      ),
   })
   .meta({ additionalProperties: true });

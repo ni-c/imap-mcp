@@ -159,6 +159,42 @@ describe('reading what was delivered', () => {
     const files = await readdir(sandbox.downloadDir);
     expect(files.some((name) => name.includes('report'))).toBe(true);
   });
+
+  it('reads a real PDF and a real .docx as text', async () => {
+    // The only place the parsers see bytes that went through a real SMTP
+    // dialogue, real base64 line wrapping and real IMAP decoding rather than a
+    // Buffer handed to them in the same process.
+    const uid = await uidOf(SUBJECTS.documents);
+    const listed = parse<{
+      attachments: {
+        part_id: string;
+        filename: string;
+        extractable: boolean;
+      }[];
+    }>(await asking.call('get_attachments', { uid }));
+
+    const documents = listed.attachments.filter((entry) => entry.extractable);
+    expect(documents).toHaveLength(2);
+
+    for (const [filename, expected] of [
+      ['rechnung.pdf', 'Rechnung 1200,00 EUR'],
+      ['vertrag.docx', 'Vertragsbeginn ist der 1. Oktober'],
+    ]) {
+      const part = documents.find((entry) => entry.filename === filename);
+      expect(part, filename).toBeDefined();
+      const text = await asking.call('get_attachments', {
+        uid,
+        part_id: part!.part_id,
+        mode: 'text',
+      });
+      expect(text, filename).toContain(expected!);
+      expect(text, filename).toContain('BEGIN UNTRUSTED EMAIL CONTENT');
+    }
+
+    // Reading a document is not a write, whatever the download directory says.
+    const before = await readdir(sandbox.downloadDir);
+    expect(before.some((name) => name.includes('rechnung'))).toBe(false);
+  });
 });
 
 describe('flags, mailboxes and moving', () => {

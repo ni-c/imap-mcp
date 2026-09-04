@@ -195,6 +195,46 @@ describe('move_messages', () => {
     await harness.close();
   });
 
+  it('refuses a token when a ":" in a folder name makes two pairs look alike', async () => {
+    // A mailbox name may contain ':' — the parameter allows it on purpose, a
+    // folder somebody else created may have one. The key used to join source
+    // and destination with ':', so ("Inbox:Old" → "Archive") and ("Inbox" →
+    // "Old:Archive") shared one key for the same UIDs, and a token issued for
+    // the first pair executed the second — a pair nobody was asked about.
+    const harness = await connect({
+      config: writeConfig,
+      mailboxes: [
+        { path: 'Inbox:Old', messages: [message(2)] },
+        { path: 'Inbox', messages: [message(2)] },
+        { path: 'Old:Archive', messages: [] },
+        { path: 'Archive', messages: [] },
+      ],
+    });
+    for (const mode of ['move', 'copy'] as const) {
+      const first = await call(harness.client, 'move_messages', {
+        uids: [2],
+        mailbox: 'Inbox:Old',
+        destination: 'Archive',
+        mode,
+      });
+      expect(textOf(first)).toContain('confirm_token');
+      const result = await call(harness.client, 'move_messages', {
+        uids: [2],
+        mailbox: 'Inbox',
+        destination: 'Old:Archive',
+        mode,
+        confirm_token: tokenOf(first),
+      });
+      expect(textOf(result)).toContain('invalid, expired');
+    }
+    expect(
+      harness.imap.calls.some(
+        (entry) => entry.name === 'messageMove' || entry.name === 'messageCopy'
+      )
+    ).toBe(false);
+    await harness.close();
+  });
+
   it('confirms a copy too, because disclosure is not undone by deleting it', async () => {
     // Copying used to be unconfirmed on the grounds that nothing is removed.
     // On a shared account `destination` can be a folder everyone reads, so one

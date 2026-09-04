@@ -80,6 +80,17 @@ The pass now walks the input once with cursors that never rewind, plus one globa
 searches that look for a closing tag, so the number of start tokens no longer multiplies anything.
 The same input is now under 20 ms.
 
+The injection heuristics below are held to the same rule, and one of them broke it. The pattern
+that looks for a fake delimiter — `---`, `===` or `###` before a word like `system` — began with an
+unbounded run and no anchor, so from every position inside a run of hyphens the engine tried
+every possible length before giving up: quadratic, 1.5 s on 40 000 hyphens, and the million
+characters an extracted document may carry would have taken about a quarter of an hour. That scan
+runs in this process on text the parser child has already handed back, so the child's timeout and
+memory ceiling were no help, and every size guard passed because a document of hyphens is a few
+kilobytes. The pattern is now anchored to the start of a run, which is linear, and
+`analyze.test.ts` times every pattern on a million characters of its own trigger. A pattern that
+cannot pass that test does not go in the list.
+
 **Folder names are mailbox content too.** On a shared account, a public namespace or any mailbox
 somebody else can create a folder in, the name is chosen by whoever created it — and it reaches the
 model through `list_mailboxes` long before anyone opens a message. It used to reach it raw: not
@@ -128,6 +139,13 @@ did not happen.
 Tokens are random, single-use, expire after five minutes, and are bound to a SHA-256
 fingerprint of the sorted target set: a confirmation obtained for one message cannot be
 replayed for a longer list.
+
+The key also names the mailboxes, and how it names them matters. It used to join source and
+destination with `:`, and a mailbox name may contain one — the parameter allows it on purpose,
+because a folder somebody else created may have one. So `("Inbox:Old" → "Archive")` and
+`("Inbox" → "Old:Archive")` were the same key for the same messages, and a token or an accepted
+dialog for the first pair executed the second, a pair nobody had been asked about. The names are
+JSON-encoded now, for the move, the copy and the rename, and a test holds the two pairs apart.
 
 `ELICITATION=false` moves a capable client onto that fallback deliberately, for a scheduled
 job or a test harness. It does not remove the guard — there is no setting in which a guarded
@@ -191,3 +209,113 @@ predictable attachment name is never followed.
 
 Images are returned as images, with a warning. Text rendered inside a picture is still text a
 stranger wrote, and no amount of sanitising reaches it — the warning is the only honest answer.
+
+### Parsing a document
+
+`mode: "text"` reads the text of a PDF, Office or OpenDocument attachment. It is the third
+thing that happens to an attachment here, and unlike the other two it _parses_ the bytes: a
+bundled PDF.js and a ZIP reader, both fed by a stranger. That is a genuinely new attack
+surface for this server, and the answer is containment rather than trust.
+
+**Where it runs.** A child process of its own, with a V8 heap limit, a twenty-second timeout,
+and an unconditional `SIGKILL` in a `finally`. A process rather than a worker thread, and that
+was measured rather than chosen: a worker's `resourceLimits` promise to turn a runaway parse
+into `ERR_WORKER_OUT_OF_MEMORY`, and for the allocation pattern a three-kilobyte spreadsheet
+produced they did not — the whole server died with `FATAL ERROR: Reached heap limit`. A thread
+also cannot give back what a terminated parse left behind; a gigabyte stayed resident after
+`terminate()`. A killed process takes its memory with it, and a process that aborts aborts
+alone: the server answers "out of memory" and carries on. Without the timeout a parse that
+spins is a server that stops answering with nothing in the log. One extraction runs at a time,
+because a per-call memory ceiling that multiplies by a number the caller chooses is not a
+ceiling, and past eight requests in flight the ninth is refused rather than queued behind seven
+timeouts.
+
+**The heap limit is best effort, and the guards that matter sit in front of it.** It bounds a
+pathological object graph; it does not bound a typed array, which is external memory, and both
+parsers produce those. The ceilings below — on what a ZIP entry may inflate to, on what a PDF
+stream may decode to, and on the characters the child may build for any format — are what
+bound memory. The process boundary is what bounds the damage if one of them is wrong.
+
+**Its stdout is discarded.** The transport is stdio JSON-RPC and PDF.js logs. One line from
+inside the parser reaching the parent's stdout would corrupt the framing and hang the session,
+so the child is started without one. PDF.js is also run at `verbosity: 0`; one guard is not a
+guard. Its flags are stated rather than inherited, because a flag the parent was started with
+and a child cannot take would turn every extraction into a silent failure.
+
+**What crosses back is a code, never a message.** PDF.js and fflate quote the document in their
+exceptions — byte offsets, object fragments, what they found where they expected something
+else. An error message is read in the server's own voice, outside the fence every other piece
+of message content passes through, so the child returns a reason code and the sentences are
+written here. The code — never the message — also goes to stderr, so an extraction that fails
+for a reason nobody anticipated leaves one line an operator can act on.
+
+**PDF.js runs with `isEvalSupported: false`**, which gates its construction of `Function`
+objects from font and calculator programs taken from the document — the primitive that turned a
+parser bug into remote code execution in CVE-2024-4367. `enableXfa`, `useSystemFonts` and font
+faces are off for the same reason. Four calls are used — `getDocument`, `getPage`,
+`getTextContent`, `destroy` — and that is enforced by nothing but this paragraph and the
+comment beside them: `getJSActions` surfaces the document's own JavaScript, `getAttachments`
+returns embedded files, which is how a PDF can carry an executable past a magic-byte check that
+only ever looks at the outer `%PDF`. The page loop is sequential and capped, because the page
+count is a number the sender wrote.
+
+**PDF streams are measured before PDF.js inflates them.** PDF.js decodes a stream into memory
+in full, that memory is a typed array no heap limit sees, and Deflate reaches a thousand to one
+on repetitive input — so a 3.4 MB attachment whose one content stream inflates to a gigabyte
+took the process to 2.1 GB resident within a second, and the timeout only decided when that
+stopped growing. A linear pass over the file now decodes every Flate, LZW and RunLength stream
+(behind an ASCIIHex or ASCII85 wrapper or not) only as far as a ceiling — 32 MB for one
+stream, 128 MB for all of them — and refuses the document as "too large" the moment one
+crosses it. The work that costs is bounded by the ceiling, whatever the file holds. Streams are
+delimited the way PDF.js delimits them, by a `/Length` that lands on `endstream` and by the
+keyword otherwise, so a sender cannot end the measurement early by writing the keyword inside
+their own compressed bytes. Image codecs are not measured, because text extraction never
+decodes them either.
+
+**The ZIP reader decides before it allocates.** `unzipSync` sizes an entry's output buffer from
+the _declared_ uncompressed size in the central directory, checked against nothing, so the
+filter callback — the last point before that allocation — carries every guard: a fixed
+allowlist of entry names, a count of the entries that allowlist admits, a per-entry and a
+cumulative size ceiling, and a refusal of anything but stored and deflate. Nothing outside the
+allowlist is ever decompressed, which is also why a nested archive is not descended into, an
+entry called `__proto__` is never used as a key, and six hundred embedded pictures are neither
+read nor counted against a report. Measured on fflate 0.8.3: a declared size below the real one
+truncates rather than grows, so lying in either direction buys nothing.
+
+**Spreadsheets are budgeted per row, and every cell is capped.** A shared string is stored once
+and referenced by index, so one long string behind a grid of cells is a kilobyte of archive
+standing for gigabytes of output; a repeated cell in an OpenDocument sheet is the same trick in
+a different syntax. The character budget is charged row by row and stops the walk, no cell may
+exceed four kilobytes, and nothing larger than the character ceiling is ever built in the
+child — the contract "the child returns at most a million characters" holds for every format,
+not most of them.
+
+**There is no XML parser, and that is the defence.** A real one resolves entities, which would
+hand a mail attachment billion-laughs expansion and an `<!ENTITY … SYSTEM "file:///etc/passwd">`
+that reads a file. The markup walk builds no entity table and resolves no system identifier, so
+those are not defended against — they are not implemented, and `&lol9;` comes back as six
+literal characters. The walk itself is the one already used for HTML mail: a single forward-only
+pass with a global closing-tag budget. The obvious alternative, `/<w:t[^>]*>([\s\S]*?)<\/w:t>/g`,
+is the exact shape of the 33-second denial of service recorded above.
+
+**Nothing in the path reaches the network or the filesystem.** The document is passed as bytes,
+never as a URL, so PDF.js never constructs its network stream; the standard-font and CMap URLs
+it would otherwise fetch stay unset, because `pdfjs-dist` is not resolvable in this tree.
+Pointing them at a CDN is the most-suggested workaround online for the resulting font warnings
+and would give this server its first outbound HTTP client. The known cost is stated instead: a
+PDF needing a predefined CJK CMap does not extract.
+
+**Extracted text is fenced like a message body**, and carries one thing a body does not need.
+Extraction returns every text-drawing instruction in the file — including text set below one
+point, hanging off the page, or drawn in the colour of the paper — and returns nothing that was
+drawn as a picture. The set the model reads and the set the user sees are different sets, in
+both directions. Fill colour is not exposed by the text API at all, and text render mode 3 is
+how every OCR'd scan stores its text layer, so filtering is not available; the count of runs
+placed where a reader cannot see them is reported as a signal, and the result states plainly
+above the fence that "the document says X" is not a claim the user can check.
+
+**One supply-chain consequence, stated rather than discovered.** `unpdf` vendors PDF.js into its
+own published bundle, so `pdfjs-dist` does not appear in this package's dependency tree — and
+`npm audit`, Dependabot and the Trivy job all resolve the tree. **A future PDF.js advisory will
+not raise an alert on this repository.** Watching PDF.js releases is manual, and an `unpdf`
+version bump is a security bump.

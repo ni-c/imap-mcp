@@ -20,9 +20,20 @@ All configuration is by environment variable; there is no config file.
 | `ELICITATION`       | no       | `true`     | `false` replaces the approval dialog with the two-call token. **Not prefixed** |
 
 There are also `IMAP_MAX_MESSAGES`, `IMAP_MAX_ATTACHMENT_BYTES`,
-`IMAP_MAX_DOWNLOAD_BYTES` and `IMAP_DRAFTS_MAILBOX` for the limits and the drafts
-folder; the defaults are 100 messages, 1 MB inline, 25 MB to disk, and whichever
-folder the server flags as `\Drafts`.
+`IMAP_MAX_DOWNLOAD_BYTES`, `IMAP_MAX_EXTRACT_BYTES` and `IMAP_DRAFTS_MAILBOX` for the
+limits and the drafts folder; the defaults are 100 messages, 1 MB inline, 25 MB to
+disk, 10 MB into the text extractor, and whichever folder the server flags as
+`\Drafts`.
+
+The three size limits are separate because they answer three different questions.
+`IMAP_MAX_ATTACHMENT_BYTES` bounds what may enter the model's context;
+`IMAP_MAX_DOWNLOAD_BYTES` bounds what may be written to your disk;
+`IMAP_MAX_EXTRACT_BYTES` bounds how much input one parser is handed, which is a
+memory question and neither of the other two. Raising one is not a request to raise
+the others. `IMAP_MAX_EXTRACT_BYTES` is the one with a hard ceiling — 64 MB — and a
+value above it refuses to start rather than being clamped: the other two buy a big
+answer, this one buys a buffer inside a parser working on bytes a stranger chose, so
+a typo there would leave you believing there is a limit.
 
 ## `IMAP_TRUSTED_AUTHSERV_ID` and the `forgeable` flag
 

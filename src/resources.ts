@@ -79,8 +79,11 @@ export function registerAttachmentResources(
               // base64-encoded in a JSON-RPC response — that is context, and
               // maxDownloadBytes exists to bound what may be written to a file.
               // Using it here allowed ~34 MB of base64 in one response, where
-              // get_attachments caps the same attachment at 1 MB.
+              // get_attachments caps the same attachment at 1 MB. The same
+              // reasoning excludes IMAP_MAX_EXTRACT_BYTES: there is no text
+              // mode on this door, so nothing here can be reached by it.
               maxBytes: config.imap.maxAttachmentBytes,
+              maxBytesName: 'IMAP_MAX_ATTACHMENT_BYTES',
             })
           )
           .find((entry) => entry.partId === partId);

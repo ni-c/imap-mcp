@@ -15,6 +15,7 @@ import { DEFAULT_ATTACHMENT_TYPES } from '../src/config.js';
 const policy = {
   allowedTypes: DEFAULT_ATTACHMENT_TYPES,
   maxBytes: 1024,
+  maxBytesName: 'IMAP_MAX_ATTACHMENT_BYTES',
 };
 
 function candidate(

@@ -219,6 +219,16 @@ describe('run', () => {
     expect(textOf(result)).toContain('(HTML error page omitted)');
   });
 
+  it("labels the server text as the server's and spells out what it hides", async () => {
+    // The response text is the mail server's, or a proxy's on its port. It
+    // used to follow this server's own message unlabelled, as if it were the
+    // next sentence of it, with any invisible character passed through.
+    const result = await run(async () => {
+      throw new MailError('IMAP error', undefined, 'NO go‮away');
+    });
+    expect(textOf(result)).toContain('The mail server said: NO go\\u202eaway');
+  });
+
   it('prefixes anything else', async () => {
     const result = await run(async () => {
       throw new Error('boom');

@@ -84,6 +84,7 @@ describe('loadConfig', () => {
     // rest of the family, and deliberately so: this reaches a mailbox.
     expect(config.readOnly).toBe(true);
     expect(config.imap.downloadDir).toBeUndefined();
+    expect(config.imap.maxExtractBytes).toBe(10 * 1024 * 1024);
   });
 
   it('removes the password from the environment', () => {
@@ -184,6 +185,16 @@ describe('loadConfig', () => {
     ['IMAP_SEEN_KEYWORD', { IMAP_SEEN_KEYWORD: 'Ai Seen' }],
     ['IMAP_MAX_MESSAGES', { IMAP_MAX_MESSAGES: 'lots' }],
     ['IMAP_MAX_MESSAGES zero', { IMAP_MAX_MESSAGES: '0' }],
+    ['IMAP_MAX_EXTRACT_BYTES', { IMAP_MAX_EXTRACT_BYTES: 'ten megabytes' }],
+    ['IMAP_MAX_EXTRACT_BYTES zero', { IMAP_MAX_EXTRACT_BYTES: '0' }],
+    // Named rather than clamped, and fatal rather than ignored: the other
+    // two size variables buy a big answer, this one buys a buffer inside a
+    // parser working on bytes a stranger chose. A typo there would leave an
+    // operator believing there is a limit.
+    [
+      'IMAP_MAX_EXTRACT_BYTES over the ceiling',
+      { IMAP_MAX_EXTRACT_BYTES: String(1024 * 1024 * 1024) },
+    ],
   ])('exits on a malformed %s', (_name, overrides) => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     const exit = vi.spyOn(process, 'exit').mockImplementation((() => {
@@ -218,5 +229,31 @@ describe('missingConfigMessage', () => {
     expect(message).toContain('IMAP_HOST');
     expect(message).toContain('IMAP_READ_ONLY');
     expect(message).toContain('IMAP_DOWNLOAD_DIR');
+  });
+});
+
+describe('values that cannot be sent to the server', () => {
+  // Each of these is fatal at startup rather than sanitised: a line break in
+  // a mailbox name would end the IMAP command early, a port that is not a
+  // port is a typo nobody would otherwise learn about, and an extraction
+  // ceiling above the hard one would be a promise the child cannot keep.
+  it.each([
+    ['IMAP_DRAFTS_MAILBOX', 'Drafts\nNOOP', 'line breaks'],
+    // Trimmed first, so the break has to sit inside the value to count.
+    ['IMAP_TRUSTED_AUTHSERV_ID', 'mx.example\r\nnet', 'line breaks'],
+    ['IMAP_PORT', 'nine-nine-three', '65535'],
+    ['IMAP_PORT', '70000', '65535'],
+    ['IMAP_SEEN_KEYWORD', 'Ai Seen', 'letters, digits'],
+    ['IMAP_MAX_EXTRACT_BYTES', String(65 * 1024 * 1024), 'must not exceed'],
+  ])('refuses to start with %s=%j', (name, raw, phrase) => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('exit');
+    }) as never);
+    expect(() => loadConfig(env({ [name]: raw }))).toThrow('exit');
+    expect(exit).toHaveBeenCalledWith(1);
+    const message = String(error.mock.calls[0]?.[0] ?? '');
+    expect(message).toContain(name);
+    expect(message).toContain(phrase);
   });
 });

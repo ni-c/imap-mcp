@@ -5,6 +5,8 @@ import { join } from 'node:path';
 
 import { waitForTcp } from 'mcp-integration-harness';
 
+import { buildDocx, buildPdf } from '../document-fixtures.js';
+
 /**
  * Fills the throwaway GreenMail with mail to read.
  *
@@ -171,11 +173,60 @@ function withExecutableAttachment(subject: string): string {
   ].join('\r\n');
 }
 
+/**
+ * A message carrying a real PDF and a real .docx, for `mode: "text"`.
+ *
+ * Built by the same helpers the unit tests use, but delivered over real SMTP
+ * and read back through real IMAP base64 decoding. That round trip is the whole
+ * value of this suite for extraction: it is the only place where unpdf and
+ * fflate see bytes that travelled the wire rather than bytes handed straight to
+ * them in the same process.
+ */
+function withDocuments(subject: string): string {
+  const boundary = 'integration-documents';
+  return [
+    `From: Sender <sender@example.org>`,
+    `To: Integration <${ADDRESS}>`,
+    `Subject: ${subject}`,
+    `Date: Mon, 01 Sep 2026 11:00:00 +0000`,
+    `Message-ID: <${subject.replace(/\W+/g, '-')}@example.org>`,
+    `MIME-Version: 1.0`,
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    ``,
+    `--${boundary}`,
+    `Content-Type: text/plain; charset=utf-8`,
+    ``,
+    `Rechnung und Vertrag im Anhang.`,
+    ``,
+    `--${boundary}`,
+    `Content-Type: application/pdf; name="rechnung.pdf"`,
+    `Content-Disposition: attachment; filename="rechnung.pdf"`,
+    `Content-Transfer-Encoding: base64`,
+    ``,
+    wrap(buildPdf({ text: 'Rechnung 1200,00 EUR' }).toString('base64')),
+    ``,
+    `--${boundary}`,
+    `Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document; name="vertrag.docx"`,
+    `Content-Disposition: attachment; filename="vertrag.docx"`,
+    `Content-Transfer-Encoding: base64`,
+    ``,
+    wrap(buildDocx(['Vertragsbeginn ist der 1. Oktober']).toString('base64')),
+    ``,
+    `--${boundary}--`,
+  ].join('\r\n');
+}
+
+/** base64 in a mail body is wrapped; a single 800-character line is not legal. */
+function wrap(encoded: string): string {
+  return (encoded.match(/.{1,76}/g) ?? []).join('\r\n');
+}
+
 export const SUBJECTS = {
   first: 'Integration first message',
   second: 'Integration second message',
   attachment: 'Integration message with an attachment',
   executable: 'Integration message with an executable attachment',
+  documents: 'Integration message with document attachments',
   toMove: 'Integration message to move',
   toDelete: 'Integration message to delete',
 };
@@ -206,12 +257,18 @@ export async function bootstrap(): Promise<Sandbox> {
   }
   await deliver(withAttachment(SUBJECTS.attachment));
   await deliver(withExecutableAttachment(SUBJECTS.executable));
+  await deliver(withDocuments(SUBJECTS.documents));
 
   const downloadDir = await mkdtemp(join(tmpdir(), 'imap-mcp-integration-'));
 
   return {
     downloadDir,
-    subjects: [...subjects, SUBJECTS.attachment, SUBJECTS.executable],
+    subjects: [
+      ...subjects,
+      SUBJECTS.attachment,
+      SUBJECTS.executable,
+      SUBJECTS.documents,
+    ],
     env: {
       IMAP_HOST: '127.0.0.1',
       IMAP_PORT,
@@ -222,6 +279,9 @@ export async function bootstrap(): Promise<Sandbox> {
       IMAP_READ_ONLY: 'false',
       IMAP_DOWNLOAD_DIR: downloadDir,
       IMAP_DRAFTS_MAILBOX: 'Drafts',
+      // Stated rather than defaulted, so the suite pins the value the
+      // documentation gives.
+      IMAP_MAX_EXTRACT_BYTES: '10485760',
     },
   };
 }

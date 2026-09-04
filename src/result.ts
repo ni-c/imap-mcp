@@ -3,7 +3,7 @@ import type {
   InputRequiredResult,
 } from '@modelcontextprotocol/server';
 
-import { wrapUntrusted } from './analyze.js';
+import { escapeInvisible, wrapUntrusted } from './analyze.js';
 import { MailError, ToolInputError } from './errors.js';
 
 export function textResult(text: string): CallToolResult {
@@ -273,7 +273,13 @@ const MAX_ERROR_BODY_LENGTH = 2000;
 /**
  * Limits what an upstream error string can inject into the model context: HTML
  * error pages (captive portals, proxies answering on the mail port) are dropped
- * entirely, other bodies are truncated.
+ * entirely, other bodies are truncated, and the characters a reader cannot see
+ * are spelled out rather than passed through.
+ *
+ * The text is the mail server's, or that of whatever answers on its port. It
+ * used to be returned as it came, in this server's own voice; the escaping and
+ * the label the caller puts in front of it are what keep it from reading as
+ * something this server said.
  */
 export function sanitizeErrorBody(body: string): string {
   const trimmed = body.trim();
@@ -284,9 +290,9 @@ export function sanitizeErrorBody(body: string): string {
     return '(HTML error page omitted)';
   }
   if (trimmed.length > MAX_ERROR_BODY_LENGTH) {
-    return `${trimmed.slice(0, MAX_ERROR_BODY_LENGTH)}… (truncated)`;
+    return `${escapeInvisible(trimmed.slice(0, MAX_ERROR_BODY_LENGTH))}… (truncated)`;
   }
-  return trimmed;
+  return escapeInvisible(trimmed);
 }
 
 function hintFor(error: MailError): string {
@@ -337,8 +343,11 @@ export async function run(
     }
     if (error instanceof MailError) {
       const body = sanitizeErrorBody(error.responseText);
+      // Labelled as the server's words: the response text is chosen by the
+      // mail server, and an unlabelled line after this server's own message
+      // reads as a continuation of it.
       return errorResult(
-        `${error.message}${body === '' ? '' : `\n${body}`}${hintFor(error)}`
+        `${error.message}${body === '' ? '' : `\nThe mail server said: ${body}`}${hintFor(error)}`
       );
     }
     const message = error instanceof Error ? error.message : String(error);
