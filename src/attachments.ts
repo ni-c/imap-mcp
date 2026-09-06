@@ -162,11 +162,30 @@ export interface AttachmentPolicy {
  */
 export function sanitizeFilename(raw: string | undefined): string {
   if (raw === undefined || raw.trim() === '') return '(unnamed)';
+  // Two orderings matter here, and both were wrong.
+  //
+  // The trim runs *before* the leading dots are taken off, and again after. The
+  // other way round, one space defeated the rule: ` .bashrc` has no dot in
+  // first position when the strip runs, and the trim that followed exposed it,
+  // so the name reached the model looking like a dotfile after all.
+  //
+  // And the strip never takes the dot that carries the extension. It used to:
+  // `.exe` came out as `exe`, `extensionOf` then answered `''`, and an empty
+  // extension makes `checkPolicy` skip the executable check entirely rather
+  // than fail it — so the blocklist was bypassed by naming the attachment
+  // `.exe`. That is the same failure `appref-ms` caused, reached by a different
+  // route. The lookahead keeps the leading dots whenever removing them would
+  // consume the last one; a name that has another dot further along loses them
+  // as before.
   const cleaned = defuseAutoFetch(stripInvisible(raw.normalize('NFKC')))
     .replace(/[/\\]/g, '_')
-    .replace(/^\.+/, '')
+    .trim()
+    .replace(/^\.+(?=.*\.)/, '')
     .trim();
-  if (cleaned === '') return '(unnamed)';
+  // A name of nothing but dots is not a name. It carries no extension either,
+  // so keeping it buys the check above nothing and only puts `...` in front of
+  // a reader.
+  if (cleaned === '' || /^\.+$/.test(cleaned)) return '(unnamed)';
   return cleaned.length > MAX_FILENAME_LENGTH
     ? `${cleaned.slice(0, MAX_FILENAME_LENGTH)}…`
     : cleaned;
