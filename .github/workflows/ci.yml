@@ -34,7 +34,7 @@ jobs:
       # typechecks test/, which vitest transpiles without checking.
       - run: npm run typecheck
       - run: npm run build
-      # `files: ["dist"]` publishes the build output verbatim, and `tsc` does not
+      # `files` publishes the build output verbatim, and `tsc` does not
       # delete outputs whose source is gone. Deleting a module therefore leaves it
       # in the tarball indefinitely — which is how a removed SMTP implementation
       # nearly shipped inside a package whose security argument is that it cannot
