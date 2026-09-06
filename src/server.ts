@@ -75,7 +75,23 @@ export function createServer(config: Config, deps: ServerDeps = {}): McpServer {
   const server = new McpServer(
     {
       name: 'imap-mcp',
+      title: 'IMAP mailbox',
+      description:
+        'Read, search and organise any IMAP mailbox, with writes off by default',
       version: packageVersion(),
+      websiteUrl: 'https://imap-mcp.ni-c.de',
+      icons: [
+        {
+          src: 'https://imap-mcp.ni-c.de/icon-512.png',
+          mimeType: 'image/png',
+          sizes: ['512x512'],
+        },
+        {
+          src: 'https://imap-mcp.ni-c.de/favicon.svg',
+          mimeType: 'image/svg+xml',
+          sizes: ['any'],
+        },
+      ],
     },
     // Defence in depth, not the mechanism. Some clients — Claude Web among
     // them — do not pass this field to the model at all, so nothing may depend
