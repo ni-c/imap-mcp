@@ -36,8 +36,8 @@ describe('buildDraft', () => {
   });
 
   it('round-trips the body through base64', () => {
-    expect(bodyOf(buildDraft({ ...base, body: 'Grüße\nWilli' }))).toBe(
-      'Grüße\nWilli'
+    expect(bodyOf(buildDraft({ ...base, body: 'Grüße\nAlex' }))).toBe(
+      'Grüße\nAlex'
     );
   });
 

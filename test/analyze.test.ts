@@ -175,7 +175,7 @@ describe('detectSuspicious', () => {
   it('stays quiet on an ordinary message', () => {
     expect(
       detectSuspicious(
-        'Hi Willi, the invoice for August is attached. Kind regards, Anna'
+        'Hi Alex, the invoice for August is attached. Kind regards, Anna'
       )
     ).toEqual([]);
   });
