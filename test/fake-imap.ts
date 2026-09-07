@@ -30,6 +30,8 @@ export interface FakeMessage {
   html?: string;
   messageId?: string;
   attachments?: FakeAttachment[];
+  /** Extra raw header lines, written into the source as given. */
+  headers?: string[];
 }
 
 export interface FakeAttachment {
@@ -49,10 +51,13 @@ export interface FakeMailbox {
 }
 
 export class FakeImap implements ImapConnection {
+  // LIST-STATUS is what lets a listing carry its counters in one round trip.
+  // A test that wants the per-folder STATUS fallback deletes it.
   readonly capabilities = new Map<string, boolean | number>([
     ['IMAP4rev1', true],
     ['IDLE', true],
     ['MOVE', true],
+    ['LIST-STATUS', true],
   ]);
 
   /** Every command the tools issued, in order — the tests assert on this. */
@@ -194,40 +199,43 @@ export class FakeImap implements ImapConnection {
     _options?: { uid?: boolean }
   ): Promise<number[] | false> {
     this.record('search', query);
-    const messages = this.current().messages.filter((message) => {
+    const messages = this.current().messages.filter((candidate) => {
       if (query.all === true) return true;
       if (
         query.seen !== undefined &&
-        message.flags.has('\\Seen') !== query.seen
+        candidate.flags.has('\\Seen') !== query.seen
       )
         return false;
       if (
         query.flagged !== undefined &&
-        message.flags.has('\\Flagged') !== query.flagged
+        candidate.flags.has('\\Flagged') !== query.flagged
       )
         return false;
-      if (query.keyword !== undefined && !message.flags.has(query.keyword))
+      if (query.keyword !== undefined && !candidate.flags.has(query.keyword))
         return false;
-      if (query.unKeyword !== undefined && message.flags.has(query.unKeyword))
+      if (query.unKeyword !== undefined && candidate.flags.has(query.unKeyword))
         return false;
       if (
         query.subject !== undefined &&
-        !message.subject.toLowerCase().includes(query.subject.toLowerCase())
+        !candidate.subject.toLowerCase().includes(query.subject.toLowerCase())
       )
         return false;
       if (
         query.from !== undefined &&
-        !message.from.address.toLowerCase().includes(query.from.toLowerCase())
+        !candidate.from.address.toLowerCase().includes(query.from.toLowerCase())
       )
         return false;
       if (
         query.body !== undefined &&
-        !message.body.toLowerCase().includes(query.body.toLowerCase())
+        !candidate.body.toLowerCase().includes(query.body.toLowerCase())
       )
         return false;
-      if (query.since !== undefined && message.date < new Date(query.since))
+      if (query.since !== undefined && candidate.date < new Date(query.since))
         return false;
-      if (query.before !== undefined && message.date >= new Date(query.before))
+      if (
+        query.before !== undefined &&
+        candidate.date >= new Date(query.before)
+      )
         return false;
       if (query.or !== undefined) return true;
       return true;
@@ -243,9 +251,9 @@ export class FakeImap implements ImapConnection {
     this.record('fetch', range, query);
     const uids = Array.isArray(range) ? range : [];
     for (const uid of uids) {
-      const message = this.current().messages.find((m) => m.uid === uid);
-      if (message === undefined) continue;
-      yield toFetchObject(message, query);
+      const found = this.current().messages.find((m) => m.uid === uid);
+      if (found === undefined) continue;
+      yield toFetchObject(found, query);
     }
   }
 
@@ -258,10 +266,8 @@ export class FakeImap implements ImapConnection {
     content: NodeJS.ReadableStream;
   }> {
     this.record('download', range, part, options);
-    const message = this.current().messages.find(
-      (m) => m.uid === Number(range)
-    );
-    const attachment = message?.attachments?.find((a) => a.partId === part);
+    const found = this.current().messages.find((m) => m.uid === Number(range));
+    const attachment = found?.attachments?.find((a) => a.partId === part);
     if (attachment === undefined) throw new Error(`no such part: ${part}`);
     return {
       meta: {
@@ -280,8 +286,8 @@ export class FakeImap implements ImapConnection {
   ): Promise<boolean> {
     this.record('messageFlagsAdd', range, flags);
     for (const uid of range) {
-      const message = this.current().messages.find((m) => m.uid === uid);
-      for (const flag of flags) message?.flags.add(flag);
+      const found = this.current().messages.find((m) => m.uid === uid);
+      for (const flag of flags) found?.flags.add(flag);
     }
     return true;
   }
@@ -293,8 +299,8 @@ export class FakeImap implements ImapConnection {
   ): Promise<boolean> {
     this.record('messageFlagsRemove', range, flags);
     for (const uid of range) {
-      const message = this.current().messages.find((m) => m.uid === uid);
-      for (const flag of flags) message?.flags.delete(flag);
+      const found = this.current().messages.find((m) => m.uid === uid);
+      for (const flag of flags) found?.flags.delete(flag);
     }
     return true;
   }
@@ -310,8 +316,8 @@ export class FakeImap implements ImapConnection {
     for (const uid of range) {
       const index = source.messages.findIndex((m) => m.uid === uid);
       if (index >= 0) {
-        const [message] = source.messages.splice(index, 1);
-        if (message !== undefined) target.messages.push(message);
+        const [moved] = source.messages.splice(index, 1);
+        if (moved !== undefined) target.messages.push(moved);
       }
     }
     return { uidMap: new Map() };
@@ -325,8 +331,8 @@ export class FakeImap implements ImapConnection {
     this.record('messageCopy', range, destination);
     const target = this.box(destination);
     for (const uid of range) {
-      const message = this.current().messages.find((m) => m.uid === uid);
-      if (message !== undefined) target.messages.push({ ...message });
+      const found = this.current().messages.find((m) => m.uid === uid);
+      if (found !== undefined) target.messages.push({ ...found });
     }
     return { uidMap: new Map() };
   }
@@ -381,28 +387,28 @@ export class FakeImap implements ImapConnection {
 }
 
 function toFetchObject(
-  message: FakeMessage,
+  fake: FakeMessage,
   query: FetchQueryObject
 ): FetchMessageObject {
-  const source = buildSource(message);
+  const source = buildSource(fake);
   const object: Record<string, unknown> = {
-    seq: message.uid,
-    uid: message.uid,
-    flags: new Set(message.flags),
-    internalDate: message.date,
+    seq: fake.uid,
+    uid: fake.uid,
+    flags: new Set(fake.flags),
+    internalDate: fake.date,
     size: source.length,
   };
   if (query.envelope === true) {
     object.envelope = {
-      date: message.date,
-      subject: message.subject,
-      messageId: message.messageId ?? `<${message.uid}@example.net>`,
-      from: [message.from],
-      to: message.to,
+      date: fake.date,
+      subject: fake.subject,
+      messageId: fake.messageId ?? `<${fake.uid}@example.net>`,
+      from: [fake.from],
+      to: fake.to,
     };
   }
   if (query.bodyStructure === true) {
-    object.bodyStructure = buildStructure(message);
+    object.bodyStructure = buildStructure(fake);
   }
   if (query.source !== undefined && query.source !== false) {
     const maxLength =
@@ -414,47 +420,48 @@ function toFetchObject(
 }
 
 /** Minimal but real RFC822 so mailparser has something genuine to parse. */
-export function buildSource(message: FakeMessage): Buffer {
+export function buildSource(fake: FakeMessage): Buffer {
   const headers = [
-    `From: ${message.from.name === undefined ? message.from.address : `${message.from.name} <${message.from.address}>`}`,
-    `To: ${message.to.map((t) => t.address).join(', ')}`,
-    `Subject: ${message.subject}`,
-    `Date: ${message.date.toUTCString()}`,
-    `Message-ID: ${message.messageId ?? `<${message.uid}@example.net>`}`,
+    `From: ${fake.from.name === undefined ? fake.from.address : `${fake.from.name} <${fake.from.address}>`}`,
+    `To: ${fake.to.map((t) => t.address).join(', ')}`,
+    `Subject: ${fake.subject}`,
+    `Date: ${fake.date.toUTCString()}`,
+    `Message-ID: ${fake.messageId ?? `<${fake.uid}@example.net>`}`,
     'MIME-Version: 1.0',
+    ...(fake.headers ?? []),
   ];
-  if (message.html !== undefined) {
+  if (fake.html !== undefined) {
     const boundary = 'boundary42';
     headers.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
     return Buffer.from(
       `${headers.join('\r\n')}\r\n\r\n` +
-        `--${boundary}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${message.body}\r\n` +
-        `--${boundary}\r\nContent-Type: text/html; charset=utf-8\r\n\r\n${message.html}\r\n` +
+        `--${boundary}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${fake.body}\r\n` +
+        `--${boundary}\r\nContent-Type: text/html; charset=utf-8\r\n\r\n${fake.html}\r\n` +
         `--${boundary}--\r\n`,
       'utf-8'
     );
   }
   headers.push('Content-Type: text/plain; charset=utf-8');
   return Buffer.from(
-    `${headers.join('\r\n')}\r\n\r\n${message.body}\r\n`,
+    `${headers.join('\r\n')}\r\n\r\n${fake.body}\r\n`,
     'utf-8'
   );
 }
 
-function buildStructure(message: FakeMessage): MessageStructureObject {
+function buildStructure(fake: FakeMessage): MessageStructureObject {
   const text: MessageStructureObject = {
     part: '1',
     type: 'text/plain',
-    size: Buffer.byteLength(message.body),
+    size: Buffer.byteLength(fake.body),
   };
-  if (message.attachments === undefined || message.attachments.length === 0) {
+  if (fake.attachments === undefined || fake.attachments.length === 0) {
     return text;
   }
   return {
     type: 'multipart/mixed',
     childNodes: [
       text,
-      ...message.attachments.map((attachment) => ({
+      ...fake.attachments.map((attachment) => ({
         part: attachment.partId,
         type: attachment.contentType,
         size: attachment.declaredSize ?? attachment.content.length,

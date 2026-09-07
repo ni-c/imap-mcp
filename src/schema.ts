@@ -10,6 +10,9 @@ export const MAX_LIMIT = 200;
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARS = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/;
 
+/** The same class, for the mailbox names that arrive through the environment. */
+export const MAILBOX_CONTROL_CHARS = CONTROL_CHARS;
+
 /**
  * A mailbox name.
  *

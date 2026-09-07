@@ -16,7 +16,11 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: npm ci
+      # --ignore-scripts in both jobs. The publish job holds the OIDC token for
+      # npm Trusted Publishing while it installs, and nothing in this tree
+      # needs an install hook (`npm query ':attr(scripts,[postinstall])'` is
+      # empty) — so a hook that ran here could only be somebody else's.
+      - run: npm ci --ignore-scripts
       - run: npm run lint
       - run: npm run build
       - run: npm run test:coverage
@@ -43,7 +47,11 @@ jobs:
             echo "Tag $GITHUB_REF_NAME does not match package.json version $pkg" >&2
             exit 1
           fi
-      - run: npm ci
+      # --ignore-scripts in both jobs. The publish job holds the OIDC token for
+      # npm Trusted Publishing while it installs, and nothing in this tree
+      # needs an install hook (`npm query ':attr(scripts,[postinstall])'` is
+      # empty) — so a hook that ran here could only be somebody else's.
+      - run: npm ci --ignore-scripts
       # --provenance requires a PUBLIC repository. The package is scoped, so
       # publishConfig.access must be "public" in package.json — there is no
       # --access flag here, and npm reports a restricted publish as a 404.
@@ -128,5 +136,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
             --title "$GITHUB_REF_NAME" \
             --notes-file release-notes.md

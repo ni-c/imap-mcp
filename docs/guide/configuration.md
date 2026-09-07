@@ -92,6 +92,10 @@ IMAP_ALLOW_TOOLS=list_new_messages,get_message,move_messages
 IMAP_DENY_TOOLS=delete_messages
 ```
 
+One boundary the list cannot draw: `move_messages` copies as well as moves (`mode: "copy"`),
+and the two are one tool. Denying `move_messages` removes both; there is no way to keep moving
+and forbid copying, or the other way round. Both modes ask for confirmation.
+
 Why bother, when all of them work: a model chooses the right tool far more reliably
 from a handful than from a long list, and every tool it can see costs context on
 every single request. If this is the only MCP server in a session, the full set is

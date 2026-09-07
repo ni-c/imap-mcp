@@ -114,6 +114,11 @@ export async function connect(
     client.connect(clientTransport),
     server.connect(serverTransport),
   ]);
+  // Listing loads every tool's outputSchema into the client, which then
+  // validates `structuredContent` on every successful call. Without it the
+  // client-side check never ran in any suite, and a result the server was
+  // happy with could still be a protocol error to a real client.
+  await client.listTools();
 
   return {
     client,
@@ -127,7 +132,7 @@ export async function connect(
 
 export async function toolNames(client: Client): Promise<string[]> {
   const { tools } = await client.listTools();
-  return tools.map((tool) => tool.name).sort();
+  return tools.map((tool) => tool.name).toSorted();
 }
 
 export async function call(

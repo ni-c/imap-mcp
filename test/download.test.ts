@@ -138,10 +138,6 @@ describe('get_attachments to disk', () => {
   const pdf = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(2000)]);
   const exe = Buffer.from([0x4d, 0x5a, 0x90, 0x00, 0x03]);
 
-  function mailbox(attachments: Parameters<typeof message>[1]) {
-    return [{ path: 'INBOX', messages: [message(7, attachments)] }];
-  }
-
   const withPdf = () =>
     mailbox({
       attachments: [
@@ -473,3 +469,7 @@ describe('attachment resources', () => {
     await harness.close();
   });
 });
+
+function mailbox(attachments: Parameters<typeof message>[1]) {
+  return [{ path: 'INBOX', messages: [message(7, attachments)] }];
+}

@@ -14,6 +14,7 @@ import {
   type ImapConfig,
 } from './config.js';
 import { MailError, ToolInputError } from './errors.js';
+import { isMessageId } from './message.js';
 
 /**
  * Everything this server needs from an IMAP connection.
@@ -110,6 +111,37 @@ const defaultFactory: ImapClientFactory = (config) =>
 /** How long a single IMAP command may take before the call is abandoned. */
 const COMMAND_TIMEOUT_MS = 30_000;
 
+/**
+ * How long a refused connection attempt is answered from memory.
+ *
+ * Every tool call opens the connection lazily, and a connection that failed to
+ * open is not kept — so before this, every call after a refused login was a
+ * fresh LOGIN against the operator's provider. Providers lock an account after
+ * a handful of those, and "check IMAP_USER and IMAP_PASSWORD" is exactly the
+ * answer a model retries. Ten seconds is long enough that a retry loop cannot
+ * be the thing that locks the mailbox, and short enough that a corrected
+ * password is picked up on the next real attempt.
+ */
+export const LOGIN_COOLDOWN_MS = 10_000;
+
+/** Folders one listing may carry. Past this the rest is counted, not dropped in silence. */
+export const MAX_MAILBOXES = 1000;
+/**
+ * Folders whose counters are fetched one STATUS at a time when the server has
+ * no LIST-STATUS, and the wall-clock budget those requests share.
+ *
+ * imapflow's `list({ statusQuery })` falls back to one STATUS per selectable
+ * folder on such a server, with no ceiling, and the command timeout around the
+ * whole call does not end the commands — imapflow runs them to the end of the
+ * list on the same connection, so the next tool call waits behind them. A
+ * shared namespace with a few thousand folders turned one listing into minutes
+ * during which nothing else answered. Here the fallback is the server's own:
+ * STATUS for the first folders, a clock checked before each request, and the
+ * rest listed without counters and counted in the answer.
+ */
+export const MAX_STATUS_QUERIES = 100;
+export const STATUS_BUDGET_MS = 20_000;
+
 export interface MailboxSummary {
   path: string;
   name: string;
@@ -120,6 +152,17 @@ export interface MailboxSummary {
   messages: number | undefined;
   unseen: number | undefined;
   uidNext: number | undefined;
+}
+
+export interface MailboxListing {
+  mailboxes: MailboxSummary[];
+  /** Folders the server listed, including those past {@link MAX_MAILBOXES}. */
+  total: number;
+  /**
+   * Selectable folders whose counters were not fetched: past the per-call
+   * STATUS ceiling or its time budget, or refused by the server.
+   */
+  statusOmitted: number;
 }
 
 /**
@@ -133,6 +176,13 @@ export interface MailboxSummary {
 export class ImapClient {
   private connection: ImapConnection | undefined;
   private connecting: Promise<ImapConnection> | undefined;
+  /**
+   * The last refused connection attempt, answered from memory for
+   * {@link LOGIN_COOLDOWN_MS}. Deliberately not cleared by {@link forget}: the
+   * one reconnect a dropped connection is allowed must not become the second
+   * failed login in the same second.
+   */
+  private refused: { at: number; error: MailError } | undefined;
 
   constructor(
     private readonly config: Config,
@@ -147,22 +197,52 @@ export class ImapClient {
     }
   }
 
-  private async connection_(): Promise<ImapConnection> {
+  private async openConnection(): Promise<ImapConnection> {
     this.assertConfigured();
     if (this.connection !== undefined) return this.connection;
     if (this.connecting !== undefined) return this.connecting;
 
-    this.connecting = (async () => {
-      const client = this.factory(this.config.imap);
-      try {
-        await client.connect();
-      } catch (error) {
-        this.connecting = undefined;
-        throw asMailError(error);
+    const refused = this.refused;
+    if (refused !== undefined) {
+      const elapsed = Date.now() - refused.at;
+      if (elapsed < LOGIN_COOLDOWN_MS) {
+        const next = new Date(refused.at + LOGIN_COOLDOWN_MS).toISOString();
+        throw new MailError(
+          `${refused.error.message} (repeated from memory: the connection was ` +
+            `refused ${Math.round(elapsed / 1000)} seconds ago and is not ` +
+            `retried for ${LOGIN_COOLDOWN_MS / 1000} seconds, so a wrong ` +
+            `password cannot lock the account; next attempt possible at ${next})`,
+          refused.error.code,
+          refused.error.responseText
+        );
       }
-      this.connection = client;
-      this.connecting = undefined;
-      return client;
+      this.refused = undefined;
+    }
+
+    this.connecting = (async () => {
+      // Yield once, so the assignment above has happened before anything
+      // below can clear it. A factory that throws synchronously used to run
+      // the `finally` first and then be overwritten by the rejected promise,
+      // which every later call then received.
+      await Promise.resolve();
+      try {
+        const client = this.factory(this.config.imap);
+        await client.connect();
+        this.connection = client;
+        return client;
+      } catch (error) {
+        // A ToolInputError cannot come out of a connect; everything else is
+        // remembered, whatever its status. A refused password and a refused
+        // socket look the same to a provider counting attempts.
+        const wrapped = asMailError(error);
+        this.refused = { at: Date.now(), error: wrapped };
+        throw wrapped;
+      } finally {
+        // Also on the path where the factory itself threw: a rejected promise
+        // left in `connecting` would answer every later call with the same
+        // rejection for the life of the process.
+        this.connecting = undefined;
+      }
     })();
     return this.connecting;
   }
@@ -195,7 +275,7 @@ export class ImapClient {
     readOnly: boolean,
     fn: (client: ImapConnection, path: string) => Promise<T>
   ): Promise<T> {
-    const client = await this.connection_();
+    const client = await this.openConnection();
     let lock: { release(): void } | undefined;
     try {
       lock = await client.getMailboxLock(path, { readOnly });
@@ -216,12 +296,12 @@ export class ImapClient {
     fn: (client: ImapConnection) => Promise<T>
   ): Promise<T> {
     try {
-      return await fn(await this.connection_());
+      return await fn(await this.openConnection());
     } catch (error) {
       if (!isConnectionError(error)) throw asMailError(error);
       this.forget();
       try {
-        return await fn(await this.connection_());
+        return await fn(await this.openConnection());
       } catch (retryError) {
         throw asMailError(retryError);
       }
@@ -237,27 +317,58 @@ export class ImapClient {
     this.connection = undefined;
   }
 
-  async listMailboxes(): Promise<MailboxSummary[]> {
+  async listMailboxes(): Promise<MailboxListing> {
     return this.withConnection(async (client) => {
-      // statusQuery folds the per-folder counters into the same round trip, so
-      // list_mailboxes can answer "which folder, and how much is in it" at once.
-      const entries = await withTimeout(
-        client.list({
-          statusQuery: { messages: true, unseen: true, uidNext: true },
-        }),
+      const statusQuery = { messages: true, unseen: true, uidNext: true };
+      // With LIST-STATUS the counters ride in the same round trip as the list.
+      // Without it imapflow would issue one STATUS per folder with no ceiling
+      // (see MAX_STATUS_QUERIES), so the fallback is done here, bounded.
+      const listStatus = client.capabilities.has('LIST-STATUS');
+      const listed = await withTimeout(
+        client.list(listStatus ? { statusQuery } : undefined),
         'LIST'
       );
-      return entries.map((entry) => ({
-        path: entry.path,
-        name: entry.name,
-        delimiter: entry.delimiter,
-        specialUse: entry.specialUse,
-        subscribed: entry.subscribed,
-        selectable: !entry.flags.has('\\Noselect'),
-        messages: entry.status?.messages,
-        unseen: entry.status?.unseen,
-        uidNext: entry.status?.uidNext,
-      }));
+      const entries = listed.slice(0, MAX_MAILBOXES);
+      let statusOmitted = 0;
+      if (!listStatus) {
+        const deadline = Date.now() + STATUS_BUDGET_MS;
+        let queried = 0;
+        for (const entry of entries) {
+          if (entry.flags.has('\\Noselect') || entry.flags.has('\\NonExistent'))
+            continue;
+          if (queried >= MAX_STATUS_QUERIES || Date.now() >= deadline) {
+            statusOmitted += 1;
+            continue;
+          }
+          queried += 1;
+          try {
+            entry.status = await withTimeout(
+              client.status(entry.path, statusQuery),
+              'STATUS'
+            );
+          } catch (error) {
+            // A folder the server refuses to STATUS is still a folder. A
+            // dropped connection, though, is the whole listing's problem.
+            if (isConnectionError(error)) throw error;
+            statusOmitted += 1;
+          }
+        }
+      }
+      return {
+        mailboxes: entries.map((entry) => ({
+          path: entry.path,
+          name: entry.name,
+          delimiter: entry.delimiter,
+          specialUse: entry.specialUse,
+          subscribed: entry.subscribed,
+          selectable: !entry.flags.has('\\Noselect'),
+          messages: entry.status?.messages,
+          unseen: entry.status?.unseen,
+          uidNext: entry.status?.uidNext,
+        })),
+        total: listed.length,
+        statusOmitted,
+      };
     });
   }
 
@@ -308,8 +419,17 @@ export class ImapClient {
         { uid: true }
       )) {
         const raw = message.headers?.toString('utf-8') ?? '';
-        const ids = raw.match(/<[^\s<>]{1,255}>/g) ?? [];
-        const messageId = message.envelope?.messageId;
+        const ids = (raw.match(/<[^\s<>]{1,255}>/g) ?? []).filter(isMessageId);
+        // The envelope's id is the server's rendering of a header the sender
+        // wrote. It goes into the In-Reply-To header of a draft, so it has to
+        // be shaped like a Message-ID before it is written anywhere: a value
+        // with a control character or of unbounded length is *absent*, not a
+        // failed draft with a puzzling "must not contain line breaks".
+        const envelopeId = message.envelope?.messageId;
+        const messageId =
+          envelopeId !== undefined && isMessageId(envelopeId)
+            ? envelopeId
+            : undefined;
         const chain = [...ids, ...(messageId === undefined ? [] : [messageId])];
         return {
           messageId,
@@ -347,12 +467,16 @@ export class ImapClient {
         flags: true,
         size: true,
         internalDate: true,
+        // `hasAttachments` in every summary is read off the body structure.
+        // Without this item it was always false — the projection asked a
+        // question the fetch never carried the answer to.
+        bodyStructure: true,
       },
       { uid: true }
     )) {
       messages.push(message);
     }
-    return messages.sort((a, b) => b.uid - a.uid);
+    return messages.toSorted((a, b) => b.uid - a.uid);
   }
 
   /**

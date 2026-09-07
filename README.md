@@ -149,6 +149,10 @@ IMAP_ALLOW_TOOLS=list_new_messages,get_message,move_messages
 IMAP_DENY_TOOLS=delete_messages
 ```
 
+One boundary the list cannot draw: `move_messages` copies as well as moves (`mode: "copy"`),
+and the two are one tool. Denying `move_messages` removes both; there is no way to keep moving
+and forbid copying, or the other way round. Both modes ask for confirmation.
+
 An entry that matches no tool aborts startup and names it, so a typo cannot silently hide a
 tool — an absent tool is not something anyone traces back to an environment variable. A
 filtered tool is never registered, so it is absent from `tools/list` and unknown to

@@ -6,6 +6,7 @@ import {
   assess,
   htmlToText,
   sanitizeText,
+  stripInvisible,
   type SecurityAssessment,
 } from './analyze.js';
 import { collectAttachments, type AttachmentCandidate } from './attachments.js';
@@ -18,6 +19,24 @@ const SUBJECT_MAX = 2000;
 const ADDRESS_MAX = 4000;
 /** RFC 5322 allows a long Message-ID; nothing needs more than this to be useful. */
 const MESSAGE_ID_MAX = 256;
+/** Flags one summary carries, and the length of each. A keyword is an atom. */
+const FLAGS_MAX = 50;
+const FLAG_MAX = 64;
+const FLAG_ATOM = /^\\?[A-Za-z0-9$_.-]{1,64}$/;
+
+/**
+ * Whether a string is a Message-ID this server will pass on: angle-bracketed,
+ * bounded, and free of whitespace, control and invisible characters.
+ *
+ * Both halves matter. The ids go into the `references` list of the metadata
+ * block outside the fence, and into the In-Reply-To and References headers of
+ * a draft. `[^\s<>]` refused whitespace and nothing else, so an id carrying an
+ * escape sequence or a directional override was a handle nobody could see
+ * whole.
+ */
+export function isMessageId(value: string): boolean {
+  return /^<[^\s<>]{1,255}>$/.test(value) && stripInvisible(value) === value;
+}
 
 export interface MessageSummary {
   uid: number;
@@ -44,7 +63,15 @@ export function summarize(message: FetchMessageObject): MessageSummary {
     to: sanitizeText(formatEnvelopeAddresses(envelope?.to), ADDRESS_MAX),
     date: isoDate(envelope?.date ?? message.internalDate),
     size: message.size,
-    flags,
+    // A keyword is set by whoever has write access to the folder — on a shared
+    // mailbox, a colleague — and reached the model as it came. An atom is
+    // passed through as the handle it is; anything else is cleaned like a
+    // subject, and the list is bounded.
+    flags: flags
+      .slice(0, FLAGS_MAX)
+      .map((flag) =>
+        FLAG_ATOM.test(flag) ? flag : sanitizeText(flag, FLAG_MAX)
+      ),
     seen: flags.includes('\\Seen'),
     flagged: flags.includes('\\Flagged'),
     answered: flags.includes('\\Answered'),
@@ -214,6 +241,6 @@ export function threadIdsOf(parsed: {
     ...(parsed.messageId === undefined ? [] : [parsed.messageId]),
   ]
     .map((id) => id.trim())
-    .filter((id) => /^<[^\s<>]{1,255}>$/.test(id));
+    .filter(isMessageId);
   return [...new Set(all)].slice(0, 50);
 }

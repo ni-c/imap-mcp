@@ -360,10 +360,11 @@ describe('extractZipDocument', () => {
     const text = textOf(response);
     expect(text).toContain('Rechnung');
     expect(text).toContain('<5>');
-    // Past the last code point there is no character to produce. Left visible
-    // rather than dropped or replaced: a reference nobody can render is still
-    // something the sender wrote, and silently deleting it is a worse answer.
-    expect(text).toContain('&#x110000;');
+    // Past the last code point there is no character to produce, and a parser
+    // renders the replacement character — a character, not `''`, which would
+    // make the reference an invisible separator inside a word.
+    expect(text).toContain(String.fromCodePoint(0xfffd));
+    expect(text).not.toContain('&#x110000;');
     // No entity table exists, so a declared entity stays literal.
     expect(text).toContain('&lol9;');
   });
@@ -412,10 +413,10 @@ describe('extractZipDocument', () => {
   it('decodes the entity forms a cell value carries, and no others', async () => {
     // A plain `<v>` value is where the numeric references Excel writes for
     // anything non-ASCII arrive. The named five and both numeric forms are
-    // decoded; a reference nobody can render — a surrogate, zero, past the
-    // last code point — stays as it was written, because a replacement
-    // character would read as content. `&amp;` is decoded last, so `&amp;lt;`
-    // is the four characters `&lt;` and not a second-round `<`.
+    // decoded in one pass; a reference nobody can render — a surrogate, zero,
+    // past the last code point — becomes U+FFFD, as a parser renders it. One
+    // pass is what makes `&amp;lt;` the four characters `&lt;` and not a
+    // second-round `<`.
     const xml = '<?xml version="1.0" encoding="UTF-8"?>';
     const response = await run(
       'xlsx',
@@ -436,9 +437,8 @@ describe('extractZipDocument', () => {
       })
     );
     const text = textOf(response);
-    expect(text).toContain(
-      '1 & 2 <3> "q" \'a\' AB &lt; &#xD800; &#0; &#1114112;'
-    );
+    const fffd = String.fromCodePoint(0xfffd);
+    expect(text).toContain(`1 & 2 <3> "q" 'a' AB &lt; ${fffd} ${fffd} ${fffd}`);
     expect(text).toContain('Tab run');
     // Index 7 names no string; the cell is empty rather than an error, and the
     // two empty rows at the end are padding, not data.
