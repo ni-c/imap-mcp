@@ -32,9 +32,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file nobody could open. `dist/**/*.js` is unchanged; the package is about a
   fifth smaller.
 
+### Fixed
+
+- `hasAttachments` in every message summary was always `false`: the fetch
+  behind `list_messages` and `list_new_messages` never asked for the body
+  structure the projection reads it from. It does now.
+- The two-call fallback prompt for `move_messages` in copy mode told the
+  caller to call `copy_messages` again — a tool that does not exist. It names
+  `move_messages`; the copy and move keys stay distinct.
+- A reply to a message whose id is not shaped like a Message-ID (a control
+  character, an unbounded length) is saved without an `In-Reply-To` header
+  instead of failing with "must not contain line breaks".
+- A connection factory that throws synchronously no longer leaves a rejected
+  promise in the client that answered every later call for the life of the
+  process.
+
 ### Security
 
 - **mcp-approval 0.8.2.** A sealed dialog answer is single-use since 0.8.1: the same `requestState` presented again within its lifetime used to be accepted again, and with a resource key that is the same every time — a whole stream, a fixed set of targets — every replay landed. npm users on `^0.8.0` already had the fix; the Docker image is built from the lockfile and carried 0.8.0 until this release.
+- **A refused connection is not retried for ten seconds.** Every tool call
+  opened the connection lazily and a failed one was not kept, so every call
+  after a refused login was another LOGIN against the provider — and "check
+  IMAP_USER and IMAP_PASSWORD" is exactly the answer a model retries.
+  Providers lock an account after a handful of those. The refusal is now
+  answered from memory, marked as repeated and naming when the next real
+  attempt is possible; the one reconnect a dropped connection is allowed does
+  not clear it.
+- **`list_mailboxes` is bounded on a server without LIST-STATUS.** imapflow
+  falls back to one STATUS per folder there, with no ceiling, and the command
+  timeout around the call does not end the commands: a namespace of a few
+  thousand folders turned one listing into minutes during which no other call
+  answered. The fallback now lives here — counters for the first 100
+  selectable folders within a 20-second budget, the rest listed without
+  counts and counted as `status_omitted`; at most 1000 folders per listing,
+  with the server's total reported.
+- **Sender strings beside the fence are bounded and cleaned.** The
+  `Authentication-Results` authserv-id was unbounded and an attachment's
+  declared content type went out as written, both into the `get_message`
+  metadata block — which has its own budget and nothing array-shaped to
+  shrink — so a sixty-thousand-letter header made the message unreadable
+  through this server, and a hundred-kilobyte `Content-Type` did the same and
+  was quoted into refusal texts the budget never measures. The id is capped
+  at a hostname; a declared type that is not shaped like a media type is
+  reported as `application/octet-stream` with a note that does not quote it;
+  a `References` id carrying a control or invisible character is dropped;
+  flags that are not atoms are cleaned and the list bounded; a declared
+  attachment size that is not a safe integer (imapflow turns `1e400` into
+  `Infinity`, which JSON writes as `null`) no longer fails the listing's
+  output schema.
+- **Configuration values are checked for shape and never echoed.**
+  `ELICITATION` printed the raw value on refusal (`got "…"`), one line from
+  `IMAP_PASSWORD` in every compose file. `IMAP_DOWNLOAD_DIR` went into
+  `get_server_info` and every attachment listing as typed; it now has to name
+  an existing directory, is stored as its real path, and the refusal says how
+  long the value was. `IMAP_ATTACHMENT_TYPES` entries have to be media types
+  (the refusal names the position), `IMAP_MAILBOX` and `IMAP_DRAFTS_MAILBOX`
+  follow the mailbox parameter's rule, `IMAP_USER` is one line, `IMAP_HOST`
+  and `IMAP_TRUSTED_AUTHSERV_ID` are bounded to a hostname, and
+  `IMAP_SEEN_KEYWORD` to 64 characters.
+- **`get_server_info` cleans the two lists the mail server writes.**
+  Capabilities and permanent flags are answered in this server's own voice; a
+  permanent flag on a shared folder is a keyword a colleague chose. Each is
+  cleaned and bounded, and so is the hierarchy delimiter in every listing.
+- **Error messages from the library and the runtime are bounded and escaped**
+  before they reach the model. A TLS failure quotes the certificate's subject
+  names, which the other end chose; a refused resource URI is quoted as a
+  200-character cleaned copy.
+- **Character references decode the way a mail client decodes them.** The
+  decoder ran six replacements in sequence with bounded digit runs and a
+  required semicolon, so `&#x26;#104;` decoded twice to an `h` no client
+  shows and `&#0000000104;` stayed as eleven literal characters where the
+  recipient sees an `h`. One alternation, one pass, any digit run, semicolon
+  optional; zero, surrogates and values past U+10FFFF become U+FFFD as a
+  browser renders them. The same in the OOXML reader.
+- **Every string that leaves is well-formed UTF-16.** A cut at the result
+  budget, at a paging window or at a cell cap could split a surrogate pair;
+  JSON carries the half as an escape and a Python client then fails to encode
+  it.
+- **`npm ci --ignore-scripts` in the release workflow**, in the job that holds
+  the OIDC token for npm Trusted Publishing and in the one before it — every
+  dependency's install hook used to run while that token was available.
+  `gh release create` verifies the tag. Pull requests run
+  `dependency-review-action`, which checks the change where `npm audit` checks
+  the tree.
+- **The image no longer ships yarn, corepack or the lockfile.** npm was
+  already removed from the runtime layer; the two package managers beside it
+  and a `package-lock.json` nothing reads were not.
+- **pdf.js 6.1.200, as bundled by unpdf 1.8.1, is in the range of
+  CVE-2026-16633** (arbitrary JavaScript on opening a malicious PDF, fixed in
+  6.2.108). The vulnerable path is the annotation layer binding a form field's
+  actions to DOM events under `enableScripting`, and this server renders no
+  annotation layer, no form and no DOM: it calls `getDocument`, `getPage`,
+  `getTextContent`, `view` and `destroy`, and a test now holds the source to
+  that set. No scanner sees the bundled copy, which SECURITY.md said would
+  happen; a test pins the bundled version so the next unpdf bump revisits the
+  note rather than outlives it.
 
 ## [0.4.0] - 2026-09-04
 

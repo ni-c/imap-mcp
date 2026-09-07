@@ -130,7 +130,10 @@ export function registerReadTools(
       inputSchema: z.object({}),
       annotations: READ_ONLY,
       // No untrusted marker: every field is this server's own configuration or
-      // a capability list the mail server states about itself.
+      // a capability list the mail server states about itself. The two lists
+      // the server writes are still cleaned and bounded below — a capability
+      // name is the server's string, and on a shared mailbox a permanent flag
+      // is a keyword a colleague chose.
       outputSchema: z.object({
         host: z.string(),
         port: z.number().int(),
@@ -180,11 +183,11 @@ export function registerReadTools(
           undefined,
           true,
           async (connection) => ({
-            capabilities: [...connection.capabilities.keys()].toSorted(),
+            capabilities: serverWords([...connection.capabilities.keys()]),
             permanentFlags:
               connection.mailbox === false
-                ? new Set<string>()
-                : connection.mailbox.permanentFlags,
+                ? []
+                : serverWords([...connection.mailbox.permanentFlags]),
           })
         );
         return jsonResult({
@@ -193,7 +196,7 @@ export function registerReadTools(
           tls: config.imap.tls,
           mailbox: config.imap.mailbox,
           capabilities,
-          permanent_flags: [...permanentFlags].toSorted(),
+          permanent_flags: permanentFlags,
           new_mail_tracking:
             config.imap.seenKeyword === ''
               ? {
@@ -203,7 +206,7 @@ export function registerReadTools(
               : {
                   enabled: true,
                   keyword: config.imap.seenKeyword,
-                  storable: client.keywordSupported(permanentFlags),
+                  storable: client.keywordSupported(new Set(permanentFlags)),
                 },
           write_tools_enabled: !config.readOnly,
           // This server cannot send mail at all — see SECURITY.md on why that
@@ -249,24 +252,54 @@ export function registerReadTools(
       annotations: READ_ONLY,
       outputSchema: z.object({
         ...untrustedFields,
+        truncated: truncationNote,
         default_mailbox: z.string(),
         note: z.string(),
+        total_mailboxes: z
+          .number()
+          .int()
+          .describe('Folders the server listed, including any not shown.'),
+        status_omitted: z
+          .number()
+          .int()
+          .optional()
+          .describe(
+            'Folders listed without message counts, because the server has no LIST-STATUS and the per-call STATUS ceiling or its time budget was reached.'
+          ),
         mailboxes: z.array(mailboxEntry),
       }),
     },
     async () =>
       run(async () => {
-        const mailboxes = await client.listMailboxes();
-        return untrustedResult({
-          default_mailbox: client.defaultMailbox,
-          note:
-            '"path" is the folder name exactly as the mail server spelled it, ' +
-            'because it is the handle the other tools take — it is not ' +
-            'sanitised. Read and quote "display_name" instead. Where an entry ' +
-            'carries "name_warning" the two differ and the difference is ' +
-            'invisible on screen.',
-          mailboxes: mailboxes.map(publicMailbox),
-        });
+        const listing = await client.listMailboxes();
+        const shown = listing.mailboxes.length;
+        return untrustedResult(
+          {
+            default_mailbox: client.defaultMailbox,
+            note:
+              '"path" is the folder name exactly as the mail server spelled it, ' +
+              'because it is the handle the other tools take — it is not ' +
+              'sanitised. Read and quote "display_name" instead. Where an entry ' +
+              'carries "name_warning" the two differ and the difference is ' +
+              'invisible on screen.' +
+              (listing.statusOmitted > 0
+                ? ` ${listing.statusOmitted} folder(s) are listed without counts: ` +
+                  'the server has no LIST-STATUS and one STATUS per folder is ' +
+                  'capped per call. list_messages on a folder reports its size.'
+                : '') +
+              (listing.total > shown
+                ? ` The server lists ${listing.total} folders; the first ${shown} are shown.`
+                : ''),
+            total_mailboxes: listing.total,
+            ...(listing.statusOmitted > 0
+              ? { status_omitted: listing.statusOmitted }
+              : {}),
+            mailboxes: listing.mailboxes.map(publicMailbox),
+          },
+          listing.total > shown
+            ? `The server lists ${listing.total} folders and this tool shows at most ${shown}. Address the others by path if you know it.`
+            : undefined
+        );
       })
   );
 
@@ -865,6 +898,25 @@ function policyOf(
 
 /** Cap on a folder name in the listing. IMAP allows 255 bytes of it. */
 const MAILBOX_NAME_MAX = 255;
+/** Cap on a capability or flag name, and on how many of them are answered. */
+const SERVER_WORD_MAX = 64;
+const SERVER_WORDS_MAX = 100;
+
+/**
+ * A list of atoms the mail server wrote about itself, as this server answers
+ * it: each cleaned and bounded, the list bounded and sorted.
+ *
+ * `get_server_info` answers in its own voice, and the capability and
+ * permanent-flag lists are the two things in it that are not this server's
+ * configuration. A capability is the server's string; a permanent flag on a
+ * shared folder is a keyword a colleague set. Neither went through a cleaner.
+ */
+function serverWords(words: string[]): string[] {
+  return words
+    .slice(0, SERVER_WORDS_MAX)
+    .map((word) => sanitizeText(String(word), SERVER_WORD_MAX))
+    .toSorted();
+}
 
 /**
  * A mailbox as the model gets to see it.
@@ -898,7 +950,12 @@ function publicMailbox(box: MailboxSummary): Record<string, unknown> {
     // A label rather than a handle, so the sanitised form is the only one worth
     // returning.
     name: sanitizeText(box.name, MAILBOX_NAME_MAX),
-    delimiter: box.delimiter,
+    // The server's, and a single character on every server anyone runs —
+    // cleaned like the name beside it rather than trusted for being short.
+    delimiter:
+      typeof box.delimiter === 'string'
+        ? sanitizeText(box.delimiter, 8)
+        : undefined,
     specialUse:
       box.specialUse === undefined
         ? undefined
@@ -1309,6 +1366,10 @@ async function extractedResult(
   }
   const end = offset + slice.length;
   const more = end < clean.length;
+  // The offsets above address `clean` and stay as computed; only the text
+  // that leaves is repaired, because a window edge can split a surrogate pair
+  // and the next page starts on the other half of it.
+  slice = slice.toWellFormed();
 
   const unit =
     response.unitCount === undefined

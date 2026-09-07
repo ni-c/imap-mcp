@@ -86,7 +86,7 @@ describe('ImapClient', () => {
     const client = new ImapClient(testConfig(), () => fake);
     await client.listMailboxes();
     fake.failNext = Object.assign(new Error('gone'), { code: 'EPIPE' });
-    await expect(client.listMailboxes()).resolves.toHaveLength(1);
+    await expect(client.listMailboxes()).resolves.toMatchObject({ total: 1 });
   });
 
   it('surfaces a connect failure as a MailError', async () => {
@@ -103,7 +103,7 @@ describe('ImapClient', () => {
       { path: 'INBOX', messages: [message(1), message(2)] },
     ]);
     const client = new ImapClient(testConfig(), () => fake);
-    const mailboxes = await client.listMailboxes();
+    const { mailboxes } = await client.listMailboxes();
     expect(mailboxes[0]).toMatchObject({
       path: 'INBOX',
       messages: 2,

@@ -223,6 +223,10 @@ export function fencedUntrustedResult(
   const head = `${UNTRUSTED_PREAMBLE}${warning}\n\n${trustedHeader}`;
 
   const fenced = (text: string, bodyShown: string): CallToolResult => {
+    // A cut below can split a surrogate pair; the text block and the
+    // structured copy both leave through here.
+    text = text.toWellFormed();
+    bodyShown = bodyShown.toWellFormed();
     if (structured === undefined) return textResult(text);
     // The fence is a *presentation* of this same information — an unforgeable
     // boundary for a reader working through the text. The structured half
@@ -345,12 +349,26 @@ export async function run(
       const body = sanitizeErrorBody(error.responseText);
       // Labelled as the server's words: the response text is chosen by the
       // mail server, and an unlabelled line after this server's own message
-      // reads as a continuation of it.
+      // reads as a continuation of it. The message itself is the library's,
+      // and the library quotes what it saw — a TLS failure names the
+      // certificate's subject names, which the other end chose.
       return errorResult(
-        `${error.message}${body === '' ? '' : `\nThe mail server said: ${body}`}${hintFor(error)}`
+        `${errorText(error.message)}${body === '' ? '' : `\nThe mail server said: ${body}`}${hintFor(error)}`
       );
     }
     const message = error instanceof Error ? error.message : String(error);
-    return errorResult(`imap-mcp: ${message}`);
+    return errorResult(`imap-mcp: ${errorText(message)}`);
   }
+}
+
+/**
+ * An error message as the model gets to read it: bounded, with the characters
+ * a reader cannot see spelled out. Every message that reaches `run`'s catch
+ * without a type of its own was written by a library or by the runtime, and
+ * both quote their input.
+ */
+function errorText(message: string): string {
+  return message.length > MAX_ERROR_BODY_LENGTH
+    ? `${escapeInvisible(message.slice(0, MAX_ERROR_BODY_LENGTH))}… (truncated)`
+    : escapeInvisible(message);
 }

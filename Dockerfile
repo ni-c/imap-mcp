@@ -30,12 +30,19 @@ RUN apk add --no-cache --upgrade libcrypto3 libssl3
 
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-# The server reports its version from package.json at runtime.
-COPY package.json package-lock.json ./
+# The server reports its version from package.json at runtime. The lockfile
+# is not copied: nothing reads it here, and a file nobody reads is a file
+# nobody notices when its contents change.
+COPY package.json ./
 
-# The base image's bundled npm is a frequent source of HIGH findings and this
-# image never installs anything — remove it rather than carrying its CVEs.
-RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
+# The base image's bundled package managers are a frequent source of HIGH
+# findings and this image never installs anything — remove them rather than
+# carrying their CVEs. npm alone used to go; yarn (`/opt/yarn-v*` and its
+# links) and corepack (`/usr/local/lib/node_modules/corepack`) ship beside
+# it and were left in place.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+      /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+      /usr/local/bin/yarn /usr/local/bin/yarnpkg /opt/yarn-v*
 
 # Ownership proof for the MCP Registry: must match server.json's name exactly.
 LABEL io.modelcontextprotocol.server.name="io.github.ni-c/imap-mcp"

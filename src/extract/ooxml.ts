@@ -680,7 +680,9 @@ function between(
  */
 function cell(value: string): string {
   const flat = value.replace(/[\t\r\n]+/g, ' ');
-  return flat.length > MAX_CELL_CHARS ? flat.slice(0, MAX_CELL_CHARS) : flat;
+  return (
+    flat.length > MAX_CELL_CHARS ? flat.slice(0, MAX_CELL_CHARS) : flat
+  ).toWellFormed();
 }
 
 /**
@@ -692,30 +694,39 @@ function cell(value: string): string {
  * rather than defended-against attacks.
  */
 function decodeEntities(value: string): string {
-  return value
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&#x([0-9a-fA-F]{1,6});/g, (match, hex: string) =>
-      codePoint(parseInt(hex, 16), match)
-    )
-    .replace(/&#(\d{1,7});/g, (match, digits: string) =>
-      codePoint(Number(digits), match)
-    )
-    .replace(/&amp;/g, '&');
+  return value.replace(
+    ENTITY,
+    (match, hex: string | undefined, decimal: string | undefined, name) =>
+      hex !== undefined
+        ? codePoint(parseInt(hex, 16))
+        : decimal !== undefined
+          ? codePoint(Number(decimal))
+          : (PREDEFINED.get(String(name)) ?? match)
+  );
 }
 
 /**
- * Same rule as `fromCodePoint` in `../analyze.ts`, and deliberately the same
- * answer: a reference nobody can render stays visible rather than becoming a
- * replacement character that reads as content. Duplicated rather than shared
+ * One alternation, one pass — the same shape as `decodeCharacterReferences`
+ * in `../analyze.ts`, and for the same reason: a sequence of `replace` calls
+ * decodes `&#x26;#104;` twice, and a bounded digit run leaves `&#0000000104;`
+ * standing where an XML parser reads an `h`. Duplicated rather than shared
  * because this module is reached from the child, where a relative import of
  * `../analyze.js` does not resolve.
  */
-function codePoint(value: number, original: string): string {
+const ENTITY = /&(?:#[xX]([0-9a-fA-F]+);|#([0-9]+);|(lt|gt|quot|amp|apos);)/g;
+
+const PREDEFINED = new Map([
+  ['lt', '<'],
+  ['gt', '>'],
+  ['quot', '"'],
+  ['amp', '&'],
+  ['apos', "'"],
+]);
+
+/** One character from a numeric reference, U+FFFD where no parser has one. */
+function codePoint(value: number): string {
   if (!Number.isInteger(value) || value < 1 || value > 0x10ffff)
-    return original;
-  if (value >= 0xd800 && value <= 0xdfff) return original;
+    return String.fromCodePoint(0xfffd);
+  if (value >= 0xd800 && value <= 0xdfff) return String.fromCodePoint(0xfffd);
   return String.fromCodePoint(value);
 }

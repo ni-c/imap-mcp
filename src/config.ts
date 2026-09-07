@@ -1,3 +1,8 @@
+import { realpathSync, statSync } from 'node:fs';
+
+import { isMediaType } from './attachments.js';
+import { MAILBOX_CONTROL_CHARS } from './schema.js';
+
 /** How the IMAP connection is encrypted. */
 export type TlsMode = 'implicit' | 'starttls' | 'none';
 
@@ -32,6 +37,13 @@ export interface ImapConfig {
    * Where attachments may be written. Unset means this server never touches the
    * filesystem — setting it is the opt-in, and it is the only source of the
    * target directory. A caller cannot choose where bytes from a stranger land.
+   *
+   * Stored as the resolved real path of a directory that existed at startup.
+   * The value is printed by `get_server_info` and by every attachment listing,
+   * and `IMAP_DOWNLOAD_DIR` sits a few lines below `IMAP_PASSWORD` in every
+   * compose file — so a value that is not a directory is refused before it can
+   * be printed anywhere, and the refusal describes it by length, never by
+   * content.
    */
   downloadDir: string | undefined;
   maxDownloadBytes: number;
@@ -119,6 +131,19 @@ const DEFAULT_MAX_EXTRACT_BYTES = 10 * 1024 * 1024;
  */
 const MAX_MAX_EXTRACT_BYTES = 64 * 1024 * 1024;
 const DEFAULT_SEEN_KEYWORD = 'AiSeen';
+/** A hostname is at most 253 characters; an IPv6 literal far fewer. */
+const MAX_HOST_LENGTH = 253;
+/** IMAP allows 255 bytes of mailbox name; the tool parameter says the same. */
+const MAX_MAILBOX_LENGTH = 255;
+/** Matches the `keyword` tool parameter, which is the other place one is typed. */
+const MAX_KEYWORD_LENGTH = 64;
+const MAX_ATTACHMENT_TYPES = 64;
+
+/**
+ * The rule the `mailbox` tool parameter applies, imported rather than spelled
+ * again: a second copy of a control-character class is how two of them drift.
+ */
+const CONTROL_CHARS = MAILBOX_CONTROL_CHARS;
 
 /** Shown when the configuration is incomplete — at startup and on every call. */
 export function missingConfigMessage(missing: string[]): string {
@@ -168,13 +193,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const elicitation = parseElicitation(env.ELICITATION);
 
   if (host !== undefined) assertSafeHost(host, 'IMAP_HOST');
+  // A user name is written into a LOGIN command and into the From header of
+  // every draft. Neither tolerates a line break, and neither is a place for a
+  // value that was meant for the line above it.
+  if (user !== undefined) assertSingleLine(user, 'IMAP_USER');
+  const mailbox = env.IMAP_MAILBOX || 'INBOX';
+  assertMailboxName(mailbox, 'IMAP_MAILBOX');
   const draftsMailbox = env.IMAP_DRAFTS_MAILBOX;
   if (draftsMailbox !== undefined) {
-    assertSingleLine(draftsMailbox, 'IMAP_DRAFTS_MAILBOX');
+    assertMailboxName(draftsMailbox, 'IMAP_DRAFTS_MAILBOX');
   }
   const trustedAuthservId = env.IMAP_TRUSTED_AUTHSERV_ID?.trim() || undefined;
   if (trustedAuthservId !== undefined) {
-    assertSingleLine(trustedAuthservId, 'IMAP_TRUSTED_AUTHSERV_ID');
+    assertSafeHost(trustedAuthservId, 'IMAP_TRUSTED_AUTHSERV_ID');
   }
 
   const config: Config = {
@@ -189,7 +220,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       password,
       tls,
       insecureTls: env.IMAP_INSECURE_TLS === 'true',
-      mailbox: env.IMAP_MAILBOX || 'INBOX',
+      mailbox,
       seenKeyword: parseKeyword(env.IMAP_SEEN_KEYWORD),
       draftsMailbox,
       trustedAuthservId,
@@ -204,7 +235,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         'IMAP_MAX_ATTACHMENT_BYTES'
       ),
       allowedAttachmentTypes: parseTypes(env.IMAP_ATTACHMENT_TYPES),
-      downloadDir: env.IMAP_DOWNLOAD_DIR,
+      downloadDir: parseDownloadDir(env.IMAP_DOWNLOAD_DIR),
       maxDownloadBytes: parseCount(
         env.IMAP_MAX_DOWNLOAD_BYTES,
         DEFAULT_MAX_DOWNLOAD_BYTES,
@@ -276,11 +307,24 @@ export function parseElicitation(raw: string | undefined): boolean {
   const value = raw?.trim().toLowerCase();
   if (value === undefined || value === '' || value === 'true') return true;
   if (value === 'false') return false;
+  // Described, not quoted. The variable is unprefixed and sits in the same
+  // block as IMAP_PASSWORD in every compose file; what lands in it by mistake
+  // is exactly the value that must not be printed into the client's log.
   console.error(
-    `imap-mcp: ELICITATION must be "true" or "false" — got "${raw}". ` +
+    `imap-mcp: ELICITATION must be "true" or "false" — got ${describeValue(raw ?? '')}. ` +
       'Refusing to start rather than guess.'
   );
   process.exit(1);
+}
+
+/**
+ * A configuration value for an error message: its length and nothing else.
+ *
+ * Every variable this file reads has a neighbour that is a secret, and the
+ * value that fails a shape check is the one most likely to be that neighbour.
+ */
+function describeValue(raw: string): string {
+  return `a ${raw.length}-character value`;
 }
 
 function parsePort(
@@ -327,21 +371,77 @@ function parseCount(
 function parseKeyword(raw: string | undefined): string {
   if (raw === undefined) return DEFAULT_SEEN_KEYWORD;
   if (raw === '') return '';
-  if (!/^[A-Za-z0-9$_.-]+$/.test(raw)) {
+  // Bounded like the `keyword` tool parameter. The value is written into a
+  // tool description and into every `get_server_info` answer, so a length has
+  // to be a length and not whatever was pasted.
+  if (raw.length > MAX_KEYWORD_LENGTH || !/^[A-Za-z0-9$_.-]+$/.test(raw)) {
     console.error(
-      'imap-mcp: IMAP_SEEN_KEYWORD must consist of letters, digits, $, _, . or -'
+      'imap-mcp: IMAP_SEEN_KEYWORD must consist of letters, digits, $, _, . or -, ' +
+        `at most ${MAX_KEYWORD_LENGTH} of them (got ${describeValue(raw)})`
     );
     process.exit(1);
   }
   return raw;
 }
 
+/**
+ * The attachment allowlist, one media type per entry.
+ *
+ * Every entry is answered back by `get_server_info` as `allowed_attachment_types`
+ * and compared against what messages declare. An entry that is not shaped like
+ * a media type can never match an attachment, so it is either a typo or a value
+ * meant for another variable — and in both cases the operator should hear
+ * about it at startup rather than read it in a tool result.
+ */
 function parseTypes(raw: string | undefined): string[] {
   if (raw === undefined || raw.trim() === '') return DEFAULT_ATTACHMENT_TYPES;
-  return raw
+  const entries = raw
     .split(',')
     .map((t) => t.trim().toLowerCase())
     .filter((t) => t !== '');
+  if (entries.length > MAX_ATTACHMENT_TYPES) {
+    console.error(
+      `imap-mcp: IMAP_ATTACHMENT_TYPES lists ${entries.length} entries; at most ${MAX_ATTACHMENT_TYPES} are accepted`
+    );
+    process.exit(1);
+  }
+  const bad = entries.findIndex((entry) => !isMediaType(entry));
+  if (bad >= 0) {
+    console.error(
+      `imap-mcp: IMAP_ATTACHMENT_TYPES entry ${bad + 1} is not a media type ` +
+        `such as application/pdf (got ${describeValue(entries[bad] as string)})`
+    );
+    process.exit(1);
+  }
+  return entries;
+}
+
+/**
+ * The download directory, resolved and checked before anything can print it.
+ *
+ * The path is answered by `get_server_info` and by every attachment listing,
+ * so it has to be a path — an existing directory, resolved through symlinks so
+ * that the containment check in `download.ts` compares against the place files
+ * really land. A value that is not a directory ends the process, and the
+ * message says how long it was, not what it said.
+ */
+function parseDownloadDir(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  if (trimmed === '') return undefined;
+  let resolved: string;
+  try {
+    resolved = realpathSync(trimmed);
+    if (!statSync(resolved).isDirectory()) throw new Error('not a directory');
+  } catch {
+    console.error(
+      'imap-mcp: IMAP_DOWNLOAD_DIR must name an existing directory ' +
+        `(got ${describeValue(trimmed)} that does not resolve to one). ` +
+        'Create it first, or unset the variable to keep this server off the filesystem.'
+    );
+    process.exit(1);
+  }
+  return resolved;
 }
 
 /**
@@ -353,12 +453,14 @@ function assertSafeHost(value: string, name: string): void {
   // A hostname or IPv4 address — or an IPv6 address, which is the only place
   // a colon is legal. Allowing ":" everywhere would silently accept
   // "imap.example.net:993", which the error message promises to reject.
+  // The length is checked first: nothing below walks a value longer than a
+  // hostname can be.
   const hostname = /^[A-Za-z0-9._-]+$/.test(value);
   const ipv6 = /^\[?[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*\]?$/.test(value);
-  if (!hostname && !ipv6) {
+  if (value.length > MAX_HOST_LENGTH || (!hostname && !ipv6)) {
     console.error(
       `imap-mcp: ${name} must be a plain hostname or IP address without ` +
-        'scheme, port, credentials or whitespace'
+        `scheme, port, credentials or whitespace (got ${describeValue(value)})`
     );
     process.exit(1);
   }
@@ -372,17 +474,45 @@ function assertSingleLine(value: string, name: string): void {
   }
 }
 
+/**
+ * The rule the `mailbox` tool parameter enforces, for a name that arrives
+ * through the environment instead: bounded, no control characters, no LIST
+ * wildcards. The value is answered by every listing tool and printed on the
+ * startup line, so it has to look like a folder before it is printed anywhere.
+ */
+function assertMailboxName(value: string, name: string): void {
+  if (
+    value.length > MAX_MAILBOX_LENGTH ||
+    CONTROL_CHARS.test(value) ||
+    /[%*]/.test(value)
+  ) {
+    console.error(
+      `imap-mcp: ${name} must be a mailbox name of at most ${MAX_MAILBOX_LENGTH} ` +
+        'characters without control characters or the wildcards % and * ' +
+        `(got ${describeValue(value)})`
+    );
+    process.exit(1);
+  }
+}
+
 function isLoopbackHost(hostname: string | undefined): boolean {
   // URL.hostname keeps the brackets around an IPv6 literal, may carry a %zone
   // suffix, and 'localhost.' with its root label is the same name as
   // 'localhost'. The comparison this replaced saw none of them — which is why
   // its bare '::1' branch could never match a hostname taken from a URL.
   if (hostname === undefined) return false;
-  const host = hostname
+  let host = hostname
     .toLowerCase()
     .replace(/^\[|]$/g, '')
-    .replace(/%.*$/, '')
-    .replace(/\.+$/, '');
+    .replace(/%.*$/, '');
+  // Trailing root labels, walked from the end rather than matched with `\.+$`:
+  // that pattern is tried from every position of a run of dots and consumes
+  // the run each time, which is quadratic. The host is bounded to 253
+  // characters above, so this is a habit rather than a measured risk here —
+  // the same pattern on an unbounded value is the measured one.
+  let end = host.length;
+  while (end > 0 && host[end - 1] === '.') end -= 1;
+  host = host.slice(0, end);
   return (
     host === 'localhost' ||
     host.endsWith('.localhost') ||

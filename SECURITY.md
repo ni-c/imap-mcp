@@ -160,30 +160,57 @@ one verbatim asks about the folder the reader recognises and acts on the one the
 
 ### What a confirmation binds
 
-An approval here binds an answer to **this question**, not to **this moment**. The sealed state
-carries the resource key — the operation plus a fingerprint of the exact target set — and the
-library verifies both. It does not carry a nonce that is spent on use, so within its fifteen-minute
-lifetime the same sealed state and the same accepted answer would prove the same thing twice. That
-is binding, not freshness.
+An approval here binds an answer to **this question** — the sealed state carries the resource key,
+the operation plus a fingerprint of the exact target set, and the library verifies both — and,
+since mcp-approval 0.8.1, to **this moment**: the state carries a nonce that is spent on the first
+answer, accepted or declined, so the same sealed state presented again is refused rather than
+honoured. Both revisions of the protocol reach that code. `src/index.ts` serves through
+`serveStdio`, which negotiates `2025-11-25` or `2026-07-28` per connection; on the older revision
+the question never leaves the process, on the newer one it travels through the client as a return
+value and comes back with the answer, and the nonce is what makes the second trip worthless.
 
-On this server the gap is not reachable today, and the reason is worth writing down because it is
-a property of the deployment rather than of the code above:
+An earlier version of this section said the newer revision was not reachable, because the server
+then used a `StdioServerTransport` pinned to 2025. That stopped being true in 0.3.0, and the
+sentence outlived the code by two releases — which is why this file is now read against `src/`
+claim by claim in every review.
 
-- `src/index.ts` connects an `McpServer` to a `StdioServerTransport` directly. It does not pass
-  `supportedProtocolVersions`, and the SDK's default list ends at `2025-11-25`. A client that asks
-  for `2026-07-28` is answered `2025-11-25`, and `server/discover` is not registered at all.
-- On `2025-11-25` the question never crosses the wire. The SDK's legacy shim turns the returned
-  `input_required` into the elicitation request it used to be, waits for the reply and resumes
-  **inside the same `tools/call`**. There is no round trip for a caller to repeat, because there is
-  no state handed out.
-- The two-call token — the fallback for clients that cannot show a dialog — is single-use and
-  spent by `consume`, so it has freshness already.
+What is left, stated honestly: the record of spent nonces is per process. A restart forgets it, so
+a sealed answer captured before a restart and presented within its lifetime afterwards is accepted
+once more. The two-call token — the fallback for clients that cannot show a dialog — is single-use
+and spent by `consume`, with the same per-process caveat.
 
-What would have to be built on the day this server speaks the newer revision, and only then: the
-sealed state would need a use-once marker checked and burned server-side, so that a replayed
-`requestState` with a replayed accepted answer is refused rather than honoured. Until the server
-offers `2026-07-28` there is nothing to burn, and a mechanism guarding a path that does not exist
-is a mechanism nobody maintains.
+### Where a confirmation is not asked
+
+`get_attachments` with `mode: "file"` writes bytes a stranger sent onto the operator's disk without
+a dialog. The tool is registered under `IMAP_READ_ONLY`, annotated `destructiveHint: true` whenever
+`IMAP_DOWNLOAD_DIR` is set, and guarded by everything below — allowlist, extension refusal,
+magic-byte check, `wx` and mode `0600`, a directory that only the operator names and that has to
+exist before the server starts. It is not guarded by a person saying yes. That is a known gap,
+kept on purpose for now: the directory is the operator's opt-in, and the file cannot run, overwrite
+or escape. Whether that is enough is a judgement, and it is written here so it is judged rather
+than assumed.
+
+## Configuration
+
+Every variable this server reads sits within a few lines of `IMAP_PASSWORD` in every compose file,
+and the value that fails a shape check is the one most likely to be the password pasted onto the
+wrong line. So a refusal describes the value by its length and never quotes it — `ELICITATION` used
+to print `got "…"` — and every value that is later answered to a client has a shape it must fit
+first: `IMAP_DOWNLOAD_DIR` must name an existing directory and is stored as its real path;
+`IMAP_ATTACHMENT_TYPES` entries must be media types; `IMAP_MAILBOX` and `IMAP_DRAFTS_MAILBOX`
+follow the mailbox parameter's rule; `IMAP_HOST` and `IMAP_TRUSTED_AUTHSERV_ID` are bounded to a
+hostname; `IMAP_USER` is one line; `IMAP_SEEN_KEYWORD` is an atom of at most 64 characters.
+
+A refused connection is answered from memory for ten seconds. Every tool call opens the connection
+lazily, a failed one is not kept, and "check IMAP_USER and IMAP_PASSWORD" is precisely the answer a
+model retries — so before this, one wrong password and a diligent model were enough to have a
+provider lock the account. The remembered refusal says so, and says when the next real attempt is
+possible.
+
+`list_mailboxes` on a server without LIST-STATUS fetches counters for at most 100 folders within a
+20-second budget and lists the rest without them, counted in the answer. imapflow's own fallback is
+one STATUS per folder with no ceiling, and the command timeout around the call does not stop the
+commands: they run to the end of the list on the same connection, and every later call waits.
 
 ## Attachments
 
@@ -316,6 +343,19 @@ above the fence that "the document says X" is not a claim the user can check.
 
 **One supply-chain consequence, stated rather than discovered.** `unpdf` vendors PDF.js into its
 own published bundle, so `pdfjs-dist` does not appear in this package's dependency tree — and
-`npm audit`, Dependabot and the Trivy job all resolve the tree. **A future PDF.js advisory will
-not raise an alert on this repository.** Watching PDF.js releases is manual, and an `unpdf`
-version bump is a security bump.
+`npm audit`, Dependabot and the Trivy job all resolve the tree. **A PDF.js advisory does not raise
+an alert on this repository.** Watching PDF.js releases is manual, and an `unpdf` version bump is a
+security bump.
+
+That happened. **CVE-2026-16633** (GHSA-hq66-cqwq-w95j, high): PDF.js from 5.6.83 before 6.2.108
+executes attacker-controlled JavaScript on opening a malicious PDF when `enableScripting` is on,
+which it is by default. unpdf 1.8.1 — the current release — bundles PDF.js 6.1.200, inside that
+range, and no scanner said so. The vulnerable path is the annotation layer: it binds a form field's
+JavaScript actions to DOM events and dispatches them into the viewer's sandbox, gated by
+`enableScripting` and `hasJSActions`. This server renders no annotation layer, no form and no DOM;
+it calls the five functions named above and nothing else, and `test/review.test.ts` now holds
+`src/extract/pdf.ts` to that set — no `getAnnotations`, `getJSActions`, `AnnotationLayer`,
+`enableScripting` or `render`. The same test pins the bundled PDF.js version, so the next unpdf
+release fails it and this paragraph is revisited rather than outlived. Until unpdf moves to
+6.2.108 or later, the reasoning above is the whole defence, and it is written down so it can be
+checked.

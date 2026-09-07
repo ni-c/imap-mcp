@@ -30,6 +30,8 @@ export interface FakeMessage {
   html?: string;
   messageId?: string;
   attachments?: FakeAttachment[];
+  /** Extra raw header lines, written into the source as given. */
+  headers?: string[];
 }
 
 export interface FakeAttachment {
@@ -49,10 +51,13 @@ export interface FakeMailbox {
 }
 
 export class FakeImap implements ImapConnection {
+  // LIST-STATUS is what lets a listing carry its counters in one round trip.
+  // A test that wants the per-folder STATUS fallback deletes it.
   readonly capabilities = new Map<string, boolean | number>([
     ['IMAP4rev1', true],
     ['IDLE', true],
     ['MOVE', true],
+    ['LIST-STATUS', true],
   ]);
 
   /** Every command the tools issued, in order — the tests assert on this. */
@@ -423,6 +428,7 @@ export function buildSource(fake: FakeMessage): Buffer {
     `Date: ${fake.date.toUTCString()}`,
     `Message-ID: ${fake.messageId ?? `<${fake.uid}@example.net>`}`,
     'MIME-Version: 1.0',
+    ...(fake.headers ?? []),
   ];
   if (fake.html !== undefined) {
     const boundary = 'boundary42';

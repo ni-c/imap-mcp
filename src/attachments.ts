@@ -124,6 +124,24 @@ export const EXECUTABLE_EXTENSIONS = new Set([
 const DOUBLE_EXTENSION_BAIT =
   /\.(pdf|docx?|xlsx?|pptx?|txt|csv|jpe?g|png|gif|zip|rtf|odt|ods)\.[a-z0-9]{1,5}$/i;
 
+/**
+ * The shape of a media type — RFC 6838's token characters, bounded on both
+ * sides of the slash.
+ *
+ * The declared type of a part is the sender's string, and it used to travel
+ * as it came: into `content_type`, into the refusal note that quotes it, and
+ * from there into the `get_message` metadata block outside the fence and into
+ * error results the budget never measures. A hundred kilobytes of it in one
+ * `Content-Type` header made the message unreadable. Anything that does not
+ * match here is not a media type, is never on the allowlist, and is reported
+ * as `application/octet-stream` with a note that says so without quoting it.
+ */
+const MEDIA_TYPE = /^[a-z0-9!#$&^_.+-]{1,127}\/[a-z0-9!#$&^_.+-]{1,127}$/;
+
+export function isMediaType(value: string): boolean {
+  return MEDIA_TYPE.test(value);
+}
+
 export interface AttachmentCandidate {
   partId: string;
   filename: string;
@@ -243,7 +261,10 @@ function walk(
     return;
   }
 
-  const type = (node.type ?? 'application/octet-stream').toLowerCase();
+  const declaredType = (node.type ?? 'application/octet-stream').toLowerCase();
+  const type = isMediaType(declaredType)
+    ? declaredType
+    : 'application/octet-stream';
   const disposition = node.disposition?.toLowerCase();
   const declaredName =
     node.dispositionParameters?.filename ?? node.parameters?.name;
@@ -259,6 +280,11 @@ function walk(
 
   const filename = sanitizeFilename(declaredName);
   const notes: string[] = [];
+  if (type !== declaredType) {
+    notes.push(
+      'the declared content type is not a valid media type and is reported as application/octet-stream'
+    );
+  }
   if (declaredName !== undefined && DOUBLE_EXTENSION_BAIT.test(declaredName)) {
     notes.push(
       'filename has a double extension — it renders as a document but is not one'
@@ -268,7 +294,14 @@ function walk(
     partId: node.part,
     filename,
     contentType: type,
-    size: node.size,
+    // imapflow reads the size with `Number(value) || 0`, so a server that
+    // writes `1e400` hands over Infinity — which JSON renders as null, and
+    // null fails the `size: number` the output schema promises for the whole
+    // listing. A size that is not a safe non-negative integer is unknown.
+    size:
+      Number.isSafeInteger(node.size) && (node.size as number) >= 0
+        ? node.size
+        : undefined,
     disposition,
     allowed: true,
     notes,

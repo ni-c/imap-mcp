@@ -80,6 +80,18 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm audit --audit-level=high
 
+  dependency-review:
+    # `npm audit` checks the tree as it is; this checks the change. A pull
+    # request that adds a dependency with a known high-severity advisory is
+    # refused here, before the tree it produces is ever audited.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
+        with:
+          fail-on-severity: high
+
   codeql:
     # Code scanning needs GitHub Advanced Security, which a private repository
     # on the Free plan does not have: the analysis runs fine and then the SARIF

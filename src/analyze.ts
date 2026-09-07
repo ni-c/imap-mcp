@@ -381,44 +381,54 @@ export function htmlToText(html: string, maxChars = MAX_HTML_CHARS): string {
     i = gt + 1;
   }
 
-  return (
-    out
-      .join('')
-      .replace(/&nbsp;/gi, ' ')
-      .replace(/&lt;/gi, '<')
-      .replace(/&gt;/gi, '>')
-      .replace(/&quot;/gi, '"')
-      .replace(/&#39;/g, "'")
-      // Numeric character references. Common in HTML mail (`&#8217;` for a
-      // curly apostrophe) and near-universal in OOXML, where a German document
-      // may write every umlaut this way — without this they arrive as literal
-      // `&#228;`. Bounded digit counts so the pattern cannot be made to scan,
-      // and out-of-range values produce nothing rather than a guess.
-      .replace(/&#x([0-9a-f]{1,6});/gi, (match, hex: string) =>
-        fromCodePoint(parseInt(hex, 16), match)
-      )
-      .replace(/&#(\d{1,7});/g, (match, digits: string) =>
-        fromCodePoint(Number(digits), match)
-      )
-      // Last, so a decoded `&amp;lt;` does not turn into a `<` the caller never
-      // received.
-      .replace(/&amp;/gi, '&')
-  );
+  return decodeCharacterReferences(out.join(''));
 }
 
 /**
- * One character from a numeric reference, or the reference itself.
+ * The character references a mail client decodes, decoded the way it does.
  *
- * Returning the original text for anything out of range is the conservative
- * half: a reference nobody can render is better left visible than turned into a
- * replacement character that reads as content. Surrogates are excluded because
- * a lone one is not a character and only makes the string harder to handle
- * downstream.
+ * One alternation, one pass. It used to be six `replace` calls in sequence,
+ * and a sequence decodes twice: `&#x26;#104;` became `&#104;` in the hex pass
+ * and `h` in the decimal pass, a character no client ever shows. And the digit
+ * runs were bounded (`{1,7}`) with the semicolon required, while the HTML
+ * tokenizer reads *every* digit and takes the semicolon as optional — so
+ * `&#0000000104;` reached the model as eleven literal characters and the
+ * recipient as an `h`. Here a numeric reference is any digit run, with or
+ * without its semicolon; the named ones are the five HTML mail and OOXML use.
+ *
+ * Out-of-range values, zero and surrogates decode to U+FFFD, which is what a
+ * browser renders — a character, and not `''`, which would make `&#0;` an
+ * invisible separator inside a word.
  */
-function fromCodePoint(value: number, original: string): string {
+const CHARACTER_REFERENCE =
+  /&(?:#[xX]([0-9a-fA-F]+);?|#([0-9]+);?|(nbsp|lt|gt|quot|amp|apos);)/g;
+
+export function decodeCharacterReferences(text: string): string {
+  return text.replace(
+    CHARACTER_REFERENCE,
+    (_match, hex: string | undefined, decimal: string | undefined, name) =>
+      hex !== undefined
+        ? fromCodePoint(parseInt(hex, 16))
+        : decimal !== undefined
+          ? fromCodePoint(Number(decimal))
+          : (NAMED_REFERENCES.get(String(name).toLowerCase()) ?? _match)
+  );
+}
+
+const NAMED_REFERENCES = new Map([
+  ['nbsp', ' '],
+  ['lt', '<'],
+  ['gt', '>'],
+  ['quot', '"'],
+  ['amp', '&'],
+  ['apos', "'"],
+]);
+
+/** One character from a numeric reference, U+FFFD where no client has one. */
+function fromCodePoint(value: number): string {
   if (!Number.isInteger(value) || value < 1 || value > 0x10ffff)
-    return original;
-  if (value >= 0xd800 && value <= 0xdfff) return original;
+    return String.fromCodePoint(0xfffd);
+  if (value >= 0xd800 && value <= 0xdfff) return String.fromCodePoint(0xfffd);
   return String.fromCodePoint(value);
 }
 
@@ -472,9 +482,15 @@ export function sanitizeText(input: string, maxChars = MAX_BODY_CHARS): string {
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
-  return normalized.length > maxChars
-    ? `${normalized.slice(0, maxChars)}\n… (truncated at ${maxChars} characters)`
-    : normalized;
+  // `toWellFormed` after the cut, which can split a surrogate pair — and on
+  // the whole string either way, because a lone surrogate can arrive decoded
+  // out of a header. JSON carries one as an escape and a Python client then
+  // fails to encode it; U+FFFD is the honest rendering.
+  return (
+    normalized.length > maxChars
+      ? `${normalized.slice(0, maxChars)}\n… (truncated at ${maxChars} characters)`
+      : normalized
+  ).toWellFormed();
 }
 
 /**
@@ -554,7 +570,15 @@ export function parseAuthResults(
     const match = new RegExp(`\\b${name}=([a-z]+)`, 'i').exec(topmost);
     return match?.[1]?.toLowerCase() ?? 'unknown';
   };
-  const authservId = /^\s*([A-Za-z0-9._-]+)/.exec(topmost ?? '')?.[1];
+  // Bounded like a hostname, which is what an authserv-id is. Unbounded, the
+  // id went into the metadata block beside the fence — the one part of a
+  // `get_message` answer with its own budget and nothing array-shaped to
+  // shrink — and a header of sixty thousand letters made the whole message
+  // unreadable through this server. The verdict is what matters; an id past
+  // this length is not an id, and the header is reported as forgeable.
+  const authservId = /^\s*([A-Za-z0-9._-]{1,253})(?![A-Za-z0-9._-])/.exec(
+    topmost ?? ''
+  )?.[1];
   return {
     spf: read('spf'),
     dkim: read('dkim'),

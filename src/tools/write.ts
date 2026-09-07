@@ -218,7 +218,13 @@ export function registerWriteTools(
               { label: 'From', value: shownValue(source) },
               { label: 'To', value: shownValue(destination) },
             ],
-            toolName: copying ? 'copy_messages' : 'move_messages',
+            // The tool the fallback prompt tells the caller to call again.
+            // It used to say `copy_messages` for the copy mode — a name the
+            // catalogue does not have, so a client without a dialog was told
+            // to call a tool that does not exist. The mode stays distinct in
+            // the resource key above, which is what keeps a copy approval
+            // from executing a move.
+            toolName: 'move_messages',
           }
         );
         if (outcome.decision === 'rejected') {
@@ -542,7 +548,7 @@ async function resolveDraftsMailbox(
   if (config.imap.draftsMailbox !== undefined) {
     return config.imap.draftsMailbox;
   }
-  const mailboxes = await client.listMailboxes();
+  const { mailboxes } = await client.listMailboxes();
   const found = mailboxes.find((box) => box.specialUse === '\\Drafts');
   if (found === undefined) {
     throw new ToolInputError(

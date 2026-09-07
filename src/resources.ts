@@ -9,6 +9,7 @@ import {
   sniffContent,
 } from './attachments.js';
 
+import { escapeInvisible } from './analyze.js';
 import type { Config } from './config.js';
 import { ToolInputError } from './errors.js';
 import { ImapClient, withTimeout } from './imap.js';
@@ -47,12 +48,15 @@ export function registerAttachmentResources(
     async (uri, variables): Promise<ReadResourceResult> => {
       const uid = Number(first(variables.uid));
       const partId = first(variables.partId);
+      // The URI is the caller's and unbounded; a refusal quotes a bounded,
+      // cleaned copy of it rather than however much was sent.
+      const shown = escapeInvisible(uri.href.slice(0, 200));
       if (!Number.isInteger(uid) || uid < 1) {
-        throw new ToolInputError(`imap-mcp: ${uri.href} has no valid UID.`);
+        throw new ToolInputError(`imap-mcp: ${shown} has no valid UID.`);
       }
       if (!/^[0-9]+(\.[0-9]+)*$/.test(partId)) {
         throw new ToolInputError(
-          `imap-mcp: ${uri.href} has no valid MIME part id.`
+          `imap-mcp: ${shown} has no valid MIME part id.`
         );
       }
 

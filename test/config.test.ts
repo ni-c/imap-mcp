@@ -238,9 +238,9 @@ describe('values that cannot be sent to the server', () => {
   // port is a typo nobody would otherwise learn about, and an extraction
   // ceiling above the hard one would be a promise the child cannot keep.
   it.each([
-    ['IMAP_DRAFTS_MAILBOX', 'Drafts\nNOOP', 'line breaks'],
+    ['IMAP_DRAFTS_MAILBOX', 'Drafts\nNOOP', 'control characters'],
     // Trimmed first, so the break has to sit inside the value to count.
-    ['IMAP_TRUSTED_AUTHSERV_ID', 'mx.example\r\nnet', 'line breaks'],
+    ['IMAP_TRUSTED_AUTHSERV_ID', 'mx.example\r\nnet', 'plain hostname'],
     ['IMAP_PORT', 'nine-nine-three', '65535'],
     ['IMAP_PORT', '70000', '65535'],
     ['IMAP_SEEN_KEYWORD', 'Ai Seen', 'letters, digits'],
