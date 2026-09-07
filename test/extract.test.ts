@@ -159,7 +159,12 @@ describe('extractPdf', () => {
         new Uint8Array(buildFilteredPdf(filter, 2))
       );
       expect(honest).toBe(false);
-    });
+      // Forty megabytes of fixture and a counter walking it, under coverage
+      // instrumentation, on a shared runner: 1.3 s on a workstation and past
+      // the 5-second default on the v0.5.0 tag run. The budget is what a
+      // release should not flake on, not a claim about the counter's speed —
+      // `analyze.test.ts` makes those claims, with numbers.
+    }, 30_000);
   }
 
   it('reads text through an LZW-compressed stream', async () => {
