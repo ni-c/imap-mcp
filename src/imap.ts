@@ -147,7 +147,7 @@ export class ImapClient {
     }
   }
 
-  private async connection_(): Promise<ImapConnection> {
+  private async openConnection(): Promise<ImapConnection> {
     this.assertConfigured();
     if (this.connection !== undefined) return this.connection;
     if (this.connecting !== undefined) return this.connecting;
@@ -195,7 +195,7 @@ export class ImapClient {
     readOnly: boolean,
     fn: (client: ImapConnection, path: string) => Promise<T>
   ): Promise<T> {
-    const client = await this.connection_();
+    const client = await this.openConnection();
     let lock: { release(): void } | undefined;
     try {
       lock = await client.getMailboxLock(path, { readOnly });
@@ -216,12 +216,12 @@ export class ImapClient {
     fn: (client: ImapConnection) => Promise<T>
   ): Promise<T> {
     try {
-      return await fn(await this.connection_());
+      return await fn(await this.openConnection());
     } catch (error) {
       if (!isConnectionError(error)) throw asMailError(error);
       this.forget();
       try {
-        return await fn(await this.connection_());
+        return await fn(await this.openConnection());
       } catch (retryError) {
         throw asMailError(retryError);
       }
@@ -352,7 +352,7 @@ export class ImapClient {
     )) {
       messages.push(message);
     }
-    return messages.sort((a, b) => b.uid - a.uid);
+    return messages.toSorted((a, b) => b.uid - a.uid);
   }
 
   /**

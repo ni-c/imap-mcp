@@ -127,7 +127,7 @@ export async function connect(
 
 export async function toolNames(client: Client): Promise<string[]> {
   const { tools } = await client.listTools();
-  return tools.map((tool) => tool.name).sort();
+  return tools.map((tool) => tool.name).toSorted();
 }
 
 export async function call(

@@ -159,18 +159,20 @@ async function guardedTools(): Promise<string[]> {
 
 describe('the tool reference', () => {
   it('documents every tool and no tool that does not exist', () => {
-    expect(documentedTools(reference).sort()).toEqual([...ALL_TOOLS].sort());
+    expect(documentedTools(reference).toSorted()).toEqual(
+      [...ALL_TOOLS].toSorted()
+    );
   });
 
   it('marks exactly the essential preset', () => {
-    expect(marked(reference, /\*\*essential\*\*/).sort()).toEqual(
-      [...ESSENTIAL_TOOLS].sort()
+    expect(marked(reference, /\*\*essential\*\*/).toSorted()).toEqual(
+      [...ESSENTIAL_TOOLS].toSorted()
     );
   });
 
   it('marks exactly the tools that require a confirmation token', async () => {
-    expect(marked(reference, /👤/).sort()).toEqual(
-      (await guardedTools()).sort()
+    expect(marked(reference, /👤/).toSorted()).toEqual(
+      (await guardedTools()).toSorted()
     );
   });
 });

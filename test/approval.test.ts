@@ -424,9 +424,6 @@ describe('delete_messages on the 2026-07-28 revision', () => {
   const accepted = {
     confirm: { action: 'accept', content: { confirm: true } },
   };
-  const deleted = (harness: Awaited<ReturnType<typeof connectModern>>) =>
-    harness.imap.calls.some((entry) => entry.name === 'messageDelete');
-
   it('asks, then deletes once the answer comes back with the state it minted', async () => {
     const harness = await connectModern({
       config: writeConfig,
@@ -522,3 +519,7 @@ describe('delete_messages on the 2026-07-28 revision', () => {
     await harness.close();
   });
 });
+
+function deleted(harness: Awaited<ReturnType<typeof connectModern>>): boolean {
+  return harness.imap.calls.some((entry) => entry.name === 'messageDelete');
+}

@@ -45,7 +45,7 @@ describe('tool registration', () => {
   it('adds the write tools with IMAP_READ_ONLY', async () => {
     const harness = await connect({ config: { readOnly: false } });
     expect(await toolNames(harness.client)).toEqual(
-      [...READ_TOOLS, ...WRITE_TOOLS].sort()
+      [...READ_TOOLS, ...WRITE_TOOLS].toSorted()
     );
     await harness.close();
   });
@@ -150,7 +150,7 @@ describe('tool registration', () => {
         return properties?.untrusted === undefined;
       })
       .map((tool) => tool.name)
-      .sort();
+      .toSorted();
     // get_server_info is this server's own configuration and the capability
     // list the mail server states about itself; the write tools report what
     // this server just did, with the uids it was given.
@@ -586,19 +586,12 @@ describe('get_message', () => {
     // budgetedJson does. Fifty summaries with a capped 2 000-character subject
     // and 4 000 characters of addresses are 10 kB each: 570 kB of result
     // against a stated cap of 200 kB, all of it chosen by the senders.
-    const bulky = (uid: number) =>
-      message(uid, {
-        subject: 'S'.repeat(4_000),
-        to: Array.from({ length: 80 }, (_unused, index) => ({
-          address: `recipient${index}@${'d'.repeat(40)}.example.net`,
-        })),
-      });
     const harness = await connect({
       mailboxes: [
         {
           path: 'INBOX',
           messages: Array.from({ length: 50 }, (_unused, index) =>
-            bulky(index + 1)
+            bulkyMessage(index + 1)
           ),
         },
       ],
@@ -1263,3 +1256,13 @@ describe('connection handling', () => {
     await harness.close();
   });
 });
+
+/** A summary that is as large as a sender can make it, for the budget tests. */
+function bulkyMessage(uid: number) {
+  return message(uid, {
+    subject: 'S'.repeat(4_000),
+    to: Array.from({ length: 80 }, (_unused, index) => ({
+      address: `recipient${index}@${'d'.repeat(40)}.example.net`,
+    })),
+  });
+}

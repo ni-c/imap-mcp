@@ -443,9 +443,14 @@ export function stripInvisible(input: string): string {
  * not the `Archive` they know.
  */
 export function escapeInvisible(input: string): string {
-  const escape = (match: string): string =>
-    `\\u${(match.codePointAt(0) as number).toString(16).padStart(4, '0')}`;
-  return input.replace(INVISIBLE_CHARS, escape).replace(CONTROL_CHARS, escape);
+  return input
+    .replace(INVISIBLE_CHARS, escapeCodePoint)
+    .replace(CONTROL_CHARS, escapeCodePoint);
+}
+
+/** One character as a Unicode escape, for `escapeInvisible`. */
+function escapeCodePoint(match: string): string {
+  return `\\u${(match.codePointAt(0) as number).toString(16).padStart(4, '0')}`;
 }
 
 /**

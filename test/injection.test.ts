@@ -488,26 +488,8 @@ const ATTACHMENT_PAYLOADS: AttachmentPayload[] = [
 ];
 
 describe('injection corpus in attachments', () => {
-  const mailboxes = (payload: AttachmentPayload) => [
-    {
-      path: 'INBOX',
-      messages: [
-        message(42, {
-          attachments: [
-            {
-              partId: '2',
-              filename: 'anhang',
-              contentType: payload.contentType,
-              content: payload.build(),
-            },
-          ],
-        }),
-      ],
-    },
-  ];
-
   const readText = async (payload: AttachmentPayload) => {
-    const harness = await connect({ mailboxes: mailboxes(payload) });
+    const harness = await connect({ mailboxes: attachmentMailboxes(payload) });
     const text = textOf(
       await call(harness.client, 'get_attachments', {
         uid: 42,
@@ -696,3 +678,23 @@ describe('injection corpus in attachments', () => {
     await harness.close();
   });
 });
+
+function attachmentMailboxes(payload: AttachmentPayload) {
+  return [
+    {
+      path: 'INBOX',
+      messages: [
+        message(42, {
+          attachments: [
+            {
+              partId: '2',
+              filename: 'anhang',
+              contentType: payload.contentType,
+              content: payload.build(),
+            },
+          ],
+        }),
+      ],
+    },
+  ];
+}

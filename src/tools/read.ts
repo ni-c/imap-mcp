@@ -180,7 +180,7 @@ export function registerReadTools(
           undefined,
           true,
           async (connection) => ({
-            capabilities: [...connection.capabilities.keys()].sort(),
+            capabilities: [...connection.capabilities.keys()].toSorted(),
             permanentFlags:
               connection.mailbox === false
                 ? new Set<string>()
@@ -193,7 +193,7 @@ export function registerReadTools(
           tls: config.imap.tls,
           mailbox: config.imap.mailbox,
           capabilities,
-          permanent_flags: [...permanentFlags].sort(),
+          permanent_flags: [...permanentFlags].toSorted(),
           new_mail_tracking:
             config.imap.seenKeyword === ''
               ? {
@@ -335,7 +335,7 @@ export function registerReadTools(
         const offset = args.offset ?? 0;
         return client.withMailbox(args.mailbox, true, async (connection) => {
           const query = buildSearch(args);
-          const uids = (await client.search(connection, query)).sort(
+          const uids = (await client.search(connection, query)).toSorted(
             (a, b) => b - a
           );
           const page = uids.slice(offset, offset + limit);
@@ -431,7 +431,7 @@ export function registerReadTools(
               await client.search(connection, {
                 unKeyword: client.seenKeyword,
               })
-            ).sort((a, b) => b - a);
+            ).toSorted((a, b) => b - a);
             const page = uids.slice(0, limit);
             const messages = await client.fetchSummaries(connection, page);
             if (!dryRun) {

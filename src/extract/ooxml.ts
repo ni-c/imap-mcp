@@ -183,7 +183,7 @@ export async function extractZipDocument(
     // the archive happens to list them.
     const all = Object.keys(entries)
       .filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
-      .sort((a, b) => slideNumber(a) - slideNumber(b));
+      .toSorted((a, b) => slideNumber(a) - slideNumber(b));
     if (all.length === 0) return { ok: false, reason: 'not-a-document' };
     const slides = all.slice(0, MAX_SLIDES);
     if (all.length > slides.length) declared = all.length;
@@ -270,7 +270,7 @@ function readXlsx(
 
   const available = Object.keys(entries)
     .filter((name) => /^xl\/worksheets\/[^/]+\.xml$/.test(name))
-    .sort();
+    .toSorted();
   if (available.length === 0) return undefined;
 
   // The rels file is how a tab's name is tied to its file, and `sheet1.xml` is
