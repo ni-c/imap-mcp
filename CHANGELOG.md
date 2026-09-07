@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      last in the file so the link definitions come along. -->
 <!-- #region changelog -->
 
-## [Unreleased]
+## [0.5.0] - 2026-09-07
 
 ### Added
 
@@ -32,7 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file nobody could open. `dist/**/*.js` is unchanged; the package is about a
   fifth smaller.
 
-[Unreleased]: https://github.com/ni-c/imap-mcp/compare/v0.4.0...HEAD
+### Security
+
+- **mcp-approval 0.8.2.** A sealed dialog answer is single-use since 0.8.1: the same `requestState` presented again within its lifetime used to be accepted again, and with a resource key that is the same every time — a whole stream, a fixed set of targets — every replay landed. npm users on `^0.8.0` already had the fix; the Docker image is built from the lockfile and carried 0.8.0 until this release.
 
 ## [0.4.0] - 2026-09-04
 
@@ -507,6 +509,7 @@ package page for the first time — including the parts that changed weeks ago.
 - Every change to the mailbox is logged to stderr with UIDs and folder, never
   subjects.
 
+[0.5.0]: https://github.com/ni-c/imap-mcp/releases/tag/v0.5.0
 [0.4.0]: https://github.com/ni-c/imap-mcp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/ni-c/imap-mcp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/ni-c/imap-mcp/releases/tag/v0.2.0
