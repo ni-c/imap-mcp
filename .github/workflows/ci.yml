@@ -80,6 +80,11 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm audit --audit-level=high
 
+      # The base image pin and the note above it are one fact written twice,
+      # and a bump only ever rewrites one of them. This asserts the note still
+      # describes the pin, and that the major tag is still the LTS tag.
+      - run: .github/scripts/check-base-image-note.sh Dockerfile
+
   dependency-review:
     # `npm audit` checks the tree as it is; this checks the change. A pull
     # request that adds a dependency with a known high-severity advisory is
