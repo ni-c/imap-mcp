@@ -1,4 +1,4 @@
-import type { FetchMessageObject } from 'imapflow';
+import type { FetchMessageObject, MessageAddressObject } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import type { AddressObject, ParsedMail } from 'mailparser';
 
@@ -87,7 +87,7 @@ function isoDate(value: Date | string | undefined): string | undefined {
 }
 
 function formatEnvelopeAddresses(
-  addresses: ReadonlyArray<{ name?: string; address?: string }> | undefined
+  addresses: ReadonlyArray<MessageAddressObject> | undefined
 ): string {
   if (addresses === undefined || addresses.length === 0) return '(none)';
   return addresses
