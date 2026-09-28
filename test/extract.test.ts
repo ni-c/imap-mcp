@@ -228,12 +228,14 @@ describe('extractPdf', () => {
   });
 });
 
-describe('extractZipDocument', () => {
-  const run = (kind: Parameters<typeof extractZipDocument>[0], bytes: Buffer) =>
-    extractZipDocument(kind, new Uint8Array(bytes), MAX, htmlToText);
+const extractZip = (
+  kind: Parameters<typeof extractZipDocument>[0],
+  bytes: Buffer
+) => extractZipDocument(kind, new Uint8Array(bytes), MAX, htmlToText);
 
+describe('extractZipDocument', () => {
   it('reads a .docx', async () => {
-    const response = await run(
+    const response = await extractZip(
       'docx',
       buildDocx(['Sehr geehrte Damen und Herren', 'Betrag: 1200,00 EUR'])
     );
@@ -245,7 +247,7 @@ describe('extractZipDocument', () => {
   });
 
   it('reads an .odt', async () => {
-    const response = await run(
+    const response = await extractZip(
       'odt',
       buildOdt(['Erste Zeile', 'Zweite Zeile'])
     );
@@ -253,7 +255,10 @@ describe('extractZipDocument', () => {
   });
 
   it('reads a .pptx with one heading per slide, in slide order', async () => {
-    const response = await run('pptx', buildPptx(['Titel', 'Zweite Folie']));
+    const response = await extractZip(
+      'pptx',
+      buildPptx(['Titel', 'Zweite Folie'])
+    );
     const text = textOf(response);
     expect(text).toContain('== Slide 1 ==');
     expect(text).toContain('Titel');
@@ -264,7 +269,7 @@ describe('extractZipDocument', () => {
   });
 
   it('reads an .xlsx as one TSV block per sheet', async () => {
-    const response = await run(
+    const response = await extractZip(
       'xlsx',
       buildXlsx([
         {
@@ -290,7 +295,7 @@ describe('extractZipDocument', () => {
       { name: 'Zweites Blatt', rows: [['b']] },
       { name: 'Erstes Blatt', rows: [['a']] },
     ]);
-    const text = textOf(await run('xlsx', workbook));
+    const text = textOf(await extractZip('xlsx', workbook));
     expect(text.indexOf('Zweites Blatt')).toBeLessThan(
       text.indexOf('Erstes Blatt')
     );
@@ -300,7 +305,7 @@ describe('extractZipDocument', () => {
     // What Excel itself writes: the cell holds an index, the text lives once in
     // sharedStrings.xml. A reader that only handles the inline form works on
     // hand-made files and returns a column of numbers on real ones.
-    const response = await run(
+    const response = await extractZip(
       'xlsx',
       buildXlsx(
         [
@@ -321,7 +326,7 @@ describe('extractZipDocument', () => {
   });
 
   it('falls back to archive order when the relationships are missing', async () => {
-    const response = await run(
+    const response = await extractZip(
       'xlsx',
       buildXlsx([{ name: 'Echter Name', rows: [['a']] }], { withoutRels: true })
     );
@@ -334,7 +339,7 @@ describe('extractZipDocument', () => {
   it('keeps a gap in a row a gap', async () => {
     // The cell reference places the value. Without it every later column shifts
     // one to the left and the figures end up under the wrong headings.
-    const response = await run(
+    const response = await extractZip(
       'xlsx',
       buildXlsx([{ name: 'T', rows: [['x']] }], { startColumn: 2 })
     );
@@ -342,7 +347,7 @@ describe('extractZipDocument', () => {
   });
 
   it('round-trips a cell value through escaping and back', async () => {
-    const response = await run(
+    const response = await extractZip(
       'xlsx',
       buildXlsx([{ name: 'T', rows: [['Müller & Co <GmbH>']] }], {
         shared: true,
@@ -354,7 +359,7 @@ describe('extractZipDocument', () => {
   it('decodes bounded numeric references and nothing beyond them', async () => {
     // Raw XML rather than the builder, which escapes what it is given: the
     // point here is what arrives already written as a reference.
-    const response = await run(
+    const response = await extractZip(
       'docx',
       buildDocxRaw(
         '<w:document><w:body><w:p><w:r>' +
@@ -375,7 +380,7 @@ describe('extractZipDocument', () => {
   });
 
   it('reads an .ods', async () => {
-    const response = await run(
+    const response = await extractZip(
       'ods',
       buildOds([
         {
@@ -396,7 +401,7 @@ describe('extractZipDocument', () => {
     // Every row LibreOffice writes ends in a cell repeated 16 384 times.
     // Honouring that verbatim is how a 40 kB file becomes 600 MB of tabs.
     const started = Date.now();
-    const response = await run(
+    const response = await extractZip(
       'ods',
       buildOds([{ name: 'T', rows: [['a']] }], { trailingRepeat: 16_384 })
     );
@@ -406,12 +411,12 @@ describe('extractZipDocument', () => {
   });
 
   it('refuses an archive that is not the document it claims to be', async () => {
-    const response = await run('docx', zip({ 'other.xml': '<x/>' }));
+    const response = await extractZip('docx', zip({ 'other.xml': '<x/>' }));
     expect(response).toEqual({ ok: false, reason: 'not-a-document' });
   });
 
   it('refuses bytes that are not an archive', async () => {
-    const response = await run('docx', Buffer.from('not a zip'));
+    const response = await extractZip('docx', Buffer.from('not a zip'));
     expect(response).toEqual({ ok: false, reason: 'corrupt' });
   });
 
@@ -423,7 +428,7 @@ describe('extractZipDocument', () => {
     // pass is what makes `&amp;lt;` the four characters `&lt;` and not a
     // second-round `<`.
     const xml = '<?xml version="1.0" encoding="UTF-8"?>';
-    const response = await run(
+    const response = await extractZip(
       'xlsx',
       zip({
         'xl/workbook.xml': `${xml}<workbook><sheets><sheet name="S" sheetId="1" r:id="rId1"/></sheets></workbook>`,
@@ -474,7 +479,7 @@ describe('extractZipDocument', () => {
     // reader that took its `<w:rPr>` for the next run's would count the run
     // after it as hidden. And a run whose `<w:rPr>` never closes ends the
     // count rather than the walk.
-    const response = await run(
+    const response = await extractZip(
       'docx',
       buildDocxRaw(
         '<w:document><w:body>' +
@@ -489,16 +494,13 @@ describe('extractZipDocument', () => {
 });
 
 describe('extractZipDocument refuses hostile archives', () => {
-  const run = (kind: Parameters<typeof extractZipDocument>[0], bytes: Buffer) =>
-    extractZipDocument(kind, new Uint8Array(bytes), MAX, htmlToText);
-
   it('skips an entry whose declared size exceeds the budget', async () => {
     // The declared size is what unzipSync sizes its output buffer from, and
     // nothing checks it against the data. This must be answered in the filter
     // callback, before the allocation — not after it.
     const started = Date.now();
     const archive = patchDeclaredSize(buildDocx(['hidden']), 0xffffff00);
-    const response = await run('docx', archive);
+    const response = await extractZip('docx', archive);
     expect(response).toEqual({ ok: false, reason: 'not-a-document' });
     expect(Date.now() - started).toBeLessThan(1_000);
   });
@@ -511,7 +513,7 @@ describe('extractZipDocument refuses hostile archives', () => {
       files[`ppt/slides/slide${i}.xml`] =
         '<p:sld><a:p><a:t>x</a:t></a:p></p:sld>';
     }
-    const response = await run('pptx', zip(files));
+    const response = await extractZip('pptx', zip(files));
     expect(response).toEqual({ ok: false, reason: 'too-many-parts' });
   });
 
@@ -522,7 +524,7 @@ describe('extractZipDocument refuses hostile archives', () => {
     for (let i = 1; i <= 600; i += 1) files[`word/media/image${i}.png`] = 'x';
     files['word/document.xml'] =
       '<w:document><w:body><w:p><w:r><w:t>Bericht</w:t></w:r></w:p></w:body></w:document>';
-    const response = await run('docx', zip(files));
+    const response = await extractZip('docx', zip(files));
     expect(textOf(response)).toContain('Bericht');
   });
 
@@ -534,7 +536,7 @@ describe('extractZipDocument refuses hostile archives', () => {
     for (let i = 0; i < 40_000; i += 1) {
       paragraphs.push(`Absatz ${i} eines langen Vertrags mit etwas Text.`);
     }
-    const response = await run('docx', buildDocx(paragraphs));
+    const response = await extractZip('docx', buildDocx(paragraphs));
     const text = textOf(response);
     expect(text).toContain('Absatz 0 ');
     expect(text.length).toBeLessThanOrEqual(MAX);
@@ -542,7 +544,7 @@ describe('extractZipDocument refuses hostile archives', () => {
   });
 
   it('never reads an entry outside the allowlist', async () => {
-    const response = await run(
+    const response = await extractZip(
       'docx',
       zip({
         '../../../etc/cron.d/pwn': 'SHOULD-NOT-APPEAR',
@@ -569,7 +571,7 @@ describe('extractZipDocument refuses hostile archives', () => {
     const secret = join(directory, 'secret.txt');
     await writeFile(secret, 'MARKER-THE-EXTRACTOR-MUST-NEVER-READ');
     try {
-      const response = await run(
+      const response = await extractZip(
         'docx',
         buildDocxRaw(
           `<!DOCTYPE d [<!ENTITY xxe SYSTEM "file://${secret}">]>` +
@@ -593,7 +595,7 @@ describe('extractZipDocument refuses hostile archives', () => {
     }
     dtd += ']>';
     const started = Date.now();
-    const response = await run(
+    const response = await extractZip(
       'docx',
       buildDocxRaw(
         `${dtd}<w:document><w:body><w:p><w:r><w:t>&lol9;</w:t></w:r></w:p></w:body></w:document>`
@@ -609,7 +611,7 @@ describe('extractZipDocument refuses hostile archives', () => {
     // process, take the server down; now the per-row budget stops it at the
     // cap. The cell cap keeps any single value short as well.
     const started = Date.now();
-    const response = await run('xlsx', buildXlsxBomb(200_000, 200, 128));
+    const response = await extractZip('xlsx', buildXlsxBomb(200_000, 200, 128));
     expect(response.ok).toBe(true);
     expect(textOf(response).length).toBeLessThanOrEqual(MAX);
     expect(Date.now() - started).toBeLessThan(2_000);
@@ -628,7 +630,7 @@ describe('extractZipDocument refuses hostile archives', () => {
       `<table:table table:name="T">${row.repeat(200)}</table:table>` +
       `</office:document-content>`;
     const started = Date.now();
-    const response = await run('ods', zip({ 'content.xml': content }));
+    const response = await extractZip('ods', zip({ 'content.xml': content }));
     expect(response.ok).toBe(true);
     expect(textOf(response).length).toBeLessThanOrEqual(MAX);
     expect(Date.now() - started).toBeLessThan(2_000);
@@ -639,7 +641,7 @@ describe('extractZipDocument refuses hostile archives', () => {
     // which is the exact shape of the removal chain that once took 33 seconds
     // on a single-threaded stdio server. This input is what found it.
     const started = Date.now();
-    await run('docx', buildDocxRaw('<w:t '.repeat(200_000)));
+    await extractZip('docx', buildDocxRaw('<w:t '.repeat(200_000)));
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 });

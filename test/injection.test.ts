@@ -487,20 +487,20 @@ const ATTACHMENT_PAYLOADS: AttachmentPayload[] = [
   },
 ];
 
-describe('injection corpus in attachments', () => {
-  const readText = async (payload: AttachmentPayload) => {
-    const harness = await connect({ mailboxes: attachmentMailboxes(payload) });
-    const text = textOf(
-      await call(harness.client, 'get_attachments', {
-        uid: 42,
-        part_id: '2',
-        mode: 'text',
-      })
-    );
-    await harness.close();
-    return text;
-  };
+const readText = async (payload: AttachmentPayload) => {
+  const harness = await connect({ mailboxes: attachmentMailboxes(payload) });
+  const text = textOf(
+    await call(harness.client, 'get_attachments', {
+      uid: 42,
+      part_id: '2',
+      mode: 'text',
+    })
+  );
+  await harness.close();
+  return text;
+};
 
+describe('injection corpus in attachments', () => {
   for (const payload of ATTACHMENT_PAYLOADS) {
     describe(payload.name, () => {
       it('keeps the extracted text inside the fence', async () => {

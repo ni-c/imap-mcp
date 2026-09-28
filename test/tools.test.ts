@@ -1164,6 +1164,19 @@ describe('get_attachments mode=text', () => {
   });
 });
 
+const read = async (
+  client: Parameters<typeof call>[0],
+  args: Record<string, unknown>
+) =>
+  fields(
+    await call(client, 'get_attachments', {
+      uid: 12,
+      part_id: '2',
+      mode: 'text',
+      ...args,
+    })
+  );
+
 describe('get_attachments paging through extracted text', () => {
   // Distinct, findable content per line, so a gap between two windows is an
   // assertion failure rather than something that looks plausible.
@@ -1188,19 +1201,6 @@ describe('get_attachments paging through extracted text', () => {
       ],
     },
   ];
-
-  const read = async (
-    client: Parameters<typeof call>[0],
-    args: Record<string, unknown>
-  ) =>
-    fields(
-      await call(client, 'get_attachments', {
-        uid: 12,
-        part_id: '2',
-        mode: 'text',
-        ...args,
-      })
-    );
 
   it('hands back a window and a cursor that does not skip', async () => {
     const harness = await connect({ mailboxes });
