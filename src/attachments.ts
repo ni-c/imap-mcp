@@ -192,14 +192,22 @@ export function sanitizeFilename(raw: string | undefined): string {
   // extension makes `checkPolicy` skip the executable check entirely rather
   // than fail it — so the blocklist was bypassed by naming the attachment
   // `.exe`. That is the same failure `appref-ms` caused, reached by a different
-  // route. The lookahead keeps the leading dots whenever removing them would
-  // consume the last one; a name that has another dot further along loses them
-  // as before.
-  const cleaned = defuseAutoFetch(stripInvisible(raw.normalize('NFKC')))
+  // route. One leading dot is kept whenever removing it would consume the last
+  // one; a name that has another dot further along loses them as before.
+  //
+  // A kept dot has to name an extension, though. Kept for anything else it was
+  // just a dotfile-shaped name: `..!` (or `︰!`, which NFKC turns into it) came
+  // out as `.!`. So the whole run of dots and spaces in front goes, and one dot
+  // comes back only when it is the one `extensionOf` reads.
+  const body = defuseAutoFetch(stripInvisible(raw.normalize('NFKC')))
     .replace(/[/\\]/g, '_')
-    .trim()
-    .replace(/^\.+(?=.*\.)/, '')
     .trim();
+  const rest = body.replace(/^[.\s]+/, '');
+  const keepDot =
+    body.startsWith('.') &&
+    !rest.includes('.') &&
+    extensionOf(`.${rest}`) !== '';
+  const cleaned = keepDot ? `.${rest}` : rest;
   // A name of nothing but dots is not a name. It carries no extension either,
   // so keeping it buys the check above nothing and only puts `...` in front of
   // a reader.

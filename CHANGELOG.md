@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the retry reconnects.
 - Shutting down no longer throws when the logout fails after the connection has
   already reported its close.
+- An attachment name keeps a leading dot only when that dot names its
+  extension. A name like `..!` (or `︰!`, which Unicode normalisation turns into
+  it) came out as `.!`, dotfile-shaped with nothing behind the dot to check.
+  The `.exe` case from 0.5.0 still keeps its dot, so the executable check still
+  reads the extension.
 
 ### Changed
 
