@@ -29,6 +29,7 @@ export interface ImapConnection {
   logout(): Promise<void>;
   close(): void;
   on(event: 'error', listener: (error: Error) => void): unknown;
+  on(event: 'close', listener: () => void): unknown;
   noop(): Promise<void>;
   list(options?: {
     statusQuery?: { messages?: boolean; unseen?: boolean; uidNext?: boolean };
@@ -229,10 +230,15 @@ export class ImapClient {
       try {
         const client = this.factory(this.config.imap);
         // A server that drops an idle connection surfaces as an 'error' event,
-        // and an unhandled one ends the process. The next call reconnects.
-        client.on('error', () => {
+        // and an unhandled one ends the process; one that logs out cleanly
+        // only closes. Either way the next call reconnects, without first
+        // failing on the dead connection. A client that has already been
+        // replaced must not take its successor with it.
+        const drop = () => {
           if (this.connection === client) this.connection = undefined;
-        });
+        };
+        client.on('error', drop);
+        client.on('close', drop);
         await client.connect();
         this.connection = client;
         return client;
@@ -504,11 +510,14 @@ export class ImapClient {
   }
 
   async close(): Promise<void> {
-    if (this.connection === undefined) return;
+    // Held locally: a logout ends in a 'close' event, which already clears
+    // `this.connection` before a failed logout gets to the fallback.
+    const connection = this.connection;
+    if (connection === undefined) return;
     try {
-      await this.connection.logout();
+      await connection.logout();
     } catch {
-      this.connection.close();
+      connection.close();
     }
     this.connection = undefined;
   }

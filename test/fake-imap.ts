@@ -109,11 +109,14 @@ export class FakeImap extends EventEmitter implements ImapConnection {
 
   async logout(): Promise<void> {
     this.record('logout');
-    this.connected = false;
+    this.close();
   }
 
+  // Like imapflow, a connection reports its end once, as 'close'.
   close(): void {
+    if (!this.connected) return;
     this.connected = false;
+    this.emit('close');
   }
 
   async noop(): Promise<void> {

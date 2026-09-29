@@ -82,6 +82,63 @@ describe('ImapClient', () => {
     );
   });
 
+  it('reconnects without a failed round trip after a clean close', async () => {
+    const first = new FakeImap(boxes());
+    const second = new FakeImap(boxes());
+    const fakes = [first, second];
+    const client = new ImapClient(testConfig(), () => fakes.shift()!);
+    await client.withMailbox('INBOX', true, async () => 'warm');
+    const noops = first.calls.filter((entry) => entry.name === 'noop').length;
+
+    first.close();
+    const result = await client.withMailbox('INBOX', true, async () => 'again');
+    expect(result).toBe('again');
+    expect(first.calls.filter((entry) => entry.name === 'noop')).toHaveLength(
+      noops
+    );
+    expect(
+      second.calls.filter((entry) => entry.name === 'connect')
+    ).toHaveLength(1);
+  });
+
+  it('keeps the new connection when a replaced one reports its end', async () => {
+    const first = new FakeImap(boxes());
+    const second = new FakeImap(boxes());
+    const fakes = [first, second];
+    const client = new ImapClient(testConfig(), () => fakes.shift()!);
+    await client.withMailbox('INBOX', true, async () => 'warm');
+
+    first.emit('error', new Error('read ETIMEDOUT'));
+    await client.withMailbox('INBOX', true, async () => 'second');
+    // Late news from the first connection, after the second took over.
+    first.emit('error', new Error('read ETIMEDOUT'));
+    first.emit('close');
+    const result = await client.withMailbox('INBOX', true, async () => 'still');
+    expect(result).toBe('still');
+    expect(fakes).toHaveLength(0);
+    expect(
+      second.calls.filter((entry) => entry.name === 'connect')
+    ).toHaveLength(1);
+    expect(second.calls.filter((entry) => entry.name === 'noop')).toHaveLength(
+      2
+    );
+  });
+
+  it('falls back to close when a logout closes and then fails', async () => {
+    const fake = new FakeImap(boxes());
+    fake.logout = async () => {
+      fake.close();
+      throw new Error('connection closed during logout');
+    };
+    const closed = vi.spyOn(fake, 'close');
+    const client = new ImapClient(testConfig(), () => fake);
+    await client.listMailboxes();
+
+    await expect(client.close()).resolves.toBeUndefined();
+    expect(closed).toHaveBeenCalledTimes(2);
+    await expect(client.close()).resolves.toBeUndefined();
+  });
+
   it('does not retry an error that is not a connection failure', async () => {
     const fake = new FakeImap(boxes());
     const client = new ImapClient(testConfig(), () => fake);
