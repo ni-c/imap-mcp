@@ -67,6 +67,21 @@ describe('ImapClient', () => {
     );
   });
 
+  it('survives an error event on an idle connection and reconnects', async () => {
+    const fake = new FakeImap(boxes());
+    const client = new ImapClient(testConfig(), () => fake);
+    await client.withMailbox('INBOX', true, async () => 'warm');
+
+    fake.emit(
+      'error',
+      Object.assign(new Error('read ETIMEDOUT'), { code: 'ETIMEDOUT' })
+    );
+    await client.withMailbox('INBOX', true, async () => 'again');
+    expect(fake.calls.filter((entry) => entry.name === 'connect')).toHaveLength(
+      2
+    );
+  });
+
   it('does not retry an error that is not a connection failure', async () => {
     const fake = new FakeImap(boxes());
     const client = new ImapClient(testConfig(), () => fake);

@@ -23,6 +23,9 @@ const hoisted = vi.hoisted(() => {
     }
     async logout(): Promise<void> {}
     close(): void {}
+    on(): this {
+      return this;
+    }
   }
   return { ImapFlowSpy, constructed };
 });

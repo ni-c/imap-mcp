@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 
 import type {
@@ -50,7 +51,9 @@ export interface FakeMailbox {
   specialUse?: string;
 }
 
-export class FakeImap implements ImapConnection {
+// An EventEmitter like imapflow's client, so an 'error' nobody listens for
+// throws here the way it ends the process there.
+export class FakeImap extends EventEmitter implements ImapConnection {
   // LIST-STATUS is what lets a listing carry its counters in one round trip.
   // A test that wants the per-folder STATUS fallback deletes it.
   readonly capabilities = new Map<string, boolean | number>([
@@ -71,7 +74,9 @@ export class FakeImap implements ImapConnection {
   private locksHeld = 0;
   readonly lockLog: Array<{ path: string; readOnly: boolean }> = [];
 
-  constructor(private readonly mailboxes: FakeMailbox[]) {}
+  constructor(private readonly mailboxes: FakeMailbox[]) {
+    super();
+  }
 
   private record(name: string, ...args: unknown[]): void {
     this.calls.push({ name, args });

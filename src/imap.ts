@@ -28,6 +28,7 @@ export interface ImapConnection {
   connect(): Promise<void>;
   logout(): Promise<void>;
   close(): void;
+  on(event: 'error', listener: (error: Error) => void): unknown;
   noop(): Promise<void>;
   list(options?: {
     statusQuery?: { messages?: boolean; unseen?: boolean; uidNext?: boolean };
@@ -227,6 +228,11 @@ export class ImapClient {
       await Promise.resolve();
       try {
         const client = this.factory(this.config.imap);
+        // A server that drops an idle connection surfaces as an 'error' event,
+        // and an unhandled one ends the process. The next call reconnects.
+        client.on('error', () => {
+          if (this.connection === client) this.connection = undefined;
+        });
         await client.connect();
         this.connection = client;
         return client;
