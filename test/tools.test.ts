@@ -240,7 +240,12 @@ describe('tool registration', () => {
 
 describe('get_server_info', () => {
   it('reports the account setup and the tool groups', async () => {
-    const harness = await connect({ config: { readOnly: false } });
+    // get_server_info reads PERMANENTFLAGS through a read-only selection,
+    // which lists nothing on Dovecot, so storable comes out false there.
+    // This test is about the report, so the fake lists the flags anyway.
+    const mailboxes = defaultMailboxes();
+    mailboxes[0]!.readOnlyPermanentFlags = new Set(['\\Seen', '\\*']);
+    const harness = await connect({ config: { readOnly: false }, mailboxes });
     const info = jsonOf(await call(harness.client, 'get_server_info')) as {
       mailbox: string;
       capabilities: string[];
@@ -262,6 +267,7 @@ describe('get_server_info', () => {
   it('reports the keyword as unstorable when the server refuses keywords', async () => {
     const mailboxes = defaultMailboxes();
     mailboxes[0]!.permanentFlags = new Set(['\\Seen']);
+    mailboxes[0]!.readOnlyPermanentFlags = new Set(['\\Seen']);
     const harness = await connect({ mailboxes });
     const info = jsonOf(await call(harness.client, 'get_server_info')) as {
       new_mail_tracking: { storable: boolean };
@@ -490,6 +496,7 @@ describe('list_new_messages', () => {
   it('refuses when the server cannot store the keyword', async () => {
     const mailboxes = defaultMailboxes();
     mailboxes[0]!.permanentFlags = new Set(['\\Seen']);
+    mailboxes[0]!.readOnlyPermanentFlags = new Set(['\\Seen']);
     const harness = await connect({ mailboxes });
     const result = await call(harness.client, 'list_new_messages');
     expect(result.isError).toBe(true);

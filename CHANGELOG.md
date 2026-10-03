@@ -12,6 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      last in the file so the link definitions come along. -->
 <!-- #region changelog -->
 
+## [Unreleased]
+
+### Fixed
+
+- `save_draft` keeps the `\Draft` and `\Seen` flags after a read-only call.
+  The append ran on whatever mailbox the last call had left selected, and
+  imapflow keeps only the flags that mailbox lists in `PERMANENTFLAGS`. A read-only
+  select (`EXAMINE`) lists none on Dovecot, so a reply draft, or any draft saved
+  after `list_messages`, `get_message`, `get_attachments` or the mailbox resource,
+  landed without its flags and without an error. The Drafts folder is now
+  selected read-write for the append (#35).
+
 ## [0.5.1] - 2026-09-29
 
 ### Fixed

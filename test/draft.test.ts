@@ -243,6 +243,40 @@ describe('save_draft', () => {
     await harness.close();
   });
 
+  it('keeps the flags on a reply after reading the original read-only', async () => {
+    const harness = await connect({ config: writeConfig });
+    await call(harness.client, 'save_draft', {
+      to: ['anna@example.net'],
+      subject: 'Re: Please review',
+      body: 'Will do.',
+      reply_to_uid: 3,
+    });
+    expect(harness.imap.lockLog).toEqual([
+      { path: 'INBOX', readOnly: true },
+      { path: 'Drafts', readOnly: false },
+    ]);
+    expect(harness.imap.appended[0]?.flags).toEqual(['\\Draft', '\\Seen']);
+    expect(harness.imap.openLocks).toBe(0);
+    await harness.close();
+  });
+
+  it('keeps the flags on a new draft after a read-only list_messages', async () => {
+    const harness = await connect({ config: writeConfig });
+    await call(harness.client, 'list_messages');
+    await call(harness.client, 'save_draft', {
+      to: ['anna@example.net'],
+      subject: 'Hi',
+      body: 'Text.',
+    });
+    expect(harness.imap.lockLog.at(-1)).toEqual({
+      path: 'Drafts',
+      readOnly: false,
+    });
+    expect(harness.imap.appended[0]?.flags).toEqual(['\\Draft', '\\Seen']);
+    expect(harness.imap.openLocks).toBe(0);
+    await harness.close();
+  });
+
   it('rejects a recipient that would inject a header', async () => {
     const harness = await connect({ config: writeConfig });
     const result = await call(harness.client, 'save_draft', {
