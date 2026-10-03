@@ -513,7 +513,11 @@ export function registerWriteTools(
         });
 
         const folder = await resolveDraftsMailbox(client, config);
-        await client.withConnection(async (connection) => {
+        // Selected read-write, not just connected: imapflow keeps only the
+        // flags the selected mailbox lists in PERMANENTFLAGS, and a lock
+        // released after a read-only call leaves that mailbox EXAMINEd, where
+        // the list is empty and \Draft and \Seen would be dropped silently.
+        await client.withMailbox(folder, false, async (connection) => {
           await withTimeout(
             connection.append(folder, draft, ['\\Draft', '\\Seen']),
             'APPEND'

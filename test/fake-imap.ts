@@ -48,6 +48,8 @@ export interface FakeMailbox {
   path: string;
   messages: FakeMessage[];
   permanentFlags?: Set<string>;
+  /** What a read-only selection reports; empty unless set, as on Dovecot. */
+  readOnlyPermanentFlags?: Set<string>;
   specialUse?: string;
 }
 
@@ -71,6 +73,8 @@ export class FakeImap extends EventEmitter implements ImapConnection {
   failNext: Error | undefined;
 
   private selected: string | undefined;
+  /** Survives the lock's release, as the EXAMINE does on a real connection. */
+  private selectedReadOnly = false;
   private locksHeld = 0;
   readonly lockLog: Array<{ path: string; readOnly: boolean }> = [];
 
@@ -174,6 +178,7 @@ export class FakeImap extends EventEmitter implements ImapConnection {
     this.record('getMailboxLock', path, options);
     this.box(path);
     this.selected = path;
+    this.selectedReadOnly = options?.readOnly === true;
     this.locksHeld += 1;
     this.lockLog.push({ path, readOnly: options?.readOnly === true });
     let released = false;
@@ -197,8 +202,11 @@ export class FakeImap extends EventEmitter implements ImapConnection {
     const box = this.box(this.selected);
     return {
       path: box.path,
-      permanentFlags:
-        box.permanentFlags ?? new Set(['\\Seen', '\\Flagged', '\\*']),
+      // Dovecot answers EXAMINE with an empty PERMANENTFLAGS: nothing can be
+      // stored through a read-only selection.
+      permanentFlags: this.selectedReadOnly
+        ? (box.readOnlyPermanentFlags ?? new Set<string>())
+        : (box.permanentFlags ?? new Set(['\\Seen', '\\Flagged', '\\*'])),
     };
   }
 
@@ -366,10 +374,19 @@ export class FakeImap extends EventEmitter implements ImapConnection {
   ): Promise<unknown> {
     this.record('append', path, flags);
     this.box(path);
+    // imapflow's canUseFlag() checks the selected mailbox, not the target,
+    // and drops what it does not list without an error.
+    const selected = this.mailbox;
+    const kept = flags.filter(
+      (flag) =>
+        selected === false ||
+        selected.permanentFlags.has('\\*') ||
+        selected.permanentFlags.has(flag)
+    );
     this.appended.push({
       path,
       content: Buffer.isBuffer(content) ? content : Buffer.from(content),
-      flags,
+      flags: kept,
     });
     return { path, uid: 900 + this.appended.length };
   }
