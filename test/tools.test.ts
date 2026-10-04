@@ -240,12 +240,7 @@ describe('tool registration', () => {
 
 describe('get_server_info', () => {
   it('reports the account setup and the tool groups', async () => {
-    // get_server_info reads PERMANENTFLAGS through a read-only selection,
-    // which lists nothing on Dovecot, so storable comes out false there.
-    // This test is about the report, so the fake lists the flags anyway.
-    const mailboxes = defaultMailboxes();
-    mailboxes[0]!.readOnlyPermanentFlags = new Set(['\\Seen', '\\*']);
-    const harness = await connect({ config: { readOnly: false }, mailboxes });
+    const harness = await connect({ config: { readOnly: false } });
     const info = jsonOf(await call(harness.client, 'get_server_info')) as {
       mailbox: string;
       capabilities: string[];
@@ -267,7 +262,6 @@ describe('get_server_info', () => {
   it('reports the keyword as unstorable when the server refuses keywords', async () => {
     const mailboxes = defaultMailboxes();
     mailboxes[0]!.permanentFlags = new Set(['\\Seen']);
-    mailboxes[0]!.readOnlyPermanentFlags = new Set(['\\Seen']);
     const harness = await connect({ mailboxes });
     const info = jsonOf(await call(harness.client, 'get_server_info')) as {
       new_mail_tracking: { storable: boolean };
@@ -281,6 +275,54 @@ describe('get_server_info', () => {
     expect(textOf(await call(harness.client, 'get_server_info'))).not.toContain(
       'secret'
     );
+    await harness.close();
+  });
+
+  it('still reports the flags after a read-only call left the mailbox EXAMINEd', async () => {
+    const harness = await connect();
+    await call(harness.client, 'list_messages');
+    const info = jsonOf(await call(harness.client, 'get_server_info')) as {
+      permanent_flags: string[];
+      permanent_flags_reported: boolean;
+      new_mail_tracking: { storable: boolean };
+    };
+    expect(harness.imap.lockLog.at(-1)).toEqual({
+      path: 'INBOX',
+      readOnly: false,
+    });
+    expect(info.permanent_flags).toContain('\\*');
+    expect(info.permanent_flags_reported).toBe(true);
+    expect(info.new_mail_tracking.storable).toBe(true);
+    await harness.close();
+  });
+
+  it('reads a server that sends no PERMANENTFLAGS as storing every flag', async () => {
+    const mailboxes = defaultMailboxes();
+    mailboxes[0]!.permanentFlags = false;
+    const harness = await connect({ mailboxes });
+    const result = await call(harness.client, 'get_server_info');
+    expect(result.isError).toBeFalsy();
+    const info = jsonOf(result) as {
+      permanent_flags: string[];
+      permanent_flags_reported: boolean;
+      new_mail_tracking: { storable: boolean };
+    };
+    expect(info.permanent_flags).toEqual([]);
+    expect(info.permanent_flags_reported).toBe(false);
+    expect(info.new_mail_tracking.storable).toBe(true);
+    await harness.close();
+  });
+
+  it('reports an empty list as unstorable, unlike a missing one', async () => {
+    const mailboxes = defaultMailboxes();
+    mailboxes[0]!.permanentFlags = new Set();
+    const harness = await connect({ mailboxes });
+    const info = jsonOf(await call(harness.client, 'get_server_info')) as {
+      permanent_flags_reported: boolean;
+      new_mail_tracking: { storable: boolean };
+    };
+    expect(info.permanent_flags_reported).toBe(true);
+    expect(info.new_mail_tracking.storable).toBe(false);
     await harness.close();
   });
 });
@@ -496,11 +538,19 @@ describe('list_new_messages', () => {
   it('refuses when the server cannot store the keyword', async () => {
     const mailboxes = defaultMailboxes();
     mailboxes[0]!.permanentFlags = new Set(['\\Seen']);
-    mailboxes[0]!.readOnlyPermanentFlags = new Set(['\\Seen']);
     const harness = await connect({ mailboxes });
     const result = await call(harness.client, 'list_new_messages');
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain('seen=false');
+    await harness.close();
+  });
+
+  it('tracks new mail on a server that sends no PERMANENTFLAGS', async () => {
+    const mailboxes = defaultMailboxes();
+    mailboxes[0]!.permanentFlags = false;
+    const harness = await connect({ mailboxes });
+    const result = await call(harness.client, 'list_new_messages');
+    expect(result.isError).toBeFalsy();
     await harness.close();
   });
 });

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { buildDraft, encodeHeaderValue } from '../src/draft.js';
 import { ToolInputError } from '../src/errors.js';
 
-import { call, connect, jsonOf, textOf } from './harness.js';
+import { call, connect, defaultMailboxes, jsonOf, textOf } from './harness.js';
 import { message } from './fake-imap.js';
 
 const base = {
@@ -305,6 +305,72 @@ describe('save_draft', () => {
     const harness = await connect();
     const { tools } = await harness.client.listTools();
     expect(tools.map((tool) => tool.name)).not.toContain('save_draft');
+    await harness.close();
+  });
+
+  it('reports the flags the draft was stored with', async () => {
+    const harness = await connect({ config: writeConfig });
+    const payload = jsonOf(
+      await call(harness.client, 'save_draft', {
+        to: ['anna@example.net'],
+        subject: 'Hi',
+        body: 'Text.',
+      })
+    ) as { flags: string[]; note: string };
+    expect(payload.flags).toEqual(['\\Draft', '\\Seen']);
+    expect(payload.note).not.toContain('does not store');
+    await harness.close();
+  });
+
+  it('still saves into a Drafts folder that does not store \\Draft, and says so', async () => {
+    const mailboxes = defaultMailboxes();
+    mailboxes.find((box) => box.path === 'Drafts')!.permanentFlags = new Set([
+      '\\Seen',
+    ]);
+    const harness = await connect({ config: writeConfig, mailboxes });
+    const payload = jsonOf(
+      await call(harness.client, 'save_draft', {
+        to: ['anna@example.net'],
+        subject: 'Hi',
+        body: 'Text.',
+      })
+    ) as { flags: string[]; note: string };
+    expect(payload.flags).toEqual(['\\Seen']);
+    expect(payload.note).toContain('does not store \\Draft');
+    expect(harness.imap.appended[0]?.flags).toEqual(['\\Seen']);
+    await harness.close();
+  });
+
+  it('names both flags when the Drafts folder stores none', async () => {
+    const mailboxes = defaultMailboxes();
+    mailboxes.find((box) => box.path === 'Drafts')!.permanentFlags = new Set();
+    const harness = await connect({ config: writeConfig, mailboxes });
+    const payload = jsonOf(
+      await call(harness.client, 'save_draft', {
+        to: ['anna@example.net'],
+        subject: 'Hi',
+        body: 'Text.',
+      })
+    ) as { flags: string[]; note: string };
+    expect(payload.flags).toEqual([]);
+    expect(payload.note).toContain('does not store \\Draft or \\Seen');
+    expect(harness.imap.appended).toHaveLength(1);
+    await harness.close();
+  });
+
+  it('keeps both flags when the Drafts folder sends no PERMANENTFLAGS', async () => {
+    const mailboxes = defaultMailboxes();
+    mailboxes.find((box) => box.path === 'Drafts')!.permanentFlags = false;
+    const harness = await connect({ config: writeConfig, mailboxes });
+    const payload = jsonOf(
+      await call(harness.client, 'save_draft', {
+        to: ['anna@example.net'],
+        subject: 'Hi',
+        body: 'Text.',
+      })
+    ) as { flags: string[] };
+    expect(payload.flags).toEqual(['\\Draft', '\\Seen']);
+    expect(harness.imap.appended[0]?.flags).toEqual(['\\Draft', '\\Seen']);
     await harness.close();
   });
 });

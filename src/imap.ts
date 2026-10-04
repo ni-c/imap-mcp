@@ -24,6 +24,34 @@ import { isMessageId } from './message.js';
  * real server, and the surface stays small enough that the fake cannot silently
  * drift away from the real thing.
  */
+const SYSTEM_FLAGS = [
+  '\\Seen',
+  '\\Answered',
+  '\\Flagged',
+  '\\Deleted',
+  '\\Draft',
+];
+
+/** Spells a system flag the way imapflow sends it (`\\seen` becomes `\\Seen`). */
+export function normalizeFlag(flag: string): string {
+  const lower = flag.toLowerCase();
+  return SYSTEM_FLAGS.find((system) => system.toLowerCase() === lower) ?? flag;
+}
+
+/**
+ * Whether a flag survives imapflow's `canUseFlag()`, which APPEND and STORE
+ * run against the *selected* mailbox: a flag missing from PERMANENTFLAGS is
+ * dropped without an error, and the command then reports success. No list at
+ * all means every flag is allowed; `\\*` allows any keyword.
+ */
+export function canStoreFlag(
+  permanentFlags: Set<string> | false | undefined,
+  flag: string
+): boolean {
+  if (!permanentFlags || permanentFlags.has('\\*')) return true;
+  return permanentFlags.has(normalizeFlag(flag));
+}
+
 export interface ImapConnection {
   connect(): Promise<void>;
   logout(): Promise<void>;
@@ -87,7 +115,12 @@ export interface ImapConnection {
   mailboxRename(path: string, newPath: string): Promise<unknown>;
   mailboxDelete(path: string): Promise<unknown>;
   readonly capabilities: Map<string, boolean | number>;
-  readonly mailbox: false | { path: string; permanentFlags: Set<string> };
+  /**
+   * imapflow leaves `permanentFlags` unset when the server sends no
+   * PERMANENTFLAGS, and RFC 9051 reads that as "all flags can be stored".
+   */
+  readonly mailbox:
+    false | { path: string; permanentFlags?: Set<string> | false };
 }
 
 export type ImapClientFactory = (config: ImapConfig) => ImapConnection;
@@ -391,10 +424,10 @@ export class ImapClient {
    * providers accept none at all, and there the new-mail tracking cannot work —
    * better to say so than to tag silently into the void.
    */
-  keywordSupported(permanentFlags: Set<string>): boolean {
+  keywordSupported(permanentFlags: Set<string> | false | undefined): boolean {
     const keyword = this.config.imap.seenKeyword;
     if (keyword === '') return false;
-    return permanentFlags.has('\\*') || permanentFlags.has(keyword);
+    return canStoreFlag(permanentFlags, keyword);
   }
 
   get seenKeyword(): string {

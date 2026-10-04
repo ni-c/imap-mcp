@@ -16,7 +16,7 @@ import { escapeInvisible, stripInvisible } from '../analyze.js';
 import { audit } from '../audit.js';
 import type { Config } from '../config.js';
 import { ToolInputError } from '../errors.js';
-import { ImapClient, withTimeout } from '../imap.js';
+import { canStoreFlag, ImapClient, withTimeout } from '../imap.js';
 import { buildDraft } from '../draft.js';
 import { errorResult, jsonResult, run } from '../result.js';
 
@@ -106,6 +106,23 @@ export function registerWriteTools(
           );
         }
         return client.withMailbox(mailbox, false, async (connection) => {
+          // imapflow drops a flag the mailbox does not list in PERMANENTFLAGS
+          // and still answers as if it had been set. Refuse before anything is
+          // written, so the result never claims a flag that is not there.
+          const permanentFlags =
+            connection.mailbox === false
+              ? undefined
+              : connection.mailbox.permanentFlags;
+          const refused = (add ?? []).filter(
+            (flag) => !canStoreFlag(permanentFlags, flag)
+          );
+          if (refused.length > 0) {
+            throw new ToolInputError(
+              `imap-mcp: this mailbox does not store ${refused.join(', ')}, so ` +
+                'nothing was changed. Call get_server_info for the flags it ' +
+                'does support.'
+            );
+          }
           if (add !== undefined) {
             await withTimeout(
               connection.messageFlagsAdd(uids, add, { uid: true }),
@@ -492,6 +509,9 @@ export function registerWriteTools(
         action: z.literal('draft_saved'),
         mailbox: z.string().describe('The Drafts folder this server found.'),
         recipients: z.array(z.string()),
+        flags: z
+          .array(z.string())
+          .describe('The flags the draft was stored with.'),
         note: z.string(),
       }),
     },
@@ -517,12 +537,26 @@ export function registerWriteTools(
         // flags the selected mailbox lists in PERMANENTFLAGS, and a lock
         // released after a read-only call leaves that mailbox EXAMINEd, where
         // the list is empty and \Draft and \Seen would be dropped silently.
-        await client.withMailbox(folder, false, async (connection) => {
-          await withTimeout(
-            connection.append(folder, draft, ['\\Draft', '\\Seen']),
-            'APPEND'
-          );
-        });
+        const flags = await client.withMailbox(
+          folder,
+          false,
+          async (connection) => {
+            // A Drafts folder that does not store a flag still takes the
+            // draft — the text is what matters — but the result says so.
+            const permanentFlags =
+              connection.mailbox === false
+                ? undefined
+                : connection.mailbox.permanentFlags;
+            const kept = ['\\Draft', '\\Seen'].filter((flag) =>
+              canStoreFlag(permanentFlags, flag)
+            );
+            await withTimeout(connection.append(folder, draft, kept), 'APPEND');
+            return kept;
+          }
+        );
+        const dropped = ['\\Draft', '\\Seen'].filter(
+          (flag) => !flags.includes(flag)
+        );
         audit('save_draft', {
           mailbox: folder,
           recipients: to.length + (cc?.length ?? 0) + (bcc?.length ?? 0),
@@ -532,7 +566,12 @@ export function registerWriteTools(
           action: 'draft_saved',
           mailbox: folder,
           recipients: [...to, ...(cc ?? []), ...(bcc ?? [])],
-          note: 'The draft is stored but not sent. This server has no way to send mail; open it in your mail client to send it.',
+          flags,
+          note:
+            'The draft is stored but not sent. This server has no way to send mail; open it in your mail client to send it.' +
+            (dropped.length === 0
+              ? ''
+              : ` The ${folder} folder does not store ${dropped.join(' or ')}, so the draft was saved without it; some mail clients may then not list it as a draft.`),
         });
       })
   );

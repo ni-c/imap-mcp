@@ -141,6 +141,11 @@ export function registerReadTools(
         mailbox: z.string().describe('The default this server selects.'),
         capabilities: z.array(z.string()),
         permanent_flags: z.array(z.string()),
+        permanent_flags_reported: z
+          .boolean()
+          .describe(
+            'False when the server sent no PERMANENTFLAGS, which means every flag can be stored; permanent_flags is then empty.'
+          ),
         // Described in full rather than left open: both shapes below are
         // this server's own words about its own configuration.
         new_mail_tracking: z.object({
@@ -179,17 +184,25 @@ export function registerReadTools(
     },
     async () =>
       run(async () => {
-        const { capabilities, permanentFlags } = await client.withMailbox(
-          undefined,
-          true,
-          async (connection) => ({
-            capabilities: serverWords([...connection.capabilities.keys()]),
-            permanentFlags:
+        // Read-write, though nothing is written: an EXAMINE answers with the
+        // flags a read-only selection may store, and on Dovecot that is none,
+        // so the report would claim the keyword cannot be stored while
+        // list_new_messages stores it fine. A mailbox the account may only
+        // read still comes back [READ-ONLY] with an empty list, which is then
+        // the truth.
+        const { capabilities, permanentFlags, flagsListed } =
+          await client.withMailbox(undefined, false, async (connection) => {
+            const listed =
               connection.mailbox === false
-                ? []
-                : serverWords([...connection.mailbox.permanentFlags]),
-          })
-        );
+                ? undefined
+                : connection.mailbox.permanentFlags || undefined;
+            return {
+              capabilities: serverWords([...connection.capabilities.keys()]),
+              permanentFlags:
+                listed === undefined ? [] : serverWords([...listed]),
+              flagsListed: listed !== undefined,
+            };
+          });
         return jsonResult({
           host: config.imap.host,
           port: config.imap.port,
@@ -197,6 +210,7 @@ export function registerReadTools(
           mailbox: config.imap.mailbox,
           capabilities,
           permanent_flags: permanentFlags,
+          permanent_flags_reported: flagsListed,
           new_mail_tracking:
             config.imap.seenKeyword === ''
               ? {
@@ -206,7 +220,9 @@ export function registerReadTools(
               : {
                   enabled: true,
                   keyword: config.imap.seenKeyword,
-                  storable: client.keywordSupported(new Set(permanentFlags)),
+                  storable: client.keywordSupported(
+                    flagsListed ? new Set(permanentFlags) : undefined
+                  ),
                 },
           write_tools_enabled: !config.readOnly,
           // This server cannot send mail at all — see SECURITY.md on why that

@@ -47,9 +47,8 @@ export interface FakeAttachment {
 export interface FakeMailbox {
   path: string;
   messages: FakeMessage[];
-  permanentFlags?: Set<string>;
-  /** What a read-only selection reports; empty unless set, as on Dovecot. */
-  readOnlyPermanentFlags?: Set<string>;
+  /** `false`: the server sends no PERMANENTFLAGS at all. */
+  permanentFlags?: Set<string> | false;
   specialUse?: string;
 }
 
@@ -197,17 +196,43 @@ export class FakeImap extends EventEmitter implements ImapConnection {
     return this.locksHeld;
   }
 
-  get mailbox(): false | { path: string; permanentFlags: Set<string> } {
+  get mailbox(): false | { path: string; permanentFlags?: Set<string> } {
     if (this.selected === undefined) return false;
     const box = this.box(this.selected);
+    // Dovecot answers EXAMINE with an empty PERMANENTFLAGS: nothing can be
+    // stored through a read-only selection.
+    if (this.selectedReadOnly) {
+      return { path: box.path, permanentFlags: new Set<string>() };
+    }
+    if (box.permanentFlags === false) return { path: box.path };
     return {
       path: box.path,
-      // Dovecot answers EXAMINE with an empty PERMANENTFLAGS: nothing can be
-      // stored through a read-only selection.
-      permanentFlags: this.selectedReadOnly
-        ? (box.readOnlyPermanentFlags ?? new Set<string>())
-        : (box.permanentFlags ?? new Set(['\\Seen', '\\Flagged', '\\*'])),
+      permanentFlags:
+        box.permanentFlags ?? new Set(['\\Seen', '\\Flagged', '\\*']),
     };
+  }
+
+  /**
+   * imapflow's own canUseFlag() and formatFlag(), written out here rather than
+   * imported from src so the tests do not check the server against itself:
+   * APPEND and STORE look at the selected mailbox, not the target, and drop
+   * what it does not list without an error.
+   */
+  private storable(flags: string[]): string[] {
+    const selected = this.mailbox;
+    return flags
+      .map((flag) =>
+        /^\\(seen|answered|flagged|deleted|draft)$/i.test(flag)
+          ? flag.toLowerCase().replace(/^\\./, (c) => c.toUpperCase())
+          : flag
+      )
+      .filter(
+        (flag) =>
+          selected === false ||
+          selected.permanentFlags === undefined ||
+          selected.permanentFlags.has('\\*') ||
+          selected.permanentFlags.has(flag)
+      );
   }
 
   async search(
@@ -301,9 +326,11 @@ export class FakeImap extends EventEmitter implements ImapConnection {
     _options?: { uid?: boolean }
   ): Promise<boolean> {
     this.record('messageFlagsAdd', range, flags);
+    const kept = this.storable(flags);
+    if (kept.length === 0) return false;
     for (const uid of range) {
       const found = this.current().messages.find((m) => m.uid === uid);
-      for (const flag of flags) found?.flags.add(flag);
+      for (const flag of kept) found?.flags.add(flag);
     }
     return true;
   }
@@ -374,19 +401,10 @@ export class FakeImap extends EventEmitter implements ImapConnection {
   ): Promise<unknown> {
     this.record('append', path, flags);
     this.box(path);
-    // imapflow's canUseFlag() checks the selected mailbox, not the target,
-    // and drops what it does not list without an error.
-    const selected = this.mailbox;
-    const kept = flags.filter(
-      (flag) =>
-        selected === false ||
-        selected.permanentFlags.has('\\*') ||
-        selected.permanentFlags.has(flag)
-    );
     this.appended.push({
       path,
       content: Buffer.isBuffer(content) ? content : Buffer.from(content),
-      flags: kept,
+      flags: this.storable(flags),
     });
     return { path, uid: 900 + this.appended.length };
   }

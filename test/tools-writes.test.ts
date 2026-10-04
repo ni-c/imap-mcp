@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { call, connect, jsonOf, textOf, tokenOf } from './harness.js';
+import {
+  call,
+  connect,
+  defaultMailboxes,
+  jsonOf,
+  textOf,
+  tokenOf,
+} from './harness.js';
 import { message } from './fake-imap.js';
 
 const writeConfig = { readOnly: false };
@@ -105,6 +112,98 @@ describe('set_message_flags', () => {
     expect(
       harness.imap.calls.some((entry) => entry.name === 'messageFlagsAdd')
     ).toBe(false);
+    await harness.close();
+  });
+
+  it('refuses a keyword the mailbox does not store, and writes nothing', async () => {
+    const mailboxes = defaultMailboxes();
+    mailboxes[0]!.permanentFlags = new Set(['\\Seen', '\\Flagged']);
+    const harness = await connect({ config: writeConfig, mailboxes });
+    const result = await call(harness.client, 'set_message_flags', {
+      uids: [2],
+      add: ['Project'],
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('does not store Project');
+    expect(textOf(result)).toContain('get_server_info');
+    expect(
+      harness.imap.calls.some((entry) => entry.name === 'messageFlagsAdd')
+    ).toBe(false);
+    await harness.close();
+  });
+
+  it('writes nothing when only one of several flags is refused', async () => {
+    const mailboxes = defaultMailboxes();
+    mailboxes[0]!.permanentFlags = new Set(['\\Seen', '\\Flagged']);
+    const harness = await connect({ config: writeConfig, mailboxes });
+    const result = await call(harness.client, 'set_message_flags', {
+      uids: [2],
+      add: ['\\Flagged', 'Project'],
+      remove: ['AiSeen'],
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('does not store Project, so');
+    expect(
+      harness.imap.calls.some((entry) =>
+        ['messageFlagsAdd', 'messageFlagsRemove'].includes(entry.name)
+      )
+    ).toBe(false);
+    await harness.close();
+  });
+
+  it('accepts a listed system flag whatever its case', async () => {
+    const mailboxes = defaultMailboxes();
+    mailboxes[0]!.permanentFlags = new Set(['\\Seen', '\\Flagged']);
+    const harness = await connect({ config: writeConfig, mailboxes });
+    const result = await call(harness.client, 'set_message_flags', {
+      uids: [2],
+      add: ['\\flagged'],
+    });
+    expect(result.isError).toBeFalsy();
+    expect(
+      harness.imap.calls.some((entry) => entry.name === 'messageFlagsAdd')
+    ).toBe(true);
+    await harness.close();
+  });
+
+  it('removes a flag the mailbox does not list', async () => {
+    const mailboxes = defaultMailboxes();
+    mailboxes[0]!.permanentFlags = new Set(['\\Seen']);
+    const harness = await connect({ config: writeConfig, mailboxes });
+    const result = await call(harness.client, 'set_message_flags', {
+      uids: [2],
+      remove: ['AiSeen'],
+    });
+    expect(result.isError).toBeFalsy();
+    expect(jsonOf(result)).toMatchObject({ removed: ['AiSeen'] });
+    await harness.close();
+  });
+
+  it('adds any flag when the server sends no PERMANENTFLAGS', async () => {
+    const mailboxes = defaultMailboxes();
+    mailboxes[0]!.permanentFlags = false;
+    const harness = await connect({ config: writeConfig, mailboxes });
+    const result = await call(harness.client, 'set_message_flags', {
+      uids: [2],
+      add: ['Project'],
+    });
+    expect(result.isError).toBeFalsy();
+    expect(jsonOf(result)).toMatchObject({ added: ['Project'] });
+    await harness.close();
+  });
+
+  it('checks the mailbox it writes to, not one a read-only call left selected', async () => {
+    const harness = await connect({ config: writeConfig });
+    await call(harness.client, 'list_messages');
+    const result = await call(harness.client, 'set_message_flags', {
+      uids: [2],
+      add: ['Project'],
+    });
+    expect(result.isError).toBeFalsy();
+    expect(harness.imap.lockLog.at(-1)).toEqual({
+      path: 'INBOX',
+      readOnly: false,
+    });
     await harness.close();
   });
 });

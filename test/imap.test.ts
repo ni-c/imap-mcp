@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { MailError, ToolInputError } from '../src/errors.js';
-import { ImapClient, asMailError, withTimeout } from '../src/imap.js';
+import {
+  ImapClient,
+  asMailError,
+  canStoreFlag,
+  normalizeFlag,
+  withTimeout,
+} from '../src/imap.js';
 
 import { FakeImap, message } from './fake-imap.js';
 import { testConfig } from './harness.js';
@@ -323,5 +329,48 @@ describe('asMailError', () => {
 
   it('handles a thrown non-Error', () => {
     expect(asMailError('just a string').message).toContain('just a string');
+  });
+});
+
+describe('canStoreFlag', () => {
+  it('allows everything when the server sent no list', () => {
+    expect(canStoreFlag(undefined, 'Project')).toBe(true);
+    expect(canStoreFlag(false, '\\Draft')).toBe(true);
+  });
+
+  it('allows nothing on an empty list', () => {
+    expect(canStoreFlag(new Set(), '\\Seen')).toBe(false);
+    expect(canStoreFlag(new Set(), 'Project')).toBe(false);
+  });
+
+  it('allows any flag under \\*', () => {
+    expect(canStoreFlag(new Set(['\\*']), 'Project')).toBe(true);
+    expect(canStoreFlag(new Set(['\\*']), '\\Draft')).toBe(true);
+  });
+
+  it('matches a listed keyword exactly and refuses an unlisted one', () => {
+    const listed = new Set(['\\Seen', 'Project']);
+    expect(canStoreFlag(listed, 'Project')).toBe(true);
+    expect(canStoreFlag(listed, 'Other')).toBe(false);
+  });
+
+  it('compares system flags case-insensitively, keywords as written', () => {
+    const listed = new Set(['\\Seen', 'Project']);
+    expect(canStoreFlag(listed, '\\seen')).toBe(true);
+    expect(canStoreFlag(listed, '\\SEEN')).toBe(true);
+    expect(canStoreFlag(listed, 'project')).toBe(false);
+  });
+});
+
+describe('normalizeFlag', () => {
+  it('spells system flags the way imapflow sends them', () => {
+    expect(normalizeFlag('\\draft')).toBe('\\Draft');
+    expect(normalizeFlag('\\ANSWERED')).toBe('\\Answered');
+  });
+
+  it('leaves keywords and unknown backslash flags alone', () => {
+    expect(normalizeFlag('$Label1')).toBe('$Label1');
+    expect(normalizeFlag('\\Recent')).toBe('\\Recent');
+    expect(normalizeFlag('')).toBe('');
   });
 });

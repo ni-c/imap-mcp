@@ -22,7 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   select (`EXAMINE`) lists none on Dovecot, so a reply draft, or any draft saved
   after `list_messages`, `get_message`, `get_attachments` or the mailbox resource,
   landed without its flags and without an error. The Drafts folder is now
-  selected read-write for the append (#35).
+  selected read-write for the append. Reported and fixed by @alvarocarrera
+  (#35, #36).
+- `get_server_info` reports the flags the mailbox can store. It read them
+  through a read-only selection, which lists none on Dovecot, so it said the
+  new-mail keyword could not be stored while `list_new_messages` stored it fine.
+  It now also reports `permanent_flags_reported`, and a server that sends no
+  `PERMANENTFLAGS` at all no longer makes it, or `list_new_messages`, fail.
+- `set_message_flags` refuses a flag the mailbox does not store, and writes
+  nothing. imapflow dropped such a flag without an error, and the result still
+  listed it under `added`.
+- `save_draft` reports the flags the draft was stored with, and says so when the
+  Drafts folder does not store `\Draft` or `\Seen`.
 
 ## [0.5.1] - 2026-09-29
 
