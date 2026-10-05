@@ -1,5 +1,6 @@
 # imap-mcp
 
+[![AgentHub 已收录：IMAP mailbox](https://myagenthub.cn/badge/io.github.ni-c/imap-mcp)](https://myagenthub.cn/p/io.github.ni-c/imap-mcp)
 <!-- badges: start -->
 
 [![CI](https://img.shields.io/github/actions/workflow/status/ni-c/imap-mcp/ci.yml?branch=main&label=CI)](https://github.com/ni-c/imap-mcp/actions/workflows/ci.yml)
