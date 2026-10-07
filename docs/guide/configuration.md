@@ -37,14 +37,8 @@ IMAP_READ_ONLY=false   # registers the five mailbox write tools
 ```
 
 **It defaults to `true`**, unlike every other server in this family. That is not an
-oversight: this variable replaced `IMAP_ALLOW_WRITE`, which was opt-in, and a rename
-that quietly flipped the default would have handed write access to every
-installation that upgraded without reading the changelog. Only the literal string
-`false` turns it off.
-
-An installation that still sets `IMAP_ALLOW_WRITE` **refuses to start**, with a
-message naming the replacement. Ignoring it would leave someone believing a
-protection is in force when it is not.
+oversight: a mailbox is somebody's correspondence, and an installation that sets
+nothing should not be able to change it. Only the literal string `false` turns it off.
 
 <!-- The heading below is fixed: every repository uses "Choosing the tools that
      load", so /guide/configuration#choosing-the-tools-that-load is the same anchor

@@ -92,19 +92,12 @@ password sitting there for a crash reporter.
 
 This is the one place this server differs from the rest of the family, and it is
 deliberate. Everywhere else `<PREFIX>_READ_ONLY` defaults to `false` and you switch
-it on. Here the variable replaced `IMAP_ALLOW_WRITE`, which was **opt-in** — setting
-nothing meant no write access to a mailbox. Renaming it without keeping that default
-would have handed write access to every installation that upgraded without reading
-the changelog.
+it on. Here setting nothing means **no write access to a mailbox**: a mailbox is
+somebody's correspondence, and an installation that configured nothing should not be
+able to change it.
 
 Only the literal string `false` turns it off. `False`, `0` and `no` all leave the
 write tools unregistered, so a typo fails closed.
-
-::: danger IMAP_ALLOW_WRITE is gone
-An installation that still sets it **will not start**. Silently ignoring a removed
-security variable is worse than refusing: whoever set it once believes it is still in
-force. Set `IMAP_READ_ONLY=false` instead, or unset it and keep the read-only default.
-:::
 
 ## Narrowing the tool list
 
