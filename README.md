@@ -69,7 +69,7 @@ dropped on a best-effort basis (the fencing, not the stripping, is what carries 
 markdown image syntax — inline and reference style — is defused so a rendering client cannot be
 made to fetch a tracking URL.
 
-That covers folder names too, and it did not always: a folder name is chosen by whoever created
+That covers folder names too: a folder name is chosen by whoever created
 the folder, which on a shared mailbox is not necessarily you. `list_mailboxes` returns the name
 twice — `path` exactly as the server spelled it, because that is the handle every other tool
 takes, and `display_name` cleaned up for reading, with a warning on the entry when the two differ.
@@ -130,11 +130,6 @@ guard. See [Asking a person](https://imap-mcp.ni-c.de/guide/approval).
 Booleans are compared against the literal string `true`; `1`, `yes` and `True` are not true.
 `IMAP_READ_ONLY` is the mirror image: only the literal `false` turns it off, so a typo leaves
 the write tools unregistered.
-
-> **`IMAP_ALLOW_WRITE` is gone.** It has been replaced by `IMAP_READ_ONLY`, and an installation
-> that still sets it **refuses to start**. Silently ignoring a removed security variable is the
-> worst of the options: whoever set it once believes it is still in force. The default is
-> unchanged — writes are still off unless you ask for them.
 
 ### Choosing which tools load
 

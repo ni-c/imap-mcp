@@ -67,46 +67,42 @@ tag, hidden via a stylesheet class, or larger than the removal window survives i
 acceptable because nothing downstream trusts the stripping: whatever gets through still arrives
 inside the fence, marked line by line as untrusted.
 
-It is also a **single forward pass**, and that part is not a matter of taste. This section used to
-claim the pass was safe because its scan windows were bounded. They were, and it wasn't: bounding
-how far one removal may scan bounds one factor of a product whose other factor is how many
-removals an input can start. A body of `'<style '` repeated 73 000 times is 512 000 legal bytes
-that start 73 000 bounded scans and finish none of them, and the regex chain that used to sit here
-took **33 seconds** on it — on a single-threaded process whose transport is stdio, so the whole
-server, not just that call. The command timeout could not help: it wraps IMAP commands, not
-parsing, and a `setTimeout` cannot fire on a blocked event loop. Reachable with one ordinary mail
-that has a `text/html` part and no `text/plain` one, and again through a `text/html` attachment.
-The pass now walks the input once with cursors that never rewind, plus one global budget for the
-searches that look for a closing tag, so the number of start tokens no longer multiplies anything.
-The same input is now under 20 ms.
+It is also a **single forward pass**, and that part is not a matter of taste. Bounded scan windows
+are not enough: bounding how far one removal may scan bounds one factor of a product whose other
+factor is how many removals an input can start. A body of `'<style '` repeated 73 000 times is
+512 000 legal bytes that start 73 000 bounded scans and finish none of them — on a single-threaded
+process whose transport is stdio, so a stall there stops the whole server, not just that call. The
+command timeout cannot help: it wraps IMAP commands, not parsing, and a `setTimeout` cannot fire on
+a blocked event loop. Reachable with one ordinary mail that has a `text/html` part and no
+`text/plain` one, and again through a `text/html` attachment. So the pass walks the input once with
+cursors that never rewind, plus one global budget for the searches that look for a closing tag,
+and the number of start tokens multiplies nothing. That input takes under 20 ms.
 
-The injection heuristics below are held to the same rule, and one of them broke it. The pattern
-that looks for a fake delimiter — `---`, `===` or `###` before a word like `system` — began with an
-unbounded run and no anchor, so from every position inside a run of hyphens the engine tried
-every possible length before giving up: quadratic, 1.5 s on 40 000 hyphens, and the million
-characters an extracted document may carry would have taken about a quarter of an hour. That scan
-runs in this process on text the parser child has already handed back, so the child's timeout and
-memory ceiling were no help, and every size guard passed because a document of hyphens is a few
-kilobytes. The pattern is now anchored to the start of a run, which is linear, and
-`analyze.test.ts` times every pattern on a million characters of its own trigger. A pattern that
+The injection heuristics below are held to the same rule. A pattern that begins with an unbounded
+run and no anchor — the one that looks for a fake delimiter, `---`, `===` or `###` before a word
+like `system`, is the obvious candidate — makes the engine try every possible length from every
+position inside a run of hyphens: quadratic, and a quarter of an hour on the million characters an
+extracted document may carry. That scan runs in this process on text the parser child has already
+handed back, so the child's timeout and memory ceiling are no help, and every size guard passes
+because a document of hyphens is a few kilobytes. So the delimiter pattern is anchored to the start
+of a run, which is linear, and `analyze.test.ts` times every pattern on a million characters of its
+own trigger. A pattern that
 cannot pass that test does not go in the list.
 
 **Folder names are mailbox content too.** On a shared account, a public namespace or any mailbox
 somebody else can create a folder in, the name is chosen by whoever created it — and it reaches the
-model through `list_mailboxes` long before anyone opens a message. It used to reach it raw: not
-`sanitizeText`, not `sanitizeFilename`, nothing. So `list_mailboxes` now returns two strings per
-folder. `path` is verbatim, because it is the argument every other tool takes and a cleaned-up copy
+model through `list_mailboxes` long before anyone opens a message. So `list_mailboxes` returns two
+strings per folder. `path` is verbatim, because it is the argument every other tool takes and a cleaned-up copy
 would name a folder the server does not have; `display_name` is the copy that is safe to read and
 to quote, and where the two differ the entry says so and spells out the difference. The mailbox
 parameter refuses C0/C1 control characters outright. It does not refuse zero-width or
 directional-override characters: a folder with those in its name exists, and a parameter that
 rejected it would leave it unreadable and undeletable through this server.
 
-**Results have a stated size and now keep to it.** `MAX_RESULT_BYTES` used to be enforced only where
-a result was JSON. Everything else grows on the way out — defusing an image rewrites four characters
-into forty-four, the per-line datamarks add ten characters a line, and a thread listing carries up
-to fifty subjects and address lists the senders chose. `get_message(include_thread: true)` came to
-570 000 characters against a stated 200 000. The check now runs on the assembled text.
+**Results have a stated size and keep to it.** `MAX_RESULT_BYTES` is checked on the assembled
+text, not only where a result is JSON, because everything grows on the way out — defusing an image
+rewrites four characters into forty-four, the per-line datamarks add ten characters a line, and a
+thread listing carries up to fifty subjects and address lists the senders chose.
 
 The SPF/DKIM/DMARC verdicts are read from the topmost `Authentication-Results` header only —
 a receiving server that adds one prepends it — and come with the authserv-id and a `forgeable`
@@ -140,12 +136,12 @@ Tokens are random, single-use, expire after five minutes, and are bound to a SHA
 fingerprint of the sorted target set: a confirmation obtained for one message cannot be
 replayed for a longer list.
 
-The key also names the mailboxes, and how it names them matters. It used to join source and
-destination with `:`, and a mailbox name may contain one — the parameter allows it on purpose,
-because a folder somebody else created may have one. So `("Inbox:Old" → "Archive")` and
-`("Inbox" → "Old:Archive")` were the same key for the same messages, and a token or an accepted
-dialog for the first pair executed the second, a pair nobody had been asked about. The names are
-JSON-encoded now, for the move, the copy and the rename, and a test holds the two pairs apart.
+The key also names the mailboxes, and how it names them matters. A mailbox name may contain `:`
+— the parameter allows it on purpose, because a folder somebody else created may have one — so a
+key that joined source and destination with `:` would make `("Inbox:Old" → "Archive")` and
+`("Inbox" → "Old:Archive")` the same key for the same messages, and a token or an accepted dialog
+for the first pair would execute the second, a pair nobody had been asked about. The names are
+JSON-encoded instead, for the move, the copy and the rename, and a test holds the two pairs apart.
 
 `ELICITATION=false` moves a capable client onto that fallback deliberately, for a scheduled
 job or a test harness. It does not remove the guard — there is no setting in which a guarded
@@ -168,11 +164,6 @@ honoured. Both revisions of the protocol reach that code. `src/index.ts` serves 
 `serveStdio`, which negotiates `2025-11-25` or `2026-07-28` per connection; on the older revision
 the question never leaves the process, on the newer one it travels through the client as a return
 value and comes back with the answer, and the nonce is what makes the second trip worthless.
-
-An earlier version of this section said the newer revision was not reachable, because the server
-then used a `StdioServerTransport` pinned to 2025. That stopped being true in 0.3.0, and the
-sentence outlived the code by two releases — which is why this file is now read against `src/`
-claim by claim in every review.
 
 What is left, stated honestly: the record of spent nonces is per process. A restart forgets it, so
 a sealed answer captured before a restart and presented within its lifetime afterwards is accepted
@@ -220,13 +211,12 @@ that cannot be lied to: a Windows executable renamed `invoice.pdf` and declared
 `application/pdf` clears every other gate and fails there. The same applies when writing to
 disk, where a disguised binary is more dangerous than in a transcript, not less.
 
-The extension refusal is only as long as the extractor that feeds it. `appref-ms` and `application`
-sat in the blocklist while the pattern reading an extension out of a filename accepted neither a
-hyphen nor eleven characters, so both read as no extension at all — which makes the check skip
-rather than fail. A ClickOnce manifest declared `application/xml` is valid XML by every check that
-looks at bytes, so nothing else stopped it. A test now walks the whole blocklist and requires each
-entry to be refused, because two declarations that have to agree do not announce when they stop
-agreeing.
+The extension refusal is only as long as the extractor that feeds it. A blocklist entry such as
+`appref-ms` or `application` that the pattern reading an extension out of a filename cannot match —
+a hyphen, eleven characters — reads as no extension at all, which makes the check skip rather than
+fail, and a ClickOnce manifest declared `application/xml` is valid XML by every check that looks at
+bytes, so nothing else would stop it. A test walks the whole blocklist and requires each entry to
+be refused, because two declarations that have to agree do not announce when they stop agreeing.
 
 Writing to disk happens only when `IMAP_DOWNLOAD_DIR` is set. The directory comes solely from
 that variable, never from a tool argument; filenames are stripped of separators and directional
@@ -289,8 +279,8 @@ count is a number the sender wrote.
 **PDF streams are measured before PDF.js inflates them.** PDF.js decodes a stream into memory
 in full, that memory is a typed array no heap limit sees, and Deflate reaches a thousand to one
 on repetitive input — so a 3.4 MB attachment whose one content stream inflates to a gigabyte
-took the process to 2.1 GB resident within a second, and the timeout only decided when that
-stopped growing. A linear pass over the file now decodes every Flate, LZW and RunLength stream
+takes an unguarded process to 2.1 GB resident within a second, and a timeout only decides when
+that stops growing. A linear pass over the file decodes every Flate, LZW and RunLength stream
 (behind an ASCIIHex or ASCII85 wrapper or not) only as far as a ceiling — 32 MB for one
 stream, 128 MB for all of them — and refuses the document as "too large" the moment one
 crosses it. The work that costs is bounded by the ceiling, whatever the file holds. Streams are
