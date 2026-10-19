@@ -339,13 +339,14 @@ security bump.
 
 That happened. **CVE-2026-16633** (GHSA-hq66-cqwq-w95j, high): PDF.js from 5.6.83 before 6.2.108
 executes attacker-controlled JavaScript on opening a malicious PDF when `enableScripting` is on,
-which it is by default. unpdf 1.8.1 — the current release — bundles PDF.js 6.1.200, inside that
-range, and no scanner said so. The vulnerable path is the annotation layer: it binds a form field's
-JavaScript actions to DOM events and dispatches them into the viewer's sandbox, gated by
+which it is by default. unpdf 1.8.1, which 0.5.2 and earlier ship, bundles PDF.js 6.1.200, inside
+that range, and no scanner said so. The vulnerable path is the annotation layer: it binds a form
+field's JavaScript actions to DOM events and dispatches them into the viewer's sandbox, gated by
 `enableScripting` and `hasJSActions`. This server renders no annotation layer, no form and no DOM;
 it calls the five functions named above and nothing else, and `test/review.test.ts` now holds
 `src/extract/pdf.ts` to that set — no `getAnnotations`, `getJSActions`, `AnnotationLayer`,
-`enableScripting` or `render`. The same test pins the bundled PDF.js version, so the next unpdf
-release fails it and this paragraph is revisited rather than outlived. Until unpdf moves to
-6.2.108 or later, the reasoning above is the whole defence, and it is written down so it can be
-checked.
+`enableScripting` or `render`. That reasoning was the whole defence until 0.5.3, which moves to
+unpdf 1.9.0 and with it PDF.js 6.4.299, outside the range; no published advisory covers that
+version. The call-set test stays, because the next advisory will not announce itself either. The
+same test pins the bundled PDF.js version, so the next unpdf release fails it and this paragraph
+is revisited rather than outlived.
