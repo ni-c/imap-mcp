@@ -881,17 +881,17 @@ describe('supply chain (7.x) and the pdf.js surface', () => {
   });
 
   it('pins the pdf.js unpdf bundles, so a bump is a decision', async () => {
-    // CVE-2026-16633 (pdf.js 5.6.83 to 6.2.107): scripting attached to form
-    // fields by the annotation layer, which this server never renders. The
-    // note in SECURITY.md is written against this exact version; when unpdf
-    // moves, this test fails so the note is revisited rather than outlived.
+    // No advisory covers the bundled pdf.js 6.4.299; CVE-2026-16633 (5.6.83 to
+    // 6.2.107) was fixed by moving to unpdf 1.9.0. The note in SECURITY.md is
+    // written against this exact version; when unpdf moves, this test fails so
+    // the note is revisited rather than outlived.
     const pkg = JSON.parse(
       await readFile(
         new URL('../node_modules/unpdf/package.json', import.meta.url),
         'utf-8'
       )
     ) as { version: string; devDependencies: Record<string, string> };
-    expect(pkg.version).toBe('1.8.1');
-    expect(pkg.devDependencies['pdfjs-dist']).toBe('~6.1.200');
+    expect(pkg.version).toBe('1.9.0');
+    expect(pkg.devDependencies['pdfjs-dist']).toBe('~6.4.299');
   });
 });
