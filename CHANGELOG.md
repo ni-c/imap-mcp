@@ -12,6 +12,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      last in the file so the link definitions come along. -->
 <!-- #region changelog -->
 
+## [0.5.3] - 2026-10-19
+
+### Security
+
+- **PDF.js 6.4.299, as bundled by unpdf 1.9.0.** The PDF.js that 0.5.2 shipped
+  (6.1.200, inside unpdf 1.8.1) is in the range of CVE-2026-16633
+  (GHSA-hq66-cqwq-w95j), which runs a document's form-field JavaScript through
+  the annotation layer. This server never renders that layer, so the vulnerable
+  path was not reachable, but that argument was the whole defence. The bundled
+  version is now outside the range, and no published advisory covers it.
+  unpdf vendors PDF.js, so no scanner raises this; the note in `SECURITY.md`
+  was rewritten.
+
+### Changed
+
+- Runtime dependencies refreshed: `@modelcontextprotocol/server` 2.3.1,
+  `imapflow` 2.4.3, `mailparser` 3.9.39, `zod` 4.6.7, `ip-address` 10.7.3, and
+  a newer `node:24-alpine` digest for the Docker image.
+
 ## [0.5.2] - 2026-10-04
 
 ### Fixed
@@ -649,6 +668,7 @@ package page for the first time — including the parts that changed weeks ago.
 - Every change to the mailbox is logged to stderr with UIDs and folder, never
   subjects.
 
+[0.5.3]: https://github.com/ni-c/imap-mcp/releases/tag/v0.5.3
 [0.5.2]: https://github.com/ni-c/imap-mcp/releases/tag/v0.5.2
 [0.5.1]: https://github.com/ni-c/imap-mcp/releases/tag/v0.5.1
 [0.5.0]: https://github.com/ni-c/imap-mcp/releases/tag/v0.5.0
