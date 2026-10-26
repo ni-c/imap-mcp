@@ -882,7 +882,8 @@ describe('supply chain (7.x) and the pdf.js surface', () => {
 
   it('pins the pdf.js unpdf bundles, so a bump is a decision', async () => {
     // No advisory covers the bundled pdf.js 6.4.299; CVE-2026-16633 (5.6.83 to
-    // 6.2.107) was fixed by moving to unpdf 1.9.0. The note in SECURITY.md is
+    // 6.2.107) was fixed by moving to unpdf 1.9.0, and 1.9.1 (a getMeta fix)
+    // bundles the same pdf.js. The note in SECURITY.md is
     // written against this exact version; when unpdf moves, this test fails so
     // the note is revisited rather than outlived.
     const pkg = JSON.parse(
@@ -891,7 +892,7 @@ describe('supply chain (7.x) and the pdf.js surface', () => {
         'utf-8'
       )
     ) as { version: string; devDependencies: Record<string, string> };
-    expect(pkg.version).toBe('1.9.0');
+    expect(pkg.version).toBe('1.9.1');
     expect(pkg.devDependencies['pdfjs-dist']).toBe('~6.4.299');
   });
 });

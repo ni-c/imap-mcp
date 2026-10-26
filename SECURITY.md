@@ -347,6 +347,7 @@ it calls the five functions named above and nothing else, and `test/review.test.
 `src/extract/pdf.ts` to that set — no `getAnnotations`, `getJSActions`, `AnnotationLayer`,
 `enableScripting` or `render`. That reasoning was the whole defence until 0.5.3, which moves to
 unpdf 1.9.0 and with it PDF.js 6.4.299, outside the range; no published advisory covers that
-version. The call-set test stays, because the next advisory will not announce itself either. The
+version. unpdf 1.9.1, a metadata fix, still bundles PDF.js 6.4.299 (checked 2026-10-26 against
+the advisory database: no `pdfjs-dist` advisory covers it). The call-set test stays, because the next advisory will not announce itself either. The
 same test pins the bundled PDF.js version, so the next unpdf release fails it and this paragraph
 is revisited rather than outlived.
