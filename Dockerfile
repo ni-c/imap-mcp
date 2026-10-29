@@ -1,14 +1,14 @@
 # Build stage
 #
-# node:24-alpine is the ACTIVE LTS line, not the newest tag — roughly half of all
+# node:26-alpine is the ACTIVE LTS line, not the newest tag — roughly half of all
 # Node majors never become LTS, so "newest" and "supported" are different things.
 # Only the major belongs in this note. A patch version written here would be
 # falsified by the next digest bump, which would arrive red for a reason nobody
 # needs to act on. CI checks the claim instead, on every run
 # (.github/scripts/check-base-image-pin.sh): `node:lts-alpine` and
-# `node:24-alpine` must resolve to the same digest, and the digest pinned below
-# must be a Node 24 image. The day 24 leaves LTS, that fails.
-FROM node:24-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53 AS build
+# `node:26-alpine` must resolve to the same digest, and the digest pinned below
+# must be a Node 26 image. The day 26 leaves LTS, that fails.
+FROM node:26-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94 AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts
@@ -17,16 +17,9 @@ COPY src ./src
 RUN npm run build && npm prune --omit=dev --ignore-scripts
 
 # Runtime
-FROM node:24-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53
+FROM node:26-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94
 WORKDIR /app
 ENV NODE_ENV=production
-
-# The pinned digest is the newest node:24-alpine, and it still ships OpenSSL
-# 3.5.7-r0 — CVE-2026-14456, unbounded memory growth, fixed in 3.5.8-r0. Named
-# packages only: a blanket `apk upgrade` would move every package in the image
-# and throw away the reproducibility the digest is pinned for. Drop this line
-# once the base image carries 3.5.8-r0 or later.
-RUN apk add --no-cache --upgrade libcrypto3 libssl3
 
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
