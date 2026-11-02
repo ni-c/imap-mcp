@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Require Node.js 24 or newer. CI tests the latest 24 and 26 LTS releases; Node 22 is no longer supported.
+- unpdf 2.1.0 (from 1.9.1). unpdf 2 is ESM only and needs Node 24, which is why the
+  floor moved. It bundles the same PDF.js 6.4.299, outside every published advisory.
+  Its other changes (image extraction, rendering formats, CMaps and fonts loaded from an
+  installed `pdfjs-dist`) do not touch this server, which only opens documents with
+  `getDocumentProxy` and extracts text, and installs no `pdfjs-dist`.
 
 ## [0.5.3] - 2026-10-19
 
