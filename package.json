@@ -36,7 +36,7 @@
     "!dist/**/*.map"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "scripts": {
     "prepublishOnly": "npm run lint && npm run typecheck && npm run build && npm test",

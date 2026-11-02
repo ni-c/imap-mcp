@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Node.js ≥ 22
+- Node.js ≥ 24
 - An IMAP mailbox, and credentials for it. Where the provider offers **app
   passwords**, use one: it is scoped to this server and revocable on its own.
 

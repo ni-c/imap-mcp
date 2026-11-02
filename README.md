@@ -98,7 +98,7 @@ guard. See [Asking a person](https://imap-mcp.ni-c.de/guide/approval).
 
 ## Requirements
 
-- Node.js 22 or newer
+- Node.js 24 or newer
 - An IMAP account. Providers with two-factor authentication generally need an app-specific
   password.
 
