@@ -82,6 +82,22 @@ that a broad query will be fast.
 
 See [Google's IMAP extensions](https://developers.google.com/workspace/gmail/imap/imap-extensions#extension_of_the_search_command_x-gm-raw).
 
+## Conversations
+
+`get_message` with `include_thread: true` lists the conversation the message
+belongs to, newest first and at most 50; when there are more, `thread_truncated`
+says how many. Only messages in the selected mailbox are listed — select the
+`\All` folder on Gmail to see sent replies and archived mail as well.
+
+On Gmail (`X-GM-EXT-1`) the conversation is Gmail's own, the one its web interface
+shows, found with a single `X-GM-THRID` search. That is also the fast path: on a
+large All Mail folder the header search below can take longer than a client waits,
+and Gmail's header search does not always find a message that names the original
+in its `References`. Everywhere else the conversation is rebuilt from the
+`Message-ID`, `References` and `In-Reply-To` chain of the message. A thread id that
+does not look like one, or a thread search that comes back empty, falls back to
+that chain.
+
 ## Reading a document
 
 `get_attachments` takes a `mode`. `auto` reads small text and images inline, saves to

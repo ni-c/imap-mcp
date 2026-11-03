@@ -21,8 +21,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and confined to the selected mailbox; a server that does not advertise `X-GM-EXT-1` gets
   an error before anything is searched. Contributed by @juriSacchetta (#72).
 
+### Changed
+
+- On Gmail, `get_message` with `include_thread` lists Gmail's own conversation, found
+  with one `X-GM-THRID` search, instead of rebuilding it from the `References` chain.
+  On a large All Mail folder the header search could outlast the client's timeout, and
+  it missed replies Gmail itself groups into the conversation. Other servers keep the
+  header search. Contributed by @juriSacchetta (#73).
+
 ### Fixed
 
+- A conversation longer than 50 messages listed its oldest 50, without saying so. The
+  newest 50 are listed now, and `thread_truncated` gives the total.
+- A thread id that is missing or malformed falls back to the `References` chain instead
+  of reaching the server as a search with no criterion. A thread search that comes back
+  empty or refused does the same.
 - A search the mail server refuses is reported as an error. `list_messages` and
   `list_new_messages` read the refusal as "nothing matched".
 

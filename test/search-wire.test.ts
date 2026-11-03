@@ -1,4 +1,5 @@
 import type { ImapFlow, SearchObject } from 'imapflow';
+import fetchCommand from 'imapflow/lib/commands/fetch.js';
 import compile from 'imapflow/lib/handler/imap-compiler.js';
 import { searchCompiler } from 'imapflow/lib/search-compiler.js';
 import { describe, expect, it } from 'vitest';
@@ -103,6 +104,78 @@ describe('gmail_query on the wire', () => {
   it('refuses a key it does not know, so a renamed one cannot widen the search', () => {
     expect(() => wire({ gmrow: 'x' } as unknown as SearchObject)).toThrow(
       expect.objectContaining({ code: 'InvalidSearchQuery' })
+    );
+  });
+});
+
+/** The FETCH imapflow writes, stopped at the socket. */
+async function fetchWire(capabilities: string[]): Promise<string> {
+  const connection = {
+    ...server(capabilities),
+    states: { SELECTED: 3 },
+    state: 3,
+    mailbox: { path: 'INBOX' },
+    log: { warn: () => undefined, debug: () => undefined },
+    exec: async (command: string, attributes: Attributes) => {
+      sent = compile({ tag: 'A1', command, attributes }).toString('utf8');
+      throw new Error('stopped at the socket');
+    },
+  } as unknown as ImapFlow;
+  let sent = '';
+  await fetchCommand(
+    connection,
+    '1',
+    { uid: true, envelope: true, threadId: true },
+    { uid: true }
+  ).catch(() => undefined);
+  return sent;
+}
+
+describe('the Gmail thread lookup on the wire', () => {
+  // An X-GM-THRID of realistic size, well past 2^53: it has to stay a string
+  // end to end.
+  const THREAD = '1234567890123456789';
+
+  it('searches X-GM-THRID on Gmail', () => {
+    expect(wire({ threadId: THREAD })).toEqual([
+      `A1 UID SEARCH X-GM-THRID ${THREAD}`,
+    ]);
+  });
+
+  it('searches THREADID where OBJECTID is advertised as well', () => {
+    expect(
+      wire({ threadId: THREAD }, server(['OBJECTID', 'X-GM-EXT-1']))
+    ).toEqual([`A1 UID SEARCH THREADID ${THREAD}`]);
+  });
+
+  it('refuses a thread search on a server with neither extension', () => {
+    expect(() => wire({ threadId: THREAD }, server(['IMAP4rev1']))).toThrow(
+      expect.objectContaining({ code: 'MissingServerExtension' })
+    );
+  });
+
+  it.each([false, ''])(
+    'compiles the falsy id %j to a SEARCH with no criterion, which is why the tool checks its shape',
+    (threadId) => {
+      expect(wire({ threadId } as unknown as SearchObject)).toEqual([
+        'A1 UID SEARCH',
+      ]);
+    }
+  );
+
+  it('asks Gmail for X-GM-THRID alongside the envelope', async () => {
+    expect(await fetchWire(['X-GM-EXT-1'])).toContain('X-GM-THRID');
+  });
+
+  it('asks an OBJECTID server for THREADID instead', async () => {
+    const sent = await fetchWire(['OBJECTID', 'X-GM-EXT-1']);
+    expect(sent).toContain('THREADID');
+    expect(sent).not.toContain('X-GM-THRID');
+  });
+
+  it('asks a server with neither extension for no thread id, rather than failing', async () => {
+    expect(await fetchWire(['IMAP4rev1'])).toBe(
+      'A1 UID FETCH 1 (UID ENVELOPE)'
     );
   });
 });

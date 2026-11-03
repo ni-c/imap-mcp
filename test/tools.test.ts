@@ -679,6 +679,18 @@ describe('list_new_messages', () => {
   });
 });
 
+const threadOf = (result: Awaited<ReturnType<typeof call>>) =>
+  result.structuredContent as {
+    thread: Array<{ uid: number }>;
+    thread_truncated?: { shown: number; total: number };
+  };
+const searches = (harness: Awaited<ReturnType<typeof connect>>) =>
+  harness.imap.calls
+    .filter((entry) => entry.name === 'search')
+    .map((entry) => entry.args[0] as Record<string, unknown>);
+const linked = (uid: number) =>
+  message(uid, { messageId: `<m${uid}@example.net>`, threadId: '123' });
+
 describe('get_message', () => {
   it('uses Gmail thread IDs to find only messages in the conversation', async () => {
     const harness = await connect({
@@ -708,6 +720,191 @@ describe('get_message', () => {
     ).toEqual([{ name: 'search', args: [{ threadId: '123' }] }]);
     await harness.close();
   });
+
+  it('falls back to the References chain when Gmail returns no thread id', async () => {
+    const harness = await connect({
+      mailboxes: [
+        {
+          path: 'INBOX',
+          messages: [message(1, { messageId: '<m1@example.net>' })],
+        },
+      ],
+    });
+    harness.imap.capabilities.set('X-GM-EXT-1', true);
+    const result = await call(harness.client, 'get_message', {
+      uid: 1,
+      include_thread: true,
+    });
+    expect(result.isError).not.toBe(true);
+    expect(searches(harness)).toEqual([
+      expect.objectContaining({ or: expect.any(Array) }),
+    ]);
+    expect(threadOf(result).thread_truncated).toBeUndefined();
+    await harness.close();
+  });
+
+  it.each([false, '', '1\r\n2', 'abc', '1'.repeat(21)])(
+    'does not search for the malformed thread id %j',
+    async (threadId) => {
+      // imapflow reports a missing X-GM-THRID as false, and a falsy id compiles
+      // to a SEARCH with no criterion at all.
+      const harness = await connect({
+        mailboxes: [
+          {
+            path: 'INBOX',
+            messages: [
+              message(1, {
+                messageId: '<m1@example.net>',
+                threadId: threadId as string,
+              }),
+            ],
+          },
+        ],
+      });
+      harness.imap.capabilities.set('X-GM-EXT-1', true);
+      await call(harness.client, 'get_message', {
+        uid: 1,
+        include_thread: true,
+      });
+      expect(searches(harness).some((query) => 'threadId' in query)).toBe(
+        false
+      );
+      expect(searches(harness)).toEqual([
+        expect.objectContaining({ or: expect.any(Array) }),
+      ]);
+      await harness.close();
+    }
+  );
+
+  it('takes the References chain on a server with OBJECTID but no Gmail extension', async () => {
+    const harness = await connect({
+      mailboxes: [{ path: 'INBOX', messages: [linked(1), linked(2)] }],
+    });
+    harness.imap.capabilities.set('OBJECTID', true);
+    await call(harness.client, 'get_message', { uid: 1, include_thread: true });
+    expect(searches(harness).some((query) => 'threadId' in query)).toBe(false);
+    await harness.close();
+  });
+
+  it.each([
+    ['refused', false],
+    ['empty', []],
+  ] as const)(
+    'falls back to the References chain when the Gmail thread search comes back %s',
+    async (_label, answer) => {
+      const harness = await connect({
+        mailboxes: [{ path: 'INBOX', messages: [linked(1), linked(2)] }],
+      });
+      harness.imap.capabilities.set('X-GM-EXT-1', true);
+      const original = harness.imap.search.bind(harness.imap);
+      vi.spyOn(harness.imap, 'search').mockImplementation(
+        async (query, options) =>
+          query.threadId === undefined
+            ? original(query, options)
+            : (answer as false | number[])
+      );
+      const result = await call(harness.client, 'get_message', {
+        uid: 1,
+        include_thread: true,
+      });
+      expect(result.isError).not.toBe(true);
+      const queries = vi
+        .mocked(harness.imap.search)
+        .mock.calls.map(([query]) => query);
+      expect(queries).toEqual([
+        { threadId: '123' },
+        expect.objectContaining({ or: expect.any(Array) }),
+      ]);
+      expect(threadOf(result).thread.map((entry) => entry.uid)).toEqual([2, 1]);
+      await harness.close();
+    }
+  );
+
+  it('searches for a Gmail thread id of the full twenty digits', async () => {
+    const id = '18446744073709551615';
+    const harness = await connect({
+      mailboxes: [
+        {
+          path: 'INBOX',
+          messages: [
+            message(1, { messageId: '<m1@example.net>', threadId: id }),
+          ],
+        },
+      ],
+    });
+    harness.imap.capabilities.set('X-GM-EXT-1', true);
+    await call(harness.client, 'get_message', { uid: 1, include_thread: true });
+    expect(searches(harness)).toEqual([{ threadId: id }]);
+    await harness.close();
+  });
+
+  it('lists no thread when Gmail finds nothing and the message carries no chain', async () => {
+    const harness = await connect({
+      mailboxes: [
+        { path: 'INBOX', messages: [message(1, { threadId: '123' })] },
+      ],
+    });
+    harness.imap.capabilities.set('X-GM-EXT-1', true);
+    vi.spyOn(harness.imap, 'search').mockResolvedValue([]);
+    const result = await call(harness.client, 'get_message', {
+      uid: 1,
+      include_thread: true,
+    });
+    expect(result.isError).not.toBe(true);
+    expect(threadOf(result).thread).toEqual([]);
+    expect(threadOf(result).thread_truncated).toBeUndefined();
+    await harness.close();
+  });
+
+  it.each([
+    [50, undefined],
+    [51, { shown: 50, total: 51 }],
+  ])(
+    'with %i messages in the conversation reports truncation as %j',
+    async (count, truncated) => {
+      const messages = Array.from({ length: count }, (_unused, index) =>
+        linked(index + 1)
+      );
+      const harness = await connect({
+        mailboxes: [{ path: 'INBOX', messages }],
+      });
+      harness.imap.capabilities.set('X-GM-EXT-1', true);
+      const result = await call(harness.client, 'get_message', {
+        uid: count,
+        include_thread: true,
+      });
+      expect(threadOf(result).thread).toHaveLength(50);
+      expect(threadOf(result).thread_truncated).toEqual(truncated);
+      await harness.close();
+    }
+  );
+
+  it.each([
+    ['a Gmail conversation', true],
+    ['the References chain', false],
+  ])(
+    'lists the newest fifty messages of a long thread from %s and says how many there are',
+    async (_label, gmail) => {
+      const messages = Array.from({ length: 60 }, (_unused, index) =>
+        linked(index + 1)
+      );
+      const harness = await connect({
+        mailboxes: [{ path: 'INBOX', messages }],
+      });
+      if (gmail) harness.imap.capabilities.set('X-GM-EXT-1', true);
+      const result = await call(harness.client, 'get_message', {
+        uid: 60,
+        include_thread: true,
+      });
+      const content = threadOf(result);
+      expect(content.thread.map((entry) => entry.uid)).toEqual(
+        Array.from({ length: 50 }, (_unused, index) => 60 - index)
+      );
+      expect(content.thread_truncated).toEqual({ shown: 50, total: 60 });
+      expect(textOf(result)).toContain('the newest 50 are listed');
+      await harness.close();
+    }
+  );
 
   it('keeps header search for servers without Gmail extensions', async () => {
     const harness = await connect();
