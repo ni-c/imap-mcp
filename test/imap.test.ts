@@ -309,6 +309,20 @@ async function* rows() {
   yield { uid: 1, seq: 1 } as never;
 }
 
+// oxlint-disable-next-line require-yield -- an empty FETCH yields nothing
+async function* noRows() {}
+
+async function* oddRows() {
+  yield { uid: 1.5, seq: 1 } as never;
+  yield { uid: Number.NaN, seq: 2 } as never;
+  yield { uid: 2, seq: 3 } as never;
+}
+
+async function* stalledRows() {
+  yield { uid: 1, seq: 1 } as never;
+  await new Promise(() => undefined);
+}
+
 describe('connection hardening', () => {
   it('closes the connection on its own timeout and does not run the call again', async () => {
     vi.useFakeTimers();
@@ -424,6 +438,30 @@ describe('connection hardening', () => {
   it('keeps only the FETCH rows that were asked for', async () => {
     const found = await collectFetch(rows(), [1]);
     expect(found.map((row) => row.uid)).toEqual([1]);
+  });
+
+  it('keeps nothing when nothing was asked for, or nothing came', async () => {
+    expect(await collectFetch(rows(), [])).toEqual([]);
+    expect(await collectFetch(noRows(), [1, 2])).toEqual([]);
+  });
+
+  it('drops a row whose UID is not a whole number', async () => {
+    const found = await collectFetch(oddRows(), [1, 2]);
+    expect(found.map((row) => row.uid)).toEqual([2]);
+  });
+
+  it('gives up on a FETCH that never ends', async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = collectFetch(stalledRows(), [1]);
+      const settled = expect(pending).rejects.toMatchObject({
+        code: COMMAND_TIMEOUT,
+      });
+      await vi.advanceTimersByTimeAsync(31_000);
+      await settled;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('waits for a connect in flight before closing', async () => {

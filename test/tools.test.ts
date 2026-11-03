@@ -572,6 +572,63 @@ describe('list_messages', () => {
     await harness.close();
   });
 
+  it('pages on from what the budget kept, so no dropped message is skipped', async () => {
+    // Fifty 10 kB summaries against a 200 kB budget: the older end of the page
+    // is dropped. An offset computed from the page asked for would page past it.
+    const harness = await connect({
+      mailboxes: [
+        {
+          path: 'INBOX',
+          messages: Array.from({ length: 50 }, (_unused, index) =>
+            bulkyMessage(index + 1)
+          ),
+        },
+      ],
+    });
+    type Page = {
+      returned: number;
+      next_offset?: number;
+      truncated?: { follow_up: string };
+      messages: Array<{ uid: number }>;
+    };
+    const first = jsonOf(
+      await call(harness.client, 'list_messages', { limit: 50 })
+    ) as Page;
+    expect(first.returned).toBeGreaterThan(0);
+    expect(first.returned).toBeLessThan(50);
+    expect(first.next_offset).toBe(first.returned);
+    expect(first.truncated?.follow_up).toContain(`offset=${first.returned}`);
+
+    const seen: number[] = [];
+    let offset: number | undefined = 0;
+    for (let round = 0; offset !== undefined && round < 50; round++) {
+      const page = jsonOf(
+        await call(harness.client, 'list_messages', { limit: 50, offset })
+      ) as Page;
+      seen.push(...page.messages.map((m) => m.uid));
+      offset = page.next_offset;
+    }
+    expect(offset).toBeUndefined();
+    expect(seen).toEqual(Array.from({ length: 50 }, (_unused, i) => 50 - i));
+    await harness.close();
+  });
+
+  it('names no next offset for an empty mailbox', async () => {
+    const harness = await connect({
+      mailboxes: [{ path: 'INBOX', messages: [] }],
+    });
+    const payload = jsonOf(await call(harness.client, 'list_messages')) as {
+      total_matching: number;
+      returned: number;
+      next_offset?: number;
+      truncated?: unknown;
+    };
+    expect(payload).toMatchObject({ total_matching: 0, returned: 0 });
+    expect(payload.next_offset).toBeUndefined();
+    expect(payload.truncated).toBeUndefined();
+    await harness.close();
+  });
+
   it('rejects a mailbox name carrying a command break', async () => {
     const harness = await connect();
     const result = await call(harness.client, 'list_messages', {
@@ -634,6 +691,77 @@ describe('list_new_messages', () => {
     );
     expect(stores).toHaveLength(1);
     expect(stores[0]?.args[1]).toEqual(['AiSeen']);
+    await harness.close();
+  });
+
+  it('tags only what the budget let through, and the rest comes back', async () => {
+    // Tagging before the budget marked the dropped messages as handed over, so
+    // they never came back.
+    const harness = await connect({
+      mailboxes: [
+        {
+          path: 'INBOX',
+          messages: Array.from({ length: 50 }, (_unused, index) =>
+            bulkyMessage(index + 1)
+          ),
+        },
+      ],
+    });
+    type Batch = {
+      total_new: number;
+      returned: number;
+      marked: number;
+      more_waiting: boolean;
+      messages: Array<{ uid: number }>;
+    };
+    const first = jsonOf(
+      await call(harness.client, 'list_new_messages', { limit: 50 })
+    ) as Batch;
+    expect(first.total_new).toBe(50);
+    expect(first.returned).toBeGreaterThan(0);
+    expect(first.returned).toBeLessThan(50);
+    expect(first.marked).toBe(first.returned);
+    expect(first.more_waiting).toBe(true);
+    const stores = harness.imap.calls.filter(
+      (entry) => entry.name === 'messageFlagsAdd'
+    );
+    expect(stores).toHaveLength(1);
+    expect(stores[0]?.args[0]).toEqual(first.messages.map((m) => m.uid));
+
+    const handed = first.messages.map((m) => m.uid);
+    let waiting = first.more_waiting;
+    for (let round = 0; waiting && round < 50; round++) {
+      const batch = jsonOf(
+        await call(harness.client, 'list_new_messages', { limit: 50 })
+      ) as Batch;
+      expect(batch.marked).toBe(batch.returned);
+      handed.push(...batch.messages.map((m) => m.uid));
+      waiting = batch.more_waiting;
+    }
+    expect(waiting).toBe(false);
+    expect(handed.toSorted((a, b) => b - a)).toEqual(
+      Array.from({ length: 50 }, (_unused, i) => 50 - i)
+    );
+    await harness.close();
+  });
+
+  it('tags nothing and waits for nothing when nothing is new', async () => {
+    const harness = await connect({
+      mailboxes: [{ path: 'INBOX', messages: [] }],
+    });
+    const payload = jsonOf(await call(harness.client, 'list_new_messages')) as {
+      total_new: number;
+      marked: number;
+      more_waiting: boolean;
+    };
+    expect(payload).toMatchObject({
+      total_new: 0,
+      marked: 0,
+      more_waiting: false,
+    });
+    expect(
+      harness.imap.calls.some((entry) => entry.name === 'messageFlagsAdd')
+    ).toBe(false);
     await harness.close();
   });
 

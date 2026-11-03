@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildDraft, encodeHeaderValue } from '../src/draft.js';
+import { buildDraft, encodeHeaderValue, fromIsAddress } from '../src/draft.js';
 import { parseThreadHeaders, referenceChain } from '../src/imap.js';
 import { ToolInputError } from '../src/errors.js';
 
@@ -733,5 +733,18 @@ describe('save_draft', () => {
     expect(result.isError).toBe(true);
     expect(harness.imap.appended).toHaveLength(0);
     await harness.close();
+  });
+});
+
+describe('fromIsAddress', () => {
+  it('accepts a bare address and nothing around it', () => {
+    expect(fromIsAddress('alice@example.org')).toBe(true);
+    expect(fromIsAddress('')).toBe(false);
+    expect(fromIsAddress('alice')).toBe(false);
+    expect(fromIsAddress(' alice@example.org')).toBe(false);
+    expect(fromIsAddress('alice@example.org\r\nBcc: eve@example.org')).toBe(
+      false
+    );
+    expect(fromIsAddress('Alice <alice@example.org>')).toBe(false);
   });
 });

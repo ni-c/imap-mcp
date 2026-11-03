@@ -753,6 +753,9 @@ describe('the download deadline', () => {
     expect(downloadDeadline(0)).toBe(30_000);
     expect(downloadDeadline(1)).toBe(40_000);
     expect(downloadDeadline(25 * 1024 * 1024)).toBe(280_000);
+    // A started MiB counts whole: on the boundary, and one byte past it.
+    expect(downloadDeadline(1024 * 1024)).toBe(40_000);
+    expect(downloadDeadline(1024 * 1024 + 1)).toBe(50_000);
   });
 });
 
