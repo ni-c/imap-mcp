@@ -465,6 +465,44 @@ describe('list_messages', () => {
     }
   );
 
+  it('accepts a Gmail query of exactly 256 characters and forwards it unchanged', async () => {
+    const harness = await connect();
+    harness.imap.capabilities.set('X-GM-EXT-1', true);
+    const search = vi.spyOn(harness.imap, 'search').mockResolvedValue([]);
+    const gmailQuery = 'x'.repeat(256);
+    const result = await call(harness.client, 'list_messages', {
+      gmail_query: gmailQuery,
+    });
+    expect(result.isError).not.toBe(true);
+    expect(search).toHaveBeenCalledWith({ gmraw: gmailQuery }, { uid: true });
+    await harness.close();
+  });
+
+  it('reports a Gmail query the server refused as an error, not as no matches', async () => {
+    const harness = await connect();
+    harness.imap.capabilities.set('X-GM-EXT-1', true);
+    vi.spyOn(harness.imap, 'search').mockResolvedValue(false);
+    const result = await call(harness.client, 'list_messages', {
+      gmail_query: 'from:(',
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('refused');
+    expect(textOf(result)).toContain('gmail_query');
+    expect(textOf(result)).not.toContain('total_matching');
+    await harness.close();
+  });
+
+  it('reports a refused standard search as an error too', async () => {
+    const harness = await connect();
+    vi.spyOn(harness.imap, 'search').mockResolvedValue(false);
+    const result = await call(harness.client, 'list_messages', {
+      subject: 'invoice',
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('refused');
+    await harness.close();
+  });
+
   it('returns summaries newest first', async () => {
     const harness = await connect();
     const payload = jsonOf(await call(harness.client, 'list_messages')) as {
@@ -575,6 +613,18 @@ describe('list_new_messages', () => {
       total_new: number;
     };
     expect(second.total_new).toBe(0);
+    await harness.close();
+  });
+
+  it('reports a refused search instead of claiming nothing is new', async () => {
+    const harness = await connect();
+    vi.spyOn(harness.imap, 'search').mockResolvedValue(false);
+    const result = await call(harness.client, 'list_new_messages');
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('refused');
+    expect(
+      harness.imap.calls.some((entry) => entry.name === 'messageFlagsAdd')
+    ).toBe(false);
     await harness.close();
   });
 
@@ -737,6 +787,18 @@ describe('get_message', () => {
     // Dropped whole entries with a way to get the rest, rather than silently.
     expect(text).toContain('"truncated"');
     expect(text).toContain('list_messages');
+    await harness.close();
+  });
+
+  it('still returns the message when the server refuses the thread search', async () => {
+    const harness = await connect();
+    const search = vi.spyOn(harness.imap, 'search').mockResolvedValue(false);
+    const result = await call(harness.client, 'get_message', {
+      uid: 2,
+      include_thread: true,
+    });
+    expect(result.isError).not.toBe(true);
+    expect(search).toHaveBeenCalled();
     await harness.close();
   });
 

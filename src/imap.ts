@@ -489,12 +489,22 @@ export class ImapClient {
     });
   }
 
-  async search(client: ImapConnection, query: SearchObject): Promise<number[]> {
+  /** imapflow answers a refused SEARCH (NO/BAD) with false, which is not "no matches". */
+  async search(
+    client: ImapConnection,
+    query: SearchObject,
+    onRefusal: 'empty' | 'throw'
+  ): Promise<number[]> {
     const found = await withTimeout(
       client.search(query, { uid: true }),
       'SEARCH'
     );
-    return found === false ? [] : found;
+    if (found !== false) return found;
+    if (onRefusal === 'empty') return [];
+    throw new MailError(
+      'The mail server refused this search',
+      'SEARCH_REFUSED'
+    );
   }
 
   /** Envelope-level fetch, newest UID first. */

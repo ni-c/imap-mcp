@@ -314,6 +314,12 @@ function hintFor(error: MailError): string {
       );
     case 'OVERQUOTA':
       return '\nHint: the account is over its storage quota; writes are refused until it is under again.';
+    case 'SEARCH_REFUSED':
+      return (
+        '\nHint: a refused search says nothing about whether messages match. ' +
+        'If gmail_query was set, check its Gmail search syntax; otherwise ' +
+        'retry with fewer filters.'
+      );
     case 'ETIMEDOUT':
     case 'ECONNREFUSED':
       return (

@@ -12,6 +12,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      last in the file so the link definitions come along. -->
 <!-- #region changelog -->
 
+## [Unreleased]
+
+### Added
+
+- `list_messages` takes an optional `gmail_query` in Gmail's own search syntax, such as
+  `has:attachment filename:pdf`. It is sent as `X-GM-RAW`, combined with the other filters
+  and confined to the selected mailbox; a server that does not advertise `X-GM-EXT-1` gets
+  an error before anything is searched. Contributed by @juriSacchetta (#72).
+
+### Fixed
+
+- A search the mail server refuses is reported as an error. `list_messages` and
+  `list_new_messages` read the refusal as "nothing matched".
+
 ## [0.6.0] - 2026-11-02
 
 ### Changed

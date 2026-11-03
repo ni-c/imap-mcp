@@ -264,7 +264,7 @@ are in the [client guide](https://imap-mcp.ni-c.de/guide/clients#through-mcp-hub
 | ------------------- | ---------------------------------------------------------------------------------------- |
 | `get_server_info`   | Capabilities, permanent flags, whether the keyword is storable, which tool groups are on |
 | `list_mailboxes`    | Every folder with message and unseen counts and its special-use role                     |
-| `list_messages`     | Lists and searches: sender, recipient, subject, body, date range, flags                  |
+| `list_messages`     | Lists and searches: sender, recipient, subject, body, date range, flags, Gmail query     |
 | `list_new_messages` | Messages not handed over yet; marks them afterwards, `dry_run` to preview                |
 | `get_message`       | Headers and body, fenced untrusted, plus the security assessment; `include_thread`       |
 | `get_attachments`   | Without `part_id` lists them, with `part_id` reads, extracts or saves one                |

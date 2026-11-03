@@ -347,7 +347,7 @@ export function registerReadTools(
             'must not be blank'
           )
           .describe(
-            'Native Gmail search syntax, e.g. "has:attachment filename:pdf". Requires X-GM-EXT-1; combined with other filters using AND, within the selected mailbox.'
+            'Gmail search syntax, e.g. "has:attachment filename:pdf". Gmail only: the server must advertise X-GM-EXT-1 (see get_server_info). Combined with the other filters using AND and confined to the selected mailbox; to search the whole account, select the folder list_mailboxes marks \\All, e.g. "[Gmail]/All Mail". Gmail ignores syntax it cannot parse, so a malformed query can match the whole folder.'
           ),
         since: dateParam.describe(
           'Only messages received on or after this date (YYYY-MM-DD).'
@@ -400,9 +400,9 @@ export function registerReadTools(
             );
           }
           const query = buildSearch(args);
-          const uids = (await client.search(connection, query)).toSorted(
-            (a, b) => b - a
-          );
+          const uids = (
+            await client.search(connection, query, 'throw')
+          ).toSorted((a, b) => b - a);
           const page = uids.slice(offset, offset + limit);
           const messages = await client.fetchSummaries(connection, page);
           // The next offset lives in the payload rather than in the truncation
@@ -493,9 +493,11 @@ export function registerReadTools(
               );
             }
             const uids = (
-              await client.search(connection, {
-                unKeyword: client.seenKeyword,
-              })
+              await client.search(
+                connection,
+                { unKeyword: client.seenKeyword },
+                'throw'
+              )
             ).toSorted((a, b) => b - a);
             const page = uids.slice(0, limit);
             const messages = await client.fetchSummaries(connection, page);
@@ -1086,13 +1088,17 @@ async function threadSummaries(
     references: rendered.metadata.references,
   }).slice(0, MAX_THREAD_TERMS);
   if (ids.length === 0) return [];
-  const uids = await client.search(connection, {
-    or: ids.flatMap((id) => [
-      { header: { 'message-id': id } },
-      { header: { references: id } },
-      { header: { 'in-reply-to': id } },
-    ]),
-  });
+  const uids = await client.search(
+    connection,
+    {
+      or: ids.flatMap((id) => [
+        { header: { 'message-id': id } },
+        { header: { references: id } },
+        { header: { 'in-reply-to': id } },
+      ]),
+    },
+    'empty'
+  );
   const messages = await client.fetchSummaries(
     connection,
     uids.slice(0, MAX_THREAD_TERMS * 10)

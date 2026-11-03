@@ -252,11 +252,28 @@ describe('ImapClient', () => {
     await expect(second.close()).resolves.toBeUndefined();
   });
 
-  it('treats a missing search result as no matches', async () => {
+  it('treats a refused search as no matches where asked to', async () => {
     const fake = new FakeImap(boxes());
     fake.search = async () => false;
     const client = new ImapClient(testConfig(), () => fake);
-    expect(await client.search(fake, { all: true })).toEqual([]);
+    expect(await client.search(fake, { all: true }, 'empty')).toEqual([]);
+  });
+
+  it('reports a refused search as an error where the caller reports a count', async () => {
+    const fake = new FakeImap(boxes());
+    fake.search = async () => false;
+    const client = new ImapClient(testConfig(), () => fake);
+    await expect(
+      client.search(fake, { subject: 'x' }, 'throw')
+    ).rejects.toMatchObject({ name: 'MailError', code: 'SEARCH_REFUSED' });
+  });
+
+  it('passes an answered search through in both modes', async () => {
+    const fake = new FakeImap(boxes());
+    fake.search = async () => [];
+    const client = new ImapClient(testConfig(), () => fake);
+    expect(await client.search(fake, { all: true }, 'throw')).toEqual([]);
+    expect(await client.search(fake, { all: true }, 'empty')).toEqual([]);
   });
 
   it('returns nothing for an empty fetch range without talking to the server', async () => {

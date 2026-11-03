@@ -19,6 +19,29 @@ usual here: a mailbox password is often the account password.
 `IMAP_PASSWORD` is deleted from `process.env` as soon as it has been read, so it is
 not visible to child processes or in `/proc/<pid>/environ`.
 
+### Gmail
+
+```sh
+IMAP_HOST=imap.gmail.com
+IMAP_USER=you@gmail.com
+IMAP_PASSWORD=…   # an app password
+```
+
+Gmail needs an [app password](https://support.google.com/accounts/answer/185833),
+which in turn needs 2-Step Verification on the account; this server does not speak
+OAuth2. The default port and TLS mode — 993, implicit TLS — are what Gmail expects.
+
+Gmail's folders are labels, and their names are localized: All Mail is
+`[Gmail]/All Mail` in English and `[Gmail]/Alle Nachrichten` in German.
+`list_mailboxes` reports each folder's special-use role (`\All`, `\Sent`,
+`\Drafts`, `\Trash`, `\Junk`), which does not change with the language, and
+`save_draft` finds the drafts folder by that role. To search the whole account
+rather than one label, pass the `\All` folder as `mailbox`.
+
+`list_messages` also takes Gmail's own search syntax as `gmail_query` —
+`has:attachment`, `filename:pdf`, `older_than:1y`, `label:work`. See
+[Native Gmail search](../reference/tools.md#native-gmail-search).
+
 ## TLS
 
 `IMAP_TLS` is `implicit` by default, which is port 993 and TLS from the first byte.
