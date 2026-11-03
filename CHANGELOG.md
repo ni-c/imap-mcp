@@ -510,9 +510,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] - 2026-08-30
 
-This is the first release published to npm, so everything below reaches a
-package page for the first time — including the parts that changed weeks ago.
-
 ### Added
 
 - **A container image** at `ghcr.io/ni-c/imap-mcp`, multi-arch (amd64 and
@@ -523,7 +520,9 @@ package page for the first time — including the parts that changed weeks ago.
 
 - **A published npm package**, `@ni-c/imap-mcp`, with provenance, released
   through GitHub Actions with npm Trusted Publishing. The unscoped name belongs
-  to an unrelated project.
+  to an unrelated project. This is the first release on npm, so everything in
+  this section reaches a package page for the first time — including the parts
+  that changed weeks ago.
 
 - README: a container badge, the architecture diagram, install snippets for
   Claude Code, Claude Desktop, Codex and Docker, and a demo recording. The
@@ -714,6 +713,6 @@ package page for the first time — including the parts that changed weeks ago.
 [0.4.0]: https://github.com/ni-c/imap-mcp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/ni-c/imap-mcp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/ni-c/imap-mcp/releases/tag/v0.2.0
-[0.1.0]: https://github.com/ni-c/imap-mcp/releases/tag/v0.1.0
+[0.1.0]: https://github.com/ni-c/imap-mcp/commit/3604667fab7466e4c26fb63d7b036682c4b6819b
 
 <!-- #endregion changelog -->
