@@ -1,4 +1,8 @@
-import type { ExtractRequest, ExtractResponse } from './types.js';
+import type {
+  ExtractHeartbeat,
+  ExtractRequest,
+  ExtractResponse,
+} from './types.js';
 
 /**
  * The extraction child: the only code in this server that parses a binary a
@@ -37,7 +41,30 @@ function sibling(path: string): string {
   return new URL(`${path}.${EXTENSION}`, import.meta.url).href;
 }
 
+/**
+ * Test-only, and only reachable through the host's `ChildLimits`, which nothing
+ * in `src/` passes: tries what a parser exploit would try first — the parent's
+ * environment — and lets the error propagate so its code reaches the log.
+ */
+async function probe(): Promise<never> {
+  if (process.env.IMAP_MCP_EXTRACT_PROBE === 'stderr-escape') {
+    console.error(`\u001b[31mred\u001b]0;title\u0007 ${'x'.repeat(5000)}`);
+    throw Object.assign(new Error('probe'), { code: 'PROBE' });
+  }
+  if (
+    Object.keys(process.env).some((key) => key !== 'IMAP_MCP_EXTRACT_PROBE')
+  ) {
+    throw Object.assign(new Error('environment inherited'), {
+      code: 'ENV_INHERITED',
+    });
+  }
+  const { readFileSync } = await import('node:fs');
+  readFileSync(`/proc/${process.ppid}/environ`);
+  throw Object.assign(new Error('read succeeded'), { code: 'READ_SUCCEEDED' });
+}
+
 async function run(request: ExtractRequest): Promise<ExtractResponse> {
+  if (process.env.IMAP_MCP_EXTRACT_PROBE !== undefined) return probe();
   if (request.kind === 'pdf') {
     const { extractPdf } = (await import(
       sibling('./pdf')
@@ -71,6 +98,17 @@ if (send !== undefined) {
   process.on('disconnect', () => {
     process.exit(0);
   });
+  // For hosts where the parent cannot read this process's size from the
+  // system. A synchronous inflate stops it from firing, which is why the
+  // parent also polls where it can.
+  const beat = (): void => {
+    send({
+      heartbeat: true,
+      rss: process.memoryUsage.rss(),
+    } satisfies ExtractHeartbeat);
+  };
+  beat();
+  setInterval(beat, 100).unref();
   process.once('message', (request: ExtractRequest) => {
     run(request).then(
       (response) => {

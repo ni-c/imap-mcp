@@ -1,4 +1,4 @@
-import { deflateSync } from 'node:zlib';
+import { deflateRawSync, deflateSync } from 'node:zlib';
 
 import { zipSync } from 'fflate';
 
@@ -214,6 +214,117 @@ export function buildFilteredPdf(
   ]);
 }
 
+export type BombVariant =
+  /** `/F`, the abbreviation pdf.js reads as `/Filter`. */
+  | 'abbreviated-key'
+  /** `/FlateDec#6fde`: a name with an escaped letter. */
+  | 'escaped-name'
+  /** `/Filter 6 0 R`, the name in an object of its own. */
+  | 'indirect-filter'
+  /** `/Filter [6 0 R]`. */
+  | 'indirect-filter-array'
+  /** A word `obj` after `/Filter`, where a backward search for the header stops. */
+  | 'decoy-obj'
+  /** More than four kilobytes between `/Filter` and `stream`. */
+  | 'padded-dictionary'
+  /** A correct `/Length`, whitespace before `endstream`, and the word inside the data. */
+  | 'planted-endstream'
+  /** The plain form, as the control. */
+  | 'plain';
+
+/** Raw deflate: a stored block, then `blocks`. */
+function storedBlock(payload: Buffer, final = false): Buffer {
+  const header = Buffer.alloc(5);
+  header[0] = final ? 1 : 0;
+  header.writeUInt16LE(payload.length, 1);
+  header.writeUInt16LE(~payload.length & 0xffff, 3);
+  return Buffer.concat([header, payload]);
+}
+
+/**
+ * A one-page PDF whose content stream deflates to `megabytes` of zeros, with
+ * the filter written in a form a reader that is not pdf.js misses.
+ *
+ * Every variant is a stream pdf.js inflates in full — that is what makes it a
+ * bypass rather than a malformed file — and every one is a few dozen kilobytes.
+ */
+export function buildBombPdf(variant: BombVariant, megabytes = 64): Buffer {
+  const zeros = Buffer.alloc(Math.round(megabytes * 1024 * 1024));
+  let data: Buffer;
+  if (variant === 'planted-endstream') {
+    // The keyword sits in a stored block at the head of the stream, so the
+    // first `endstream` after `stream` is inside the compressed bytes.
+    data = Buffer.concat([
+      Buffer.from([0x78, 0x01]),
+      storedBlock(Buffer.from('endstream')),
+      deflateRawSync(zeros, { level: 9 }),
+    ]);
+  } else {
+    data = deflateSync(zeros, { level: 9 });
+  }
+
+  let dictionary: string;
+  const extra: string[] = [];
+  switch (variant) {
+    case 'abbreviated-key':
+      dictionary = '/F /FlateDecode';
+      break;
+    case 'escaped-name':
+      dictionary = '/Filter /FlateDec#6fde';
+      break;
+    case 'indirect-filter':
+      dictionary = '/Filter 6 0 R';
+      extra.push('/FlateDecode');
+      break;
+    case 'indirect-filter-array':
+      dictionary = '/Filter [6 0 R]';
+      extra.push('/FlateDecode');
+      break;
+    case 'decoy-obj':
+      dictionary = '/Filter /FlateDecode /Note (obj)';
+      break;
+    case 'padded-dictionary':
+      dictionary = `/Filter /FlateDecode /Pad (${'x'.repeat(5000)})`;
+      break;
+    default:
+      dictionary = '/Filter /FlateDecode';
+  }
+
+  return buildStreamPdf(dictionary, data, {
+    tail: variant === 'planted-endstream' ? '\r\n \n \n' : '\n',
+    extra,
+  });
+}
+
+/**
+ * A one-page PDF whose content stream is `data` under the given dictionary
+ * entries. `tail` is what sits between the data and `endstream`; `extra`
+ * becomes objects 6 and up.
+ */
+export function buildStreamPdf(
+  dictionary: string,
+  data: Buffer,
+  options: { tail?: string; extra?: string[] } = {}
+): Buffer {
+  const contents = Buffer.concat([
+    Buffer.from(
+      `<< /Length ${data.length} ${dictionary} >>\nstream\n`,
+      'latin1'
+    ),
+    data,
+    Buffer.from(`${options.tail ?? '\n'}endstream`, 'latin1'),
+  ]);
+  return assemblePdf([
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ' +
+      '/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>',
+    contents,
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    ...(options.extra ?? []),
+  ]);
+}
+
 /**
  * ASCIIHex as a writer might really produce it: mixed case, folded into
  * lines, closed with `>`. The decoder has a branch for each of those.
@@ -352,7 +463,7 @@ function runLengthEncode(data: Buffer): Buffer {
   return Buffer.from(out);
 }
 
-function ascii85Encode(data: Buffer): Buffer {
+export function ascii85Encode(data: Buffer): Buffer {
   let out = '';
   for (let i = 0; i < data.length; i += 4) {
     const group = data.subarray(i, i + 4);

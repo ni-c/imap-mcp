@@ -257,3 +257,94 @@ describe('values that cannot be sent to the server', () => {
     expect(message).toContain(phrase);
   });
 });
+
+function refuses(overrides: Record<string, string>): string {
+  const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+  vi.spyOn(process, 'exit').mockImplementation((() => {
+    throw new Error('exit');
+  }) as never);
+  expect(() => loadConfig(env(overrides))).toThrow('exit');
+  const message = error.mock.calls.flat().join(' ');
+  vi.restoreAllMocks();
+  return message;
+}
+
+describe('values the audit found read the wrong way', () => {
+  it('treats an empty IMAP_HOST like a missing one instead of exiting', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const config = loadConfig(env({ IMAP_HOST: '' }));
+    expect(config.imap.host).toBeUndefined();
+    expect(missingConfigKeys(config)).toContain('IMAP_HOST');
+  });
+
+  it('treats an empty IMAP_DRAFTS_MAILBOX as unset, so \\Drafts is looked up', () => {
+    expect(
+      loadConfig(env({ IMAP_DRAFTS_MAILBOX: '' })).imap.draftsMailbox
+    ).toBeUndefined();
+    expect(
+      loadConfig(env({ IMAP_DRAFTS_MAILBOX: '  ' })).imap.draftsMailbox
+    ).toBeUndefined();
+  });
+
+  it('passes a bracketed IPv6 literal on without its brackets', () => {
+    expect(loadConfig(env({ IMAP_HOST: '[::1]' })).imap.host).toBe('::1');
+    expect(loadConfig(env({ IMAP_HOST: '2001:db8::1' })).imap.host).toBe(
+      '2001:db8::1'
+    );
+  });
+
+  it.each(['[::1', '::1]', ':', '[imap.example.net]', '[1:2:3]'])(
+    'refuses the malformed host %j',
+    (host) => {
+      expect(refuses({ IMAP_HOST: host })).toContain('IMAP_HOST');
+    }
+  );
+
+  it.each(['0x3e1', '1e3', '+993', '993.0', '0b11', '9'.repeat(20)])(
+    'refuses %j as a port, which Number() would have read',
+    (port) => {
+      expect(refuses({ IMAP_PORT: port })).toContain('IMAP_PORT');
+    }
+  );
+
+  it('reads a padded port', () => {
+    expect(loadConfig(env({ IMAP_PORT: ' 993 ' })).imap.port).toBe(993);
+  });
+
+  it('refuses a count Number() would read past the safe integers', () => {
+    expect(refuses({ IMAP_MAX_DOWNLOAD_BYTES: '1e20' })).toContain(
+      'IMAP_MAX_DOWNLOAD_BYTES'
+    );
+    expect(refuses({ IMAP_MAX_DOWNLOAD_BYTES: '99999999999999999' })).toContain(
+      'IMAP_MAX_DOWNLOAD_BYTES'
+    );
+  });
+
+  it('keeps the default page within the hard cap of the limit parameter', () => {
+    expect(loadConfig(env({ IMAP_MAX_MESSAGES: '200' })).imap.maxMessages).toBe(
+      200
+    );
+    expect(refuses({ IMAP_MAX_MESSAGES: '201' })).toContain(
+      'must not exceed 200'
+    );
+  });
+
+  it('reads a list of nothing but commas as the default allowlist', () => {
+    const fallback = loadConfig(env()).imap.allowedAttachmentTypes;
+    expect(
+      loadConfig(env({ IMAP_ATTACHMENT_TYPES: ',' })).imap
+        .allowedAttachmentTypes
+    ).toEqual(fallback);
+    expect(fallback.length).toBeGreaterThan(0);
+  });
+
+  it('warns about cleartext for a DNS name that merely starts with 127.', () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    loadConfig(env({ IMAP_TLS: 'none', IMAP_HOST: '127.mail.example.net' }));
+    expect(errors.mock.calls.flat().join(' ')).toContain('unencrypted');
+    vi.restoreAllMocks();
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+    loadConfig(env({ IMAP_TLS: 'none', IMAP_HOST: '127.1.2.3' }));
+    expect(quiet.mock.calls.flat().join(' ')).not.toContain('unencrypted');
+  });
+});

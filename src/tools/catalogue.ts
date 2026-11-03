@@ -68,3 +68,33 @@ export const ESSENTIAL_TOOLS: readonly string[] = [
   'set_message_flags',
   'move_messages',
 ];
+
+/** Whether a tool is registered when `IMAP_SEEN_KEYWORD` is empty. */
+const registeredWithoutKeyword = (name: string) => name !== 'list_new_messages';
+
+/**
+ * The catalogue for this configuration: the names the server will really
+ * register, not all the names it knows.
+ *
+ * `list_new_messages` is registered only while `IMAP_SEEN_KEYWORD` is not
+ * empty (it has nothing to mark new mail with otherwise). A catalogue that
+ * still listed it would let `IMAP_ALLOW_TOOLS=list_new_messages` through the
+ * filter and then register nothing, and would count it in `essential`, which
+ * then yields one tool fewer than the set it names. Without it the filter
+ * answers an explicit request for the tool the way it answers any name it does
+ * not have: loudly, at start-up, with the names that exist.
+ */
+export function catalogueFor(seenKeyword: string): {
+  all: readonly string[];
+  essential: readonly string[];
+  ungated: readonly string[];
+} {
+  if (seenKeyword !== '') {
+    return { all: ALL_TOOLS, essential: ESSENTIAL_TOOLS, ungated: READ_TOOLS };
+  }
+  return {
+    all: ALL_TOOLS.filter(registeredWithoutKeyword),
+    essential: ESSENTIAL_TOOLS.filter(registeredWithoutKeyword),
+    ungated: READ_TOOLS.filter(registeredWithoutKeyword),
+  };
+}

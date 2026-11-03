@@ -1,4 +1,4 @@
-import { createInflate } from 'node:zlib';
+import { constants, createInflate, inflateSync } from 'node:zlib';
 
 import type { ExtractResponse } from './types.js';
 
@@ -234,155 +234,384 @@ function reasonFor(error: unknown): 'encrypted' | 'corrupt' {
 /* ------------------------------------------------------------ pre-scan -- */
 
 /**
- * Whether the document's compressed streams expand past the limits above.
+ * How far back from a `stream` keyword the dictionary is looked for, at most.
+ * Only `/Length` is read from it, and only to delimit the data; an honest
+ * stream dictionary is a few hundred bytes.
+ */
+const DICT_WINDOW = 8192;
+
+/**
+ * Wall-clock ceiling on the pre-scan. Honest documents finish in a small
+ * fraction of it; a file built to make the scan itself expensive is refused
+ * rather than waited for.
+ */
+const SCAN_DEADLINE_MS = 8_000;
+
+/** Decoder input the pre-scan may spend, beyond a multiple of the file size. */
+const SCAN_WORK_BASE = 64 * 1024 * 1024;
+
+/** Nested Flate layers followed before the chain is called measured. */
+const MAX_FLATE_DEPTH = 4;
+
+/**
+ * Whether the document's streams expand past the limits above.
  *
- * One forward pass over the file, finding every `stream … endstream` and
- * decoding the ones whose filter can grow: Flate, LZW and RunLength, each
- * optionally behind an ASCIIHex or ASCII85 wrapper. The decoders stop the
- * moment they cross the remaining budget, so the work this costs is bounded by
- * the budget plus one stream, whatever the file holds — and a decoder that
- * hits a corrupt byte counts what it produced up to there, which is also what
- * pdf.js would have got.
+ * Measured by trial, never by declaration. pdf.js reads a stream's filter with
+ * `dict.get('F', 'Filter')`, resolves indirect references and decodes `#xx` in
+ * names; any reader of the dictionary that is not pdf.js itself disagrees with
+ * it somewhere, and the disagreement is the bypass. So the dictionary is not
+ * asked. Every `stream` keyword is taken for a stream, and its raw data goes
+ * through every decoder that can grow — Flate (and Flate inside Flate), LZW,
+ * RunLength, each bare or behind an ASCIIHex or ASCII85 wrapper — and the
+ * largest result counts. A decoder fed data that is not its format stops at
+ * once or produces nothing, so an honest stream costs one useful trial and
+ * a few that end at the first byte. The decoders stop the moment they cross
+ * the remaining budget, which bounds the work by the budget plus one stream.
  *
- * The data is delimited the way pdf.js delimits it: by `/Length` where the
- * number is direct or a resolvable reference and actually lands on
- * `endstream`, and by the first `endstream` otherwise. Using only the keyword
- * would let a sender end the scan early by writing the word inside their own
- * compressed bytes.
+ * Only the extent of the data is read from the dictionary, because RunLength
+ * and LZW do not reject foreign bytes the way Flate does: `/Length`, direct or
+ * a resolvable reference, counts where pdf.js would honour it — where
+ * `endstream` follows, whitespace allowed — and the span is the larger of that
+ * and the distance to the first `endstream` keyword. Using the keyword alone
+ * would let a sender end a measurement early by writing the word inside their
+ * own compressed bytes, and using `/Length` alone would let a wrong one hide a
+ * stream.
+ *
+ * No stream is skipped because an earlier one claims to cover it: objects may
+ * overlap, and pdf.js reaches them by cross-reference offset. What keeps that
+ * affordable is that all searching moves forward — one cursor for streams, one
+ * for `obj`, one index of object numbers built on first use — and that the
+ * decoders' input is charged against a budget proportional to the file.
  *
  * Image codecs — DCT, JPX, JBIG2, CCITT — are not decoded here, because text
- * extraction never decodes them either.
+ * extraction never decodes them either. A stream they own is raw bytes to
+ * every decoder above, which reject it at once.
  */
 export async function expandsTooFar(bytes: Uint8Array): Promise<boolean> {
   const data = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   // latin1 keeps a one-to-one mapping between string index and byte offset.
   const text = data.toString('latin1');
+  const deadline = performance.now() + SCAN_DEADLINE_MS;
+  let workLeft = SCAN_WORK_BASE + 8 * data.length;
   let total = 0;
   let cursor = 0;
+  let lastObject = -1;
+  let nextObject = text.indexOf('obj');
+  let endstream = text.indexOf('endstream');
+  let objects: Map<number, number> | undefined;
 
   for (;;) {
     const at = text.indexOf('stream', cursor);
     if (at < 0) return false;
     cursor = at + 6;
-    // A keyword, not the tail of `endstream` or part of a name.
-    const before = at === 0 ? ' ' : (text[at - 1] as string);
-    if (!/[\s>]/.test(before)) continue;
+    if (!isKeyword(text, at, 6)) continue;
+    if (performance.now() > deadline) return true;
 
-    let start = at + 6;
-    if (text[start] === '\r') start += 1;
-    if (text[start] === '\n') start += 1;
+    const start = dataStart(text, at + 6);
+    // A forward cursor: once no `endstream` is left there never is again, and
+    // a keyword found stays the answer until a later stream starts past it.
+    if (endstream >= 0 && endstream < start) {
+      endstream = text.indexOf('endstream', start);
+    }
+    let end = endstream < 0 ? data.length : endstream;
 
-    const objAt = text.lastIndexOf('obj', at);
-    const dict = text.slice(Math.max(objAt, cursor - 6 - 4096, 0), at);
-    const end = streamEnd(text, dict, start);
-    if (end < 0) return false;
-    cursor = end + 9;
+    while (nextObject >= 0 && nextObject < at) {
+      lastObject = nextObject;
+      nextObject = text.indexOf('obj', nextObject + 3);
+    }
+    const from = Math.max(
+      lastObject < 0 ? 0 : lastObject + 3,
+      at - DICT_WINDOW
+    );
+    workLeft -= at - from + 64;
+    for (const declared of lengthsIn(text, from, at, () => {
+      objects ??= indexObjects(text);
+      return objects;
+    })) {
+      const after = start + declared;
+      if (after > data.length) continue;
+      let probe = after;
+      while (probe - after < 4096 && isSpace(text.charCodeAt(probe)))
+        probe += 1;
+      workLeft -= probe - after;
+      if (text.startsWith('endstream', probe)) end = Math.max(end, after);
+    }
 
-    const filters = filtersOf(dict);
-    if (!filters.some((name) => EXPANDING.has(name))) continue;
+    const span = data.subarray(start, end);
+    workLeft -= span.length;
+    if (workLeft < 0) return true;
 
     const limit = Math.min(MAX_STREAM_BYTES, MAX_TOTAL_STREAM_BYTES - total);
-    const size = await expansionOf(
-      data.subarray(start, end),
-      filters,
-      /\/EarlyChange\s+0\b/.test(dict) ? 0 : 1,
-      limit
-    );
+    const size = await largestExpansion(span, limit);
     if (size > limit) return true;
     total += size;
   }
 }
 
-const EXPANDING = new Set([
-  'FlateDecode',
-  'Fl',
-  'LZWDecode',
-  'LZW',
-  'RunLengthDecode',
-  'RL',
-]);
-
-/** Where the stream's data ends: by a trustworthy `/Length`, else by keyword. */
-function streamEnd(text: string, dict: string, start: number): number {
-  const length = /\/Length\s+(\d+)(?:\s+(\d+)\s+R)?/.exec(dict);
-  if (length !== null) {
-    let declared: number | undefined;
-    if (length[2] === undefined) {
-      declared = Number(length[1]);
-    } else {
-      const object = new RegExp(
-        `(?:^|\\s)${length[1]}\\s+${length[2]}\\s+obj\\s*(\\d+)`
-      ).exec(text);
-      if (object !== null) declared = Number(object[1]);
-    }
-    if (declared !== undefined && Number.isSafeInteger(declared)) {
-      let after = start + declared;
-      if (text[after] === '\r') after += 1;
-      if (text[after] === '\n') after += 1;
-      if (text.startsWith('endstream', after)) return start + declared;
-    }
-  }
-  return text.indexOf('endstream', start);
-}
-
-/** The `/Filter` names of a stream dictionary, in application order. */
-function filtersOf(dict: string): string[] {
-  const match = /\/Filter\s*(?:\[([^\]]*)\]|\/([A-Za-z0-9]+))/.exec(dict);
-  if (match === null) return [];
-  if (match[2] !== undefined) return [match[2]];
-  return [...(match[1] as string).matchAll(/\/([A-Za-z0-9]+)/g)].map(
-    (name) => name[1] as string
+/**
+ * Whether `length` characters at `at` form a keyword: not the tail of
+ * `endstream` and not the head of a longer word. PDF's regular characters are
+ * everything but whitespace and delimiters, so a keyword may sit against a `>`
+ * or a `]` as well as a space.
+ */
+function isKeyword(text: string, at: number, length: number): boolean {
+  return (
+    (at === 0 || !isRegular(text.charCodeAt(at - 1))) &&
+    !isRegular(text.charCodeAt(at + length))
   );
 }
 
+function isSpace(code: number): boolean {
+  return (
+    code === 32 ||
+    code === 10 ||
+    code === 13 ||
+    code === 9 ||
+    code === 12 ||
+    code === 0
+  );
+}
+
+function isRegular(code: number): boolean {
+  if (Number.isNaN(code) || isSpace(code)) return false;
+  // ( ) < > [ ] { } / %
+  return !(
+    code === 40 ||
+    code === 41 ||
+    code === 60 ||
+    code === 62 ||
+    code === 91 ||
+    code === 93 ||
+    code === 123 ||
+    code === 125 ||
+    code === 47 ||
+    code === 37
+  );
+}
+
+/** Where the data begins: after the end of the line the keyword is on. */
+function dataStart(text: string, from: number): number {
+  const stop = Math.min(text.length, from + 256);
+  for (let i = from; i < stop; i += 1) {
+    const code = text.charCodeAt(i);
+    if (code === 10) return i + 1;
+    if (code === 13) return text.charCodeAt(i + 1) === 10 ? i + 2 : i + 1;
+  }
+  return from;
+}
+
 /**
- * Bytes the filter chain produces, or any number past `limit` once it does.
- *
- * Flate is materialised, because a second filter may follow it; LZW and
- * RunLength only count, and end the chain, because nothing honest stacks
- * another expanding filter behind them.
+ * Every `/Length` value in a window of dictionary text, direct or through a
+ * reference. All of them, not the last: a string or name later in the
+ * dictionary can say `/Length` too, and the larger span is the safe one.
  */
-async function expansionOf(
-  raw: Uint8Array,
-  filters: string[],
-  earlyChange: number,
+function* lengthsIn(
+  text: string,
+  from: number,
+  to: number,
+  objects: () => Map<number, number>
+): Generator<number> {
+  // Searched in a slice of its own: `indexOf` on the whole text has no upper
+  // bound, and a file without a `/Length` anywhere ahead would send every
+  // stream's search to the end of it.
+  const window = text.slice(from, to);
+  let i = window.indexOf('/Length');
+  while (i >= 0) {
+    const j = i + 7;
+    i = window.indexOf('/Length', j);
+    if (isRegular(window.charCodeAt(j))) continue;
+    const first = readInteger(window, j, window.length);
+    if (first === undefined) continue;
+    // `N G R`: the number is an object, and its body is the length.
+    const generation = readInteger(window, first.end, window.length);
+    if (generation !== undefined) {
+      let r = generation.end;
+      while (isSpace(window.charCodeAt(r))) r += 1;
+      if (
+        window.charCodeAt(r) === 0x52 &&
+        !isRegular(window.charCodeAt(r + 1))
+      ) {
+        const value = objects().get(
+          first.value * 65536 + (generation.value & 0xffff)
+        );
+        if (value !== undefined) yield value;
+        continue;
+      }
+    }
+    yield first.value;
+  }
+}
+
+/** A non-negative integer after optional whitespace; at most 15 digits. */
+function readInteger(
+  text: string,
+  from: number,
+  to: number
+): { value: number; end: number } | undefined {
+  let i = from;
+  while (i < to && isSpace(text.charCodeAt(i))) i += 1;
+  const begin = i;
+  let value = 0;
+  while (i < to && i - begin < 15) {
+    const digit = text.charCodeAt(i) - 48;
+    if (digit < 0 || digit > 9) break;
+    value = value * 10 + digit;
+    i += 1;
+  }
+  return i === begin ? undefined : { value, end: i };
+}
+
+/**
+ * `N G obj <integer>` for every object whose body is a bare integer: the
+ * indirect lengths. Built forward from the `obj` keywords, never by a pattern
+ * that restarts at every digit, and capped so the table is not sized by the
+ * sender. The last definition of a number wins, as an incremental update does.
+ */
+function indexObjects(text: string): Map<number, number> {
+  const out = new Map<number, number>();
+  for (
+    let at = text.indexOf('obj');
+    at >= 0 && out.size < 500_000;
+    at = text.indexOf('obj', at + 3)
+  ) {
+    const body = readInteger(text, at + 3, text.length);
+    if (body === undefined) continue;
+    // Backwards over `N G `: whitespace, digits, whitespace, digits.
+    let i = at - 1;
+    while (i >= 0 && at - i < 8 && isSpace(text.charCodeAt(i))) i -= 1;
+    const generationEnd = i + 1;
+    while (i >= 0 && generationEnd - i <= 6 && isDigit(text.charCodeAt(i)))
+      i -= 1;
+    const generation = text.slice(i + 1, generationEnd);
+    if (generation === '') continue;
+    while (i >= 0 && isSpace(text.charCodeAt(i))) i -= 1;
+    const numberEnd = i + 1;
+    while (i >= 0 && numberEnd - i <= 10 && isDigit(text.charCodeAt(i))) i -= 1;
+    const number = text.slice(i + 1, numberEnd);
+    if (number === '') continue;
+    out.set(Number(number) * 65536 + (Number(generation) & 0xffff), body.value);
+  }
+  return out;
+}
+
+function isDigit(code: number): boolean {
+  return code >= 48 && code <= 57;
+}
+
+/** The largest size any decoder chain reaches on the data, or past `limit`. */
+async function largestExpansion(
+  span: Uint8Array,
   limit: number
 ): Promise<number> {
-  let current = raw;
-  for (const filter of filters) {
-    switch (filter) {
-      case 'ASCIIHexDecode':
-      case 'AHx':
-        current = hexDecode(current);
-        break;
-      case 'ASCII85Decode':
-      case 'A85':
-        current = ascii85Decode(current);
-        break;
-      case 'FlateDecode':
-      case 'Fl': {
-        const inflated = await inflate(current, limit);
-        if (inflated === undefined) return limit + 1;
-        current = inflated;
-        break;
-      }
-      case 'LZWDecode':
-      case 'LZW':
-        return lzwLength(current, earlyChange, limit);
-      case 'RunLengthDecode':
-      case 'RL':
-        return runLengthLength(current, limit);
-      default:
-        // An image codec, or something unknown: the chain stops producing
-        // anything text extraction would read.
-        return current === raw ? 0 : current.length;
-    }
+  let best = 0;
+  const wrapped: Uint8Array[] = [span];
+  if (looksLikeHex(span)) wrapped.push(hexDecode(span));
+  if (looksLikeAscii85(span)) {
+    const decoded = ascii85Decode(span, limit);
+    if (decoded === undefined) return limit + 1;
+    wrapped.push(decoded);
   }
-  return current === raw ? 0 : current.length;
+  for (const input of wrapped) {
+    const flate = await flateChain(input, limit);
+    if (flate > limit) return flate;
+    best = Math.max(
+      best,
+      flate,
+      lzwLength(input, 1, limit),
+      lzwLength(input, 0, limit),
+      runLengthLength(input, limit)
+    );
+    if (best > limit) return best;
+  }
+  return best;
+}
+
+/** A zlib header: deflate, a window up to 32 kB, no preset dictionary. */
+function hasZlibHeader(data: Uint8Array): boolean {
+  const cmf = data[0];
+  const flg = data[1];
+  if (cmf === undefined || flg === undefined) return false;
+  if ((cmf & 0x0f) !== 8 || cmf >> 4 > 7 || (flg & 0x20) !== 0) return false;
+  // Block type 3 is reserved; no stream starts with it.
+  if (((data[2] ?? 0) & 6) === 6) return false;
+  return ((cmf << 8) | flg) % 31 === 0;
+}
+
+/** Flate, and Flate inside Flate: each layer is as large as the one before. */
+async function flateChain(data: Uint8Array, limit: number): Promise<number> {
+  let best = 0;
+  let current = data;
+  for (
+    let depth = 0;
+    depth < MAX_FLATE_DEPTH && hasZlibHeader(current);
+    depth += 1
+  ) {
+    const inflated = await inflate(current, limit);
+    if (inflated === undefined) return limit + 1;
+    best = Math.max(best, inflated.length);
+    current = inflated;
+  }
+  return best;
+}
+
+/** Whether the data opens like ASCIIHex: a run of hex digits. */
+function looksLikeHex(data: Uint8Array): boolean {
+  let seen = 0;
+  for (let i = 0; i < data.length && seen < 8; i += 1) {
+    const byte = data[i] as number;
+    if (isSpace(byte)) continue;
+    if (!isHexDigit(byte)) return false;
+    seen += 1;
+  }
+  return seen >= 4;
+}
+
+function isHexDigit(byte: number): boolean {
+  return (
+    (byte >= 0x30 && byte <= 0x39) ||
+    (byte >= 0x41 && byte <= 0x46) ||
+    (byte >= 0x61 && byte <= 0x66)
+  );
+}
+
+/** Whether the data opens like ASCII85: five characters of its alphabet. */
+function looksLikeAscii85(data: Uint8Array): boolean {
+  let i = 0;
+  if (data[0] === 0x3c && data[1] === 0x7e) i = 2;
+  let seen = 0;
+  for (; i < data.length && seen < 5; i += 1) {
+    const byte = data[i] as number;
+    if (isSpace(byte)) continue;
+    if (byte === 0x7a) return true;
+    if (byte < 0x21 || byte > 0x75) return false;
+    seen += 1;
+  }
+  return seen >= 2;
 }
 
 /** Inflates up to `limit` bytes; `undefined` once the output would pass it. */
-function inflate(
+async function inflate(
+  data: Uint8Array,
+  limit: number
+): Promise<Uint8Array | undefined> {
+  try {
+    // Synchronous for the common case: a stream object per candidate is what
+    // makes a document of fifty thousand small streams slow. Tolerant of a
+    // truncated stream, like pdf.js is.
+    return inflateSync(data, {
+      maxOutputLength: limit + 1,
+      finishFlush: constants.Z_SYNC_FLUSH,
+    });
+  } catch (error) {
+    if ((error as { code?: unknown } | null)?.code === 'ERR_BUFFER_TOO_LARGE')
+      return undefined;
+  }
+  // A corrupt stream yields what it decoded before the bad byte, which is also
+  // what pdf.js gets from it, and only the streaming form hands that over.
+  return inflateStreaming(data, limit);
+}
+
+function inflateStreaming(
   data: Uint8Array,
   limit: number
 ): Promise<Uint8Array | undefined> {
@@ -406,9 +635,8 @@ function inflate(
       }
       chunks.push(chunk);
     });
-    // A corrupt stream yields what it decoded before the bad byte, which is
-    // also what pdf.js gets from it. The listener stays attached after
-    // settling so a late error has somewhere to go.
+    // The listener stays attached after settling so a late error has
+    // somewhere to go.
     stream.on('error', () => finish(Buffer.concat(chunks)));
     stream.on('end', () => finish(Buffer.concat(chunks)));
     stream.end(data);
@@ -523,39 +751,74 @@ function hexDecode(data: Uint8Array): Uint8Array {
   return out.subarray(0, n);
 }
 
-function ascii85Decode(data: Uint8Array): Uint8Array {
-  const out = new Uint8Array(Math.ceil(data.length / 5) * 4 + 4);
+/**
+ * ASCII85, sized by what it produces. `z` stands for four zero bytes and is a
+ * single input byte, so the output of a run of them is four times the input —
+ * a bound derived from the length of five-character groups clamps, and the
+ * tail of the stream is then never decoded, let alone measured. Counted first,
+ * allocated once; `undefined` when the result would pass `limit`, which for a
+ * stage in front of another decoder is already the answer.
+ */
+function ascii85Decode(
+  data: Uint8Array,
+  limit: number
+): Uint8Array | undefined {
+  let start = 0;
+  if (data[0] === 0x3c && data[1] === 0x7e) start = 2; // '<~'
+
+  let size = 0;
+  let count = 0;
+  for (let i = start; i < data.length; i += 1) {
+    const byte = data[i] as number;
+    if (byte === 0x7e) break; // '~' of '~>'
+    if (byte === 0x7a && count === 0) {
+      size += 4;
+    } else if (byte >= 0x21 && byte <= 0x75) {
+      count += 1;
+      if (count === 5) {
+        size += 4;
+        count = 0;
+      }
+    }
+    if (size > limit) return undefined;
+  }
+  if (count > 1) size += count - 1;
+
+  const out = new Uint8Array(size);
   let n = 0;
-  const group: number[] = [];
-  let i = 0;
-  if (data[0] === 0x3c && data[1] === 0x7e) i = 2; // '<~'
-  const flush = (count: number): void => {
-    while (group.length < 5) group.push(84);
-    let value = 0;
-    for (const digit of group) value = value * 85 + digit;
-    const bytes = [
-      value >>> 24,
-      (value >>> 16) & 255,
-      (value >>> 8) & 255,
-      value & 255,
-    ];
-    for (let k = 0; k < count - 1; k += 1) {
+  let value = 0;
+  count = 0;
+  const emit = (digits: number): void => {
+    // Padded with the highest digit, as the format says.
+    let v = value;
+    for (let k = digits; k < 5; k += 1) v = v * 85 + 84;
+    const bytes = [v >>> 24, (v >>> 16) & 255, (v >>> 8) & 255, v & 255];
+    for (let k = 0; k < digits - 1; k += 1) {
       out[n] = bytes[k] as number;
       n += 1;
     }
-    group.length = 0;
   };
-  for (; i < data.length; i += 1) {
+  for (let i = start; i < data.length; i += 1) {
     const byte = data[i] as number;
-    if (byte === 0x7e) break; // '~' of '~>'
-    if (byte === 0x7a && group.length === 0) {
-      n += 4; // 'z' is four zero bytes
+    if (byte === 0x7e) break;
+    if (byte === 0x7a && count === 0) {
+      n += 4; // already zero
       continue;
     }
     if (byte < 0x21 || byte > 0x75) continue;
-    group.push(byte - 0x21);
-    if (group.length === 5) flush(5);
+    value = value * 85 + (byte - 0x21);
+    count += 1;
+    if (count === 5) {
+      const v = value >>> 0;
+      out[n] = v >>> 24;
+      out[n + 1] = (v >>> 16) & 255;
+      out[n + 2] = (v >>> 8) & 255;
+      out[n + 3] = v & 255;
+      n += 4;
+      value = 0;
+      count = 0;
+    }
   }
-  if (group.length > 1) flush(group.length);
-  return out.subarray(0, n);
+  if (count > 1) emit(count);
+  return out;
 }

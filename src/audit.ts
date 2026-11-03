@@ -20,8 +20,8 @@ import { escapeInvisible } from './analyze.js';
  * shared account they are chosen by whoever created the folder. `to=Archive`
  * for a destination of `Archive<U+202E>…` is a log entry that reads as the wrong
  * folder, and a CR in a name rewrites the line a human is looking at. So every
- * string value is escaped on the way out — see {@link escapeInvisible}. What
- * cannot be seen must not be written here.
+ * string value is quoted and escaped on the way out — see {@link escapeInvisible}
+ * and {@link format}. What cannot be seen must not be written here.
  */
 export function audit(
   operation: string,
@@ -36,12 +36,49 @@ export function audit(
   );
 }
 
-/** Long UID lists are abbreviated so one bulk call cannot flood the log. */
+/**
+ * One value as one token.
+ *
+ * Fields are `key=value` joined by spaces, so a bare value is a way to write
+ * fields of one's own: a mailbox called `Archive uids=[1] to=Trash` made a line
+ * that reads as a different operation. Strings are therefore written as JSON
+ * strings, quotes and all — a space, an `=` or a bracket inside one stays
+ * inside the quotes — and the invisible and line-separating characters JSON
+ * leaves alone are spelled out on top.
+ *
+ * UID lists are written whole, as IMAP ranges (`1:5,9`): the log is the only
+ * way to reconstruct what a 200-UID delete took, and a list cut at twenty
+ * entries cannot be.
+ */
 function format(value: unknown): string {
   if (Array.isArray(value)) {
-    return value.length > 20
-      ? `[${escapeInvisible(value.slice(0, 20).join(','))},…+${value.length - 20}]`
-      : `[${escapeInvisible(value.join(','))}]`;
+    return value.every((entry) => Number.isInteger(entry))
+      ? `[${uidRanges(value as number[])}]`
+      : `[${value.map(format).join(',')}]`;
   }
-  return escapeInvisible(String(value));
+  if (typeof value === 'string') return quote(value);
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  return quote(String(value));
+}
+
+function quote(text: string): string {
+  return escapeInvisible(JSON.stringify(text)).replace(
+    /[\u2028\u2029]/g,
+    (c) => `\\u${c.codePointAt(0)?.toString(16)}`
+  );
+}
+
+/** `[1, 2, 3, 4, 5, 9]` as `1:5,9`. Sorted and de-duplicated. */
+function uidRanges(uids: number[]): string {
+  const sorted = [...new Set(uids)].toSorted((a, b) => a - b);
+  const ranges: string[] = [];
+  for (let i = 0; i < sorted.length;) {
+    let end = i;
+    while (sorted[end + 1] === (sorted[end] as number) + 1) end += 1;
+    ranges.push(end === i ? String(sorted[i]) : `${sorted[i]}:${sorted[end]}`);
+    i = end + 1;
+  }
+  return ranges.join(',');
 }

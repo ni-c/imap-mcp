@@ -1,4 +1,4 @@
-import { open } from 'node:fs/promises';
+import { open, unlink } from 'node:fs/promises';
 import { extname, join, resolve, sep } from 'node:path';
 
 import { ToolInputError } from './errors.js';
@@ -62,10 +62,21 @@ export async function saveAttachment(
       );
     }
     try {
-      await handle.write(content);
-      return { path: target, bytes: content.length };
-    } finally {
+      // writeFile loops until everything is written. A single write() may
+      // write fewer bytes than asked and says so only in its return value,
+      // which left a truncated file behind a "saved" answer.
+      await handle.writeFile(content);
       await handle.close();
+      return { path: target, bytes: content.length };
+    } catch (error) {
+      // The file was created by this call (`wx`), so removing it cannot take
+      // anything else with it. A partial attachment under the real name is
+      // worse than none.
+      await handle.close().catch(() => undefined);
+      await unlink(target).catch(() => undefined);
+      throw new ToolInputError(
+        `imap-mcp: could not write to the download directory: ${describe(error)}`
+      );
     }
   }
 

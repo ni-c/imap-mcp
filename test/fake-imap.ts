@@ -32,6 +32,12 @@ export interface FakeMessage {
   messageId?: string;
   threadId?: string;
   attachments?: FakeAttachment[];
+  /**
+   * The body structure to report instead of the one built from `attachments`
+   * (which are still what `download` serves), for shapes the builder cannot
+   * make: a single non-multipart root, a forwarded message.
+   */
+  structure?: MessageStructureObject;
   /** Extra raw header lines, written into the source as given. */
   headers?: string[];
 }
@@ -43,6 +49,8 @@ export interface FakeAttachment {
   content: Buffer;
   /** Overrides the size the structure declares, to fake a lying sender. */
   declaredSize?: number;
+  /** The part is listed but gone by the time it is fetched: `download` answers `{}`. */
+  vanished?: boolean;
 }
 
 export interface FakeMailbox {
@@ -51,6 +59,12 @@ export interface FakeMailbox {
   /** `false`: the server sends no PERMANENTFLAGS at all. */
   permanentFlags?: Set<string> | false;
   specialUse?: string;
+  /**
+   * How imapflow came to report `specialUse`. Defaults to `extension`, the
+   * server's own SPECIAL-USE flag; `name` is imapflow's guess from the folder's
+   * name, which it applies to every namespace the account can see.
+   */
+  specialUseSource?: 'user' | 'extension' | 'name';
 }
 
 // An EventEmitter like imapflow's client, so an 'error' nobody listens for
@@ -62,8 +76,23 @@ export class FakeImap extends EventEmitter implements ImapConnection {
     ['IMAP4rev1', true],
     ['IDLE', true],
     ['MOVE', true],
+    // UIDPLUS gives UID EXPUNGE. A test deletes it (and MOVE) to get the
+    // server where EXPUNGE removes every \Deleted message in the mailbox.
+    ['UIDPLUS', true],
     ['LIST-STATUS', true],
   ]);
+
+  /**
+   * Write commands the server answers with NO or BAD. imapflow does not throw
+   * for those: store, copy, move and expunge resolve to `false`.
+   */
+  readonly refuse = new Set<
+    | 'messageFlagsAdd'
+    | 'messageFlagsRemove'
+    | 'messageMove'
+    | 'messageCopy'
+    | 'messageDelete'
+  >();
 
   /** Every command the tools issued, in order — the tests assert on this. */
   readonly calls: Array<{ name: string; args: unknown[] }> = [];
@@ -145,6 +174,8 @@ export class FakeImap extends EventEmitter implements ImapConnection {
       } as unknown as ListResponse;
       if (box.specialUse !== undefined) {
         (entry as { specialUse?: string }).specialUse = box.specialUse;
+        (entry as { specialUseSource?: string }).specialUseSource =
+          box.specialUseSource ?? 'extension';
       }
       if (options?.statusQuery !== undefined) {
         (entry as { status?: StatusObject }).status = {
@@ -161,7 +192,7 @@ export class FakeImap extends EventEmitter implements ImapConnection {
   async status(
     path: string,
     query: Record<string, boolean>
-  ): Promise<StatusObject> {
+  ): Promise<StatusObject | false> {
     this.record('status', path, query);
     const box = this.box(path);
     return {
@@ -239,7 +270,7 @@ export class FakeImap extends EventEmitter implements ImapConnection {
   async search(
     query: SearchObject,
     _options?: { uid?: boolean }
-  ): Promise<number[] | false> {
+  ): Promise<number[] | false | undefined> {
     this.record('search', query);
     const messages = this.current().messages.filter((candidate) => {
       if (query.all === true) return true;
@@ -251,6 +282,11 @@ export class FakeImap extends EventEmitter implements ImapConnection {
       if (
         query.flagged !== undefined &&
         candidate.flags.has('\\Flagged') !== query.flagged
+      )
+        return false;
+      if (
+        query.deleted !== undefined &&
+        candidate.flags.has('\\Deleted') !== query.deleted
       )
         return false;
       if (query.keyword !== undefined && !candidate.flags.has(query.keyword))
@@ -313,13 +349,20 @@ export class FakeImap extends EventEmitter implements ImapConnection {
     const found = this.current().messages.find((m) => m.uid === Number(range));
     const attachment = found?.attachments?.find((a) => a.partId === part);
     if (attachment === undefined) throw new Error(`no such part: ${part}`);
+    // imapflow answers `{}` when the message or the part is gone.
+    if (attachment.vanished === true) return {} as never;
+    // imapflow ends the stream at exactly `maxBytes`, without an error.
+    const served =
+      options?.maxBytes === undefined
+        ? attachment.content
+        : attachment.content.subarray(0, options.maxBytes);
     return {
       meta: {
         contentType: attachment.contentType,
         charset: 'utf-8',
         filename: attachment.filename,
       },
-      content: Readable.from([attachment.content]),
+      content: Readable.from([served]),
     };
   }
 
@@ -329,6 +372,7 @@ export class FakeImap extends EventEmitter implements ImapConnection {
     _options?: { uid?: boolean }
   ): Promise<boolean> {
     this.record('messageFlagsAdd', range, flags);
+    if (this.refuse.has('messageFlagsAdd')) return false;
     const kept = this.storable(flags);
     if (kept.length === 0) return false;
     for (const uid of range) {
@@ -344,6 +388,7 @@ export class FakeImap extends EventEmitter implements ImapConnection {
     _options?: { uid?: boolean }
   ): Promise<boolean> {
     this.record('messageFlagsRemove', range, flags);
+    if (this.refuse.has('messageFlagsRemove')) return false;
     for (const uid of range) {
       const found = this.current().messages.find((m) => m.uid === uid);
       for (const flag of flags) found?.flags.delete(flag);
@@ -351,36 +396,81 @@ export class FakeImap extends EventEmitter implements ImapConnection {
     return true;
   }
 
+  /**
+   * imapflow's answer to a refused or impossible move: `false`, not an error.
+   * A destination that does not exist is refused (NO [TRYCREATE]); nothing
+   * creates it on the way.
+   */
+  private destination(path: string): FakeMailbox | undefined {
+    return this.mailboxes.find((m) => m.path === path);
+  }
+
+  /**
+   * EXPUNGE as the server runs it: with UIDPLUS only the given UIDs go; without
+   * it every message flagged \Deleted goes, whoever flagged it.
+   */
+  private expunge(range: number[]): void {
+    const box = this.current();
+    for (const candidate of box.messages) {
+      if (range.includes(candidate.uid)) candidate.flags.add('\\Deleted');
+    }
+    const byUid = this.capabilities.has('UIDPLUS');
+    box.messages = box.messages.filter((m) =>
+      byUid ? !range.includes(m.uid) : !m.flags.has('\\Deleted')
+    );
+  }
+
+  private copyTo(
+    target: FakeMailbox,
+    range: number[]
+  ): { path: string; destination: string; uidMap?: Map<number, number> } {
+    const uidMap = new Map<number, number>();
+    for (const uid of range) {
+      const found = this.current().messages.find((m) => m.uid === uid);
+      if (found === undefined) continue;
+      target.messages.push({ ...found, flags: new Set(found.flags) });
+      uidMap.set(uid, uid);
+    }
+    return {
+      path: this.current().path,
+      destination: target.path,
+      ...(this.capabilities.has('UIDPLUS') ? { uidMap } : {}),
+    };
+  }
+
   async messageMove(
     range: number[],
     destination: string,
     _options?: { uid?: boolean }
-  ): Promise<unknown> {
+  ): Promise<
+    false | { path: string; destination: string; uidMap?: Map<number, number> }
+  > {
     this.record('messageMove', range, destination);
-    const target = this.box(destination);
-    const source = this.current();
-    for (const uid of range) {
-      const index = source.messages.findIndex((m) => m.uid === uid);
-      if (index >= 0) {
-        const [moved] = source.messages.splice(index, 1);
-        if (moved !== undefined) target.messages.push(moved);
-      }
+    const target = this.destination(destination);
+    if (this.refuse.has('messageMove') || target === undefined) return false;
+    const result = this.copyTo(target, range);
+    if (this.capabilities.has('MOVE')) {
+      const source = this.current();
+      source.messages = source.messages.filter((m) => !range.includes(m.uid));
+    } else {
+      // Without MOVE imapflow copies, flags \Deleted and sends a bare EXPUNGE
+      // unless UIDPLUS lets it name the UIDs.
+      this.expunge(range);
     }
-    return { uidMap: new Map() };
+    return result;
   }
 
   async messageCopy(
     range: number[],
     destination: string,
     _options?: { uid?: boolean }
-  ): Promise<unknown> {
+  ): Promise<
+    false | { path: string; destination: string; uidMap?: Map<number, number> }
+  > {
     this.record('messageCopy', range, destination);
-    const target = this.box(destination);
-    for (const uid of range) {
-      const found = this.current().messages.find((m) => m.uid === uid);
-      if (found !== undefined) target.messages.push({ ...found });
-    }
-    return { uidMap: new Map() };
+    const target = this.destination(destination);
+    if (this.refuse.has('messageCopy') || target === undefined) return false;
+    return this.copyTo(target, range);
   }
 
   async messageDelete(
@@ -388,8 +478,8 @@ export class FakeImap extends EventEmitter implements ImapConnection {
     _options?: { uid?: boolean }
   ): Promise<boolean> {
     this.record('messageDelete', range);
-    const box = this.current();
-    box.messages = box.messages.filter((m) => !range.includes(m.uid));
+    if (this.refuse.has('messageDelete')) return false;
+    this.expunge(range);
     return true;
   }
 
@@ -412,8 +502,14 @@ export class FakeImap extends EventEmitter implements ImapConnection {
     return { path, uid: 900 + this.appended.length };
   }
 
-  async mailboxCreate(path: string): Promise<unknown> {
+  async mailboxCreate(
+    path: string
+  ): Promise<{ path: string; created: boolean }> {
     this.record('mailboxCreate', path);
+    // imapflow turns ALREADYEXISTS into a normal answer.
+    if (this.mailboxes.some((m) => m.path === path)) {
+      return { path, created: false };
+    }
     this.mailboxes.push({ path, messages: [] });
     return { path, created: true };
   }
@@ -456,6 +552,9 @@ function toFetchObject(
   if (query.threadId === true && fake.threadId !== undefined) {
     object.threadId = fake.threadId;
   }
+  if (Array.isArray(query.headers)) {
+    object.headers = headerBlock(fake, query.headers);
+  }
   if (query.bodyStructure === true) {
     object.bodyStructure = buildStructure(fake);
   }
@@ -497,7 +596,23 @@ export function buildSource(fake: FakeMessage): Buffer {
   );
 }
 
+/** What imapflow returns for `headers: [names]`: only those lines, folded ones included. */
+function headerBlock(fake: FakeMessage, names: string[]): Buffer {
+  const wanted = new Set(names.map((name) => name.toLowerCase()));
+  const head = buildSource(fake).toString('utf-8').split('\r\n\r\n')[0] ?? '';
+  let keep = false;
+  const lines: string[] = [];
+  for (const line of head.split('\r\n')) {
+    if (!/^[ \t]/.test(line)) {
+      keep = wanted.has((line.split(':')[0] ?? '').toLowerCase());
+    }
+    if (keep) lines.push(line);
+  }
+  return Buffer.from(`${lines.join('\r\n')}\r\n\r\n`, 'utf-8');
+}
+
 function buildStructure(fake: FakeMessage): MessageStructureObject {
+  if (fake.structure !== undefined) return fake.structure;
   const text: MessageStructureObject = {
     part: '1',
     type: 'text/plain',

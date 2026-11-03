@@ -570,7 +570,8 @@ describe('character references decode the way a client decodes them (5.3)', () =
       fc.property(
         fc
           .integer({ min: 1, max: 0x10ffff })
-          .filter((n) => n < 0xd800 || n > 0xdfff),
+          // U+0080-009F decode to their windows-1252 characters instead.
+          .filter((n) => (n < 0xd800 || n > 0xdfff) && (n < 0x80 || n > 0x9f)),
         fc.integer({ min: 0, max: 12 }),
         fc.boolean(),
         (n, zeros, hex) => {

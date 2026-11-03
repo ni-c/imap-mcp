@@ -17,8 +17,6 @@ import { collectAttachments, type AttachmentCandidate } from './attachments.js';
  */
 const SUBJECT_MAX = 2000;
 const ADDRESS_MAX = 4000;
-/** RFC 5322 allows a long Message-ID; nothing needs more than this to be useful. */
-const MESSAGE_ID_MAX = 256;
 /** Flags one summary carries, and the length of each. A keyword is an atom. */
 const FLAGS_MAX = 50;
 const FLAG_MAX = 64;
@@ -144,12 +142,19 @@ export async function renderMessage(
     // in attachments.ts. Parsing them here would pull every byte into memory
     // for a call that only wants the text.
     skipImageLinks: true,
+    // mailparser fills `text` from the HTML when there is no text/plain part,
+    // and does so without regard for what the recipient sees: a
+    // `display:none` element arrives as body text. Left empty, bodyTextOf
+    // falls back to htmlToText, which drops it.
+    skipHtmlToText: true,
   });
 
   const body = bodyTextOf(parsed);
   const text = sanitizeText(body);
+  // The subject as shown, capped: the raw header is bounded only by the
+  // parser's head limit, and every heuristic below scans it.
   const security = assess(
-    `${parsed.subject ?? ''}\n${text}`,
+    `${sanitizeText(parsed.subject ?? '', SUBJECT_MAX)}\n${text}`,
     headerValue(parsed, 'authentication-results'),
     trustedAuthservId
   );
@@ -170,15 +175,12 @@ export async function renderMessage(
   return {
     metadata: {
       uid,
-      date: parsed.date?.toISOString(),
-      // Sender-chosen, unbounded in length, and it lands in the metadata block
-      // *outside* the fence — the one part of the result the model is told is
-      // ours. Every other sender string on this path is sanitised; this one
-      // was going through raw.
-      messageId:
-        parsed.messageId === undefined
-          ? undefined
-          : sanitizeText(parsed.messageId, MESSAGE_ID_MAX),
+      date: dateOf(parsed),
+      // Sender-chosen, and it lands in the metadata block *outside* the
+      // fence — the one part of the result the model is told is ours. It is
+      // either a Message-ID exactly as written or absent: cleaning one up
+      // would hand out a handle the mail server has never seen.
+      messageId: messageIdOf(parsed),
       references: threadIdsOf({
         ...(parsed.references === undefined
           ? {}
@@ -192,6 +194,63 @@ export async function renderMessage(
     },
     content,
   };
+}
+
+function messageIdOf(parsed: ParsedMail): string | undefined {
+  const id = parsed.messageId?.trim();
+  return id !== undefined && isMessageId(id) ? id : undefined;
+}
+
+const MONTHS = [
+  'jan',
+  'feb',
+  'mar',
+  'apr',
+  'may',
+  'jun',
+  'jul',
+  'aug',
+  'sep',
+  'oct',
+  'nov',
+  'dec',
+];
+const RFC_5322_DATE =
+  /^(?:[A-Za-z]{3}\s*,\s*)?(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(?:[+-]\d{4}|[A-Za-z]{1,5})?$/;
+
+/**
+ * The message's own Date header, or nothing.
+ *
+ * mailparser answers an unparseable Date with the current time, which would be
+ * reported as when the mail was sent, and the JS parser rolls `31 Feb` over to
+ * 3 March. So the raw header is read, its calendar fields are checked against
+ * the calendar, and only then is it converted.
+ */
+function dateOf(parsed: ParsedMail): string | undefined {
+  const line = parsed.headerLines.find(
+    (entry) => entry.key.toLowerCase() === 'date'
+  )?.line;
+  if (line === undefined) return undefined;
+  const value = line
+    .slice(line.indexOf(':') + 1)
+    .replace(/\r?\n[ \t]*/g, ' ')
+    .replace(/\([^()]*\)/g, ' ')
+    .trim();
+  const match = RFC_5322_DATE.exec(value);
+  if (match === null) return undefined;
+  const [day, month, year, hour, minute, second] = [
+    Number(match[1]),
+    MONTHS.indexOf((match[2] as string).toLowerCase()),
+    Number(match[3]),
+    Number(match[4]),
+    Number(match[5]),
+    Number(match[6] ?? 0),
+  ] as [number, number, number, number, number, number];
+  if (month < 0 || hour > 23 || minute > 59 || second > 59) return undefined;
+  if (day < 1 || day > new Date(Date.UTC(year, month + 1, 0)).getUTCDate()) {
+    return undefined;
+  }
+  return isoDate(new Date(value));
 }
 
 /**
@@ -219,6 +278,14 @@ function headerValue(parsed: ParsedMail, name: string): string | undefined {
   return undefined;
 }
 
+/** Whitespace-separated ids: an In-Reply-To may carry more than one. */
+function splitIds(value: string | string[] | undefined): string[] {
+  if (value === undefined) return [];
+  return (Array.isArray(value) ? value : [value]).flatMap((entry) =>
+    entry.split(/\s+/)
+  );
+}
+
 /**
  * Message-IDs from the References/In-Reply-To chain, for thread reconstruction.
  * Bounded: a long-running thread accumulates hundreds of them, and each one
@@ -229,18 +296,11 @@ export function threadIdsOf(parsed: {
   references?: string | string[] | undefined;
   inReplyTo?: string | undefined;
 }): string[] {
-  const references =
-    parsed.references === undefined
-      ? []
-      : Array.isArray(parsed.references)
-        ? parsed.references
-        : parsed.references.split(/\s+/);
   const all = [
-    ...references,
-    ...(parsed.inReplyTo === undefined ? [] : [parsed.inReplyTo]),
-    ...(parsed.messageId === undefined ? [] : [parsed.messageId]),
-  ]
-    .map((id) => id.trim())
-    .filter(isMessageId);
-  return [...new Set(all)].slice(0, 50);
+    ...splitIds(parsed.references),
+    ...splitIds(parsed.inReplyTo),
+    ...splitIds(parsed.messageId),
+  ].filter(isMessageId);
+  // The newest ones: a reply's own parent is at the end of the chain.
+  return [...new Set(all)].slice(-50);
 }

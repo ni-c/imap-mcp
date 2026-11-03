@@ -50,13 +50,17 @@ export const mailboxParam = z
 
 export const optionalMailboxParam = mailboxParam.optional();
 
+/** An IMAP UID is an nz-number: 1 to 2^32 - 1 (RFC 3501). */
+const MAX_UID = 4_294_967_295;
+
 export const uidParam = z
   .int()
   .positive()
+  .max(MAX_UID)
   .describe('IMAP UID of the message, as returned by the listing tools.');
 
 export const uidListParam = z
-  .array(z.int().positive())
+  .array(z.int().positive().max(MAX_UID))
   .min(1)
   .max(MAX_LIMIT)
   .describe(
@@ -93,21 +97,51 @@ export const dateParam = z
   }, 'must be a real calendar date')
   .optional();
 
+/** The characters RFC 5322 allows in an unquoted local-part atom. */
+const ATEXT = "[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+";
+const LABEL = '[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?';
 /**
- * An email address or an address list.
+ * A bare addr-spec in its plainest form: a dot-atom local part, an ASCII
+ * domain of at least two labels. No quoted local part, no comment, no domain
+ * literal, no display name, no group.
+ */
+const ADDR_SPEC = new RegExp(
+  `^${ATEXT}(?:\\.${ATEXT})*@${LABEL}(?:\\.${LABEL})+$`
+);
+
+/**
+ * A single email address.
  *
- * Line breaks are refused because a recipient is written into a mail header:
- * a CR here would let the caller append headers of its own — a Bcc, a Reply-To
- * pointing somewhere else — to a message a human thought they had approved.
+ * It is written into a mail header of a draft that a person later sends, and
+ * the person's mail client decides which recipient it shows. So the accepted
+ * set is exactly the addresses every parser reads the same way: a recipient
+ * the dialog or the model sees as `alice@example.net` is the one that receives
+ * the message. `AliceSmith<alice@evil.example>`, `x@evil.example(Alice)`,
+ * `team:x@evil.example;` and `ceo,x@evil.example` all contain one `@` and no
+ * whitespace and all name a recipient other than the one they appear to, so
+ * "one `@`, no whitespace" was not enough. Non-ASCII is refused outright:
+ * zero-width and bidirectional characters make two addresses look alike, and a
+ * non-ASCII domain belongs in its punycode form.
+ *
+ * A host without a dot (`user@localhost`) is refused too; mail to a bare
+ * single-label host is almost never what a draft from a mailbox means.
  */
 export const addressParam = z
   .string()
   .min(3)
-  .max(320)
+  .max(254)
   .refine((v) => !/[\r\n]/.test(v), 'must not contain line breaks')
   .refine(
-    (v) => /^[^@\s]+@[^@\s.]+\.[^@\s]+$/.test(v),
-    'must be a bare email address such as person@example.net'
+    // eslint-disable-next-line no-control-regex
+    (v) => /^[\u0000-\u007f]*$/.test(v),
+    'must be plain ASCII: write an internationalised domain in its punycode ' +
+      'form (xn--…), and use an ASCII local part'
+  )
+  .refine(
+    (v) => ADDR_SPEC.test(v) && v.indexOf('@') <= 64,
+    'must be a bare email address such as person@example.net — no display ' +
+      'name, angle brackets, comments, quotes, groups or lists, and a domain ' +
+      'with at least one dot'
   )
   .describe('A single email address, e.g. person@example.net.');
 
@@ -138,9 +172,15 @@ export const flagListParam = z
     'IMAP flags or keywords, e.g. ["\\\\Seen"], ["\\\\Flagged"] or a custom keyword.'
   );
 
+/**
+ * mcp-approval issues 16 random bytes as lowercase hex. Anything else cannot be
+ * a token this server issued, so it is refused before it reaches the store.
+ */
 export const confirmTokenParam = z
   .string()
   .min(1)
+  .max(128)
+  .regex(/^[0-9a-f]+$/, 'must be a token as issued by this server')
   .optional()
   .describe(
     'Confirmation token from a previous call of this tool with the same arguments. Omit on the first call.'

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   call,
@@ -574,6 +574,421 @@ describe('argument stripping', () => {
     for (const leaked of ['mailbox_override', 'Trash', 'silent', '99']) {
       expect(serialized).not.toContain(leaked);
     }
+    await harness.close();
+  });
+});
+
+/** Collects what audit() writes to stderr while a test runs. */
+function captureAudit(): { lines: string[]; restore: () => void } {
+  const lines: string[] = [];
+  const spy = vi
+    .spyOn(console, 'error')
+    .mockImplementation((...args: unknown[]) => {
+      lines.push(args.map(String).join(' '));
+    });
+  return {
+    lines,
+    restore: () => {
+      spy.mockRestore();
+    },
+  };
+}
+
+describe('a write the server refuses', () => {
+  // imapflow answers a NO or BAD to STORE, COPY, MOVE and EXPUNGE with `false`
+  // instead of throwing. Every call site used to await it and carry on, so a
+  // refused change was reported to the model as done and written to the audit
+  // log as done.
+
+  it('is an error, not a flag change, when STORE is refused', async () => {
+    const logged = captureAudit();
+    const harness = await connect({ config: writeConfig });
+    harness.imap.refuse.add('messageFlagsAdd');
+    const result = await call(harness.client, 'set_message_flags', {
+      uids: [2],
+      add: ['\\Flagged'],
+    });
+    logged.restore();
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('refused');
+    expect(logged.lines.filter((l) => l.includes('imap-mcp audit'))).toEqual(
+      []
+    );
+    await harness.close();
+  });
+
+  it('is an error when removing a flag is refused, and nothing is audited', async () => {
+    const logged = captureAudit();
+    const harness = await connect({ config: writeConfig });
+    harness.imap.refuse.add('messageFlagsRemove');
+    const result = await call(harness.client, 'set_message_flags', {
+      uids: [1],
+      remove: ['AiSeen'],
+    });
+    logged.restore();
+    expect(result.isError).toBe(true);
+    expect(logged.lines.filter((l) => l.includes('imap-mcp audit'))).toEqual(
+      []
+    );
+    await harness.close();
+  });
+
+  it('is an error, and no audit line, when MOVE is refused', async () => {
+    const logged = captureAudit();
+    const harness = await connect({ config: writeConfig, elicit: 'accept' });
+    harness.imap.refuse.add('messageMove');
+    const result = await call(harness.client, 'move_messages', {
+      uids: [2],
+      destination: 'Archive',
+    });
+    logged.restore();
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('MOVE was refused');
+    expect(textOf(result)).not.toContain('moved');
+    expect(logged.lines.filter((l) => l.includes('imap-mcp audit'))).toEqual(
+      []
+    );
+    await harness.close();
+  });
+
+  it('is an error when the destination does not exist', async () => {
+    // The server answers NO [TRYCREATE]; nothing creates the folder.
+    const harness = await connect({ config: writeConfig, elicit: 'accept' });
+    const result = await call(harness.client, 'move_messages', {
+      uids: [2],
+      destination: 'Nowhere',
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('refused');
+    await harness.close();
+  });
+
+  it('is an error when COPY is refused', async () => {
+    const logged = captureAudit();
+    const harness = await connect({ config: writeConfig, elicit: 'accept' });
+    harness.imap.refuse.add('messageCopy');
+    const result = await call(harness.client, 'move_messages', {
+      uids: [2],
+      destination: 'Archive',
+      mode: 'copy',
+    });
+    logged.restore();
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('COPY was refused');
+    expect(logged.lines.filter((l) => l.includes('imap-mcp audit'))).toEqual(
+      []
+    );
+    await harness.close();
+  });
+
+  it('is an error, and no audit line, when EXPUNGE is refused', async () => {
+    const logged = captureAudit();
+    const harness = await connect({ config: writeConfig, elicit: 'accept' });
+    harness.imap.refuse.add('messageDelete');
+    const result = await call(harness.client, 'delete_messages', { uids: [2] });
+    logged.restore();
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('EXPUNGE was refused');
+    expect(textOf(result)).not.toContain('deleted');
+    expect(logged.lines.filter((l) => l.includes('imap-mcp audit'))).toEqual(
+      []
+    );
+    await harness.close();
+  });
+
+  it('is an error when marking new mail cannot be stored', async () => {
+    // list_new_messages tags what it returns; a refused tag meant the same mail
+    // came back as "new" for ever and the call still reported success.
+    const harness = await connect({ config: { readOnly: true } });
+    harness.imap.refuse.add('messageFlagsAdd');
+    const result = await call(harness.client, 'list_new_messages');
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('STORE was refused');
+    await harness.close();
+  });
+
+  it('says "already existed" when the mailbox was there, and audits nothing', async () => {
+    const logged = captureAudit();
+    const harness = await connect({ config: writeConfig });
+    const result = await call(harness.client, 'manage_mailbox', {
+      action: 'create',
+      mailbox: 'Archive',
+    });
+    logged.restore();
+    expect(result.isError).toBeFalsy();
+    expect(jsonOf(result)).toMatchObject({
+      action: 'create',
+      already_existed: true,
+    });
+    expect(textOf(result)).toContain('already existed');
+    expect(logged.lines.filter((l) => l.includes('imap-mcp audit'))).toEqual(
+      []
+    );
+    await harness.close();
+  });
+
+  it('still says nothing about an existing mailbox when a new one is created', async () => {
+    const harness = await connect({ config: writeConfig });
+    const payload = jsonOf(
+      await call(harness.client, 'manage_mailbox', {
+        action: 'create',
+        mailbox: 'Projects',
+      })
+    ) as Record<string, unknown>;
+    expect(payload.already_existed).toBeUndefined();
+    await harness.close();
+  });
+
+  it('reports the messages the server did not confirm as moved', async () => {
+    // UID 99 is not in the folder (another client got there first). The server
+    // answers OK and its UID map names only the message it moved.
+    const harness = await connect({ config: writeConfig, elicit: 'accept' });
+    const payload = jsonOf(
+      await call(harness.client, 'move_messages', {
+        uids: [2, 99],
+        destination: 'Archive',
+      })
+    ) as { action: string; unconfirmed_uids?: number[]; note?: string };
+    expect(payload.action).toBe('moved');
+    expect(payload.unconfirmed_uids).toEqual([99]);
+    expect(payload.note).toContain('1 of 2');
+    await harness.close();
+  });
+
+  it('adds no caveat when every message is confirmed, or the server sends no map', async () => {
+    const harness = await connect({ config: writeConfig, elicit: 'accept' });
+    const full = jsonOf(
+      await call(harness.client, 'move_messages', {
+        uids: [2],
+        destination: 'Archive',
+      })
+    ) as Record<string, unknown>;
+    expect(full.note).toBeUndefined();
+
+    // Without UIDPLUS imapflow has no COPYUID to read, hence no map.
+    harness.imap.capabilities.delete('UIDPLUS');
+    const unmapped = jsonOf(
+      await call(harness.client, 'move_messages', {
+        uids: [3],
+        destination: 'Archive',
+      })
+    ) as Record<string, unknown>;
+    expect(unmapped.note).toBeUndefined();
+    await harness.close();
+  });
+});
+
+/** INBOX with message 1 flagged \Deleted by "another client" and 2, 3 as is. */
+function withStray(): ReturnType<typeof defaultMailboxes> {
+  return [
+    {
+      path: 'INBOX',
+      messages: [
+        message(1, { flags: new Set(['\\Deleted']) }),
+        message(2),
+        message(3),
+      ],
+    },
+    { path: 'Archive', messages: [] },
+  ];
+}
+const uidsOf = (box: ReturnType<typeof defaultMailboxes>[number]) =>
+  box.messages.map((m) => m.uid);
+
+describe('a bare EXPUNGE takes more than was approved', () => {
+  it("refuses a delete that would purge another client's \\Deleted mail", async () => {
+    const mailboxes = withStray();
+    const harness = await connect({
+      config: writeConfig,
+      mailboxes,
+      elicit: 'accept',
+    });
+    harness.imap.capabilities.delete('UIDPLUS');
+    const result = await call(harness.client, 'delete_messages', { uids: [2] });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('1 other message(s)');
+    expect(textOf(result)).toContain('UIDPLUS');
+    expect(textOf(result)).toContain('set_message_flags');
+    // Refused before the person was asked, and before anything was written.
+    expect(harness.prompts).toEqual([]);
+    expect(
+      harness.imap.calls.some((entry) => entry.name === 'messageDelete')
+    ).toBe(false);
+    expect(uidsOf(mailboxes[0]!)).toEqual([1, 2, 3]);
+    await harness.close();
+  });
+
+  it('deletes exactly the approved UIDs when the server has UIDPLUS', async () => {
+    const mailboxes = withStray();
+    const harness = await connect({
+      config: writeConfig,
+      mailboxes,
+      elicit: 'accept',
+    });
+    const result = await call(harness.client, 'delete_messages', { uids: [2] });
+    expect(result.isError).toBeFalsy();
+    expect(uidsOf(mailboxes[0]!)).toEqual([1, 3]);
+    await harness.close();
+  });
+
+  it('allows it when the only \\Deleted messages are the approved ones', async () => {
+    const mailboxes = withStray();
+    const harness = await connect({
+      config: writeConfig,
+      mailboxes,
+      elicit: 'accept',
+    });
+    harness.imap.capabilities.delete('UIDPLUS');
+    const result = await call(harness.client, 'delete_messages', { uids: [1] });
+    expect(result.isError).toBeFalsy();
+    expect(uidsOf(mailboxes[0]!)).toEqual([2, 3]);
+    await harness.close();
+  });
+
+  it('checks again at the moment of writing, after a token round trip', async () => {
+    // The first call found nothing in the way; another client flagged a message
+    // before the second one. The answer given in between covered the UIDs that
+    // were named, not this.
+    const mailboxes = withStray();
+    mailboxes[0]!.messages[0]!.flags.clear();
+    const harness = await connect({ config: writeConfig, mailboxes });
+    harness.imap.capabilities.delete('UIDPLUS');
+    const first = await call(harness.client, 'delete_messages', { uids: [2] });
+    expect(textOf(first)).toContain('confirm_token');
+    mailboxes[0]!.messages[0]!.flags.add('\\Deleted');
+    const second = await call(harness.client, 'delete_messages', {
+      uids: [2],
+      confirm_token: tokenOf(first),
+    });
+    expect(second.isError).toBe(true);
+    expect(textOf(second)).toContain('1 other message(s)');
+    expect(uidsOf(mailboxes[0]!)).toEqual([1, 2, 3]);
+    await harness.close();
+  });
+
+  it('refuses a move on a server with neither MOVE nor UIDPLUS', async () => {
+    const mailboxes = withStray();
+    const harness = await connect({
+      config: writeConfig,
+      mailboxes,
+      elicit: 'accept',
+    });
+    harness.imap.capabilities.delete('UIDPLUS');
+    harness.imap.capabilities.delete('MOVE');
+    const result = await call(harness.client, 'move_messages', {
+      uids: [2],
+      destination: 'Archive',
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('1 other message(s)');
+    expect(textOf(result)).toContain('MOVE');
+    expect(harness.prompts).toEqual([]);
+    expect(
+      harness.imap.calls.some((entry) => entry.name === 'messageMove')
+    ).toBe(false);
+    expect(uidsOf(mailboxes[0]!)).toEqual([1, 2, 3]);
+    await harness.close();
+  });
+
+  it.each([
+    ['has MOVE but not UIDPLUS', ['UIDPLUS']],
+    ['has UIDPLUS but not MOVE', ['MOVE']],
+  ])('moves only what was approved when the server %s', async (_why, drop) => {
+    const mailboxes = withStray();
+    const harness = await connect({
+      config: writeConfig,
+      mailboxes,
+      elicit: 'accept',
+    });
+    for (const capability of drop) harness.imap.capabilities.delete(capability);
+    const result = await call(harness.client, 'move_messages', {
+      uids: [2],
+      destination: 'Archive',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(uidsOf(mailboxes[0]!)).toEqual([1, 3]);
+    expect(uidsOf(mailboxes[1]!)).toEqual([2]);
+    await harness.close();
+  });
+
+  it('does not stand in the way of a copy, which expunges nothing', async () => {
+    const mailboxes = withStray();
+    const harness = await connect({
+      config: writeConfig,
+      mailboxes,
+      elicit: 'accept',
+    });
+    harness.imap.capabilities.delete('UIDPLUS');
+    harness.imap.capabilities.delete('MOVE');
+    const result = await call(harness.client, 'move_messages', {
+      uids: [2],
+      destination: 'Archive',
+      mode: 'copy',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(uidsOf(mailboxes[0]!)).toEqual([1, 2, 3]);
+    await harness.close();
+  });
+
+  it('proves the fake: a bare EXPUNGE really purges every \\Deleted message', async () => {
+    // Keeps the guard honest — the tests above are only worth anything while
+    // the fake does what a server without UIDPLUS does.
+    const mailboxes = withStray();
+    const harness = await connect({ config: writeConfig, mailboxes });
+    harness.imap.capabilities.delete('UIDPLUS');
+    const lock = await harness.imap.getMailboxLock('INBOX');
+    await harness.imap.messageDelete([2], { uid: true });
+    lock.release();
+    expect(uidsOf(mailboxes[0]!)).toEqual([3]);
+    await harness.close();
+  });
+});
+
+describe('move_messages onto the mailbox it came from', () => {
+  it.each([
+    ['the default mailbox, named INBOX', undefined, 'INBOX'],
+    ['INBOX in another case', undefined, 'inbox'],
+    ['INBOX named in both arguments, in different cases', 'Inbox', 'iNbOx'],
+    ['a named mailbox', 'Archive', 'Archive'],
+  ])('is refused for %s, move and copy alike', async (_why, mailbox, to) => {
+    const harness = await connect({ config: writeConfig, elicit: 'accept' });
+    for (const mode of ['move', 'copy'] as const) {
+      const result = await call(harness.client, 'move_messages', {
+        uids: [2],
+        destination: to,
+        ...(mailbox === undefined ? {} : { mailbox }),
+        mode,
+      });
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain('already in');
+    }
+    // Refused before the dialog and before any command.
+    expect(harness.prompts).toEqual([]);
+    expect(
+      harness.imap.calls.some((e) =>
+        ['messageMove', 'messageCopy'].includes(e.name)
+      )
+    ).toBe(false);
+    await harness.close();
+  });
+
+  it('compares every name except INBOX as written', async () => {
+    // "Archive" and "archive" are two folders to IMAP.
+    const harness = await connect({
+      config: writeConfig,
+      elicit: 'accept',
+      mailboxes: [
+        { path: 'INBOX', messages: [message(2)] },
+        { path: 'Archive', messages: [] },
+        { path: 'archive', messages: [] },
+      ],
+    });
+    const result = await call(harness.client, 'move_messages', {
+      uids: [2],
+      mailbox: 'Archive',
+      destination: 'archive',
+    });
+    expect(textOf(result)).not.toContain('already in');
     await harness.close();
   });
 });

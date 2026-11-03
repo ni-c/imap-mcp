@@ -12,6 +12,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   ALL_TOOLS,
+  catalogueFor,
   ESSENTIAL_TOOLS,
   READ_TOOLS,
   WRITE_TOOLS,
@@ -214,5 +215,67 @@ describe('together with the read-only default', () => {
     expect(await names({ denyTools: 'delete_messages' })).toEqual(
       [...READ_TOOLS].toSorted()
     );
+  });
+});
+
+const noKeyword = (extra: Parameters<typeof testConfig>[0] = {}) => ({
+  ...extra,
+  imap: { ...testConfig().imap, seenKeyword: '' },
+});
+
+describe('without IMAP_SEEN_KEYWORD', () => {
+  // list_new_messages is registered only while the keyword is not empty. The
+  // catalogue used to list it regardless: an explicit request for it passed the
+  // filter and registered nothing, and "essential" came out a tool short.
+  it('leaves list_new_messages out of what the server registers', async () => {
+    const list = await names(noKeyword({ readOnly: false }));
+    expect(list).not.toContain('list_new_messages');
+    expect(list).toEqual(
+      ALL_TOOLS.filter((t) => t !== 'list_new_messages').toSorted()
+    );
+  });
+
+  it('agrees with the catalogue, for both settings', async () => {
+    for (const seenKeyword of ['AiSeen', '']) {
+      const config = {
+        readOnly: false,
+        imap: { ...testConfig().imap, seenKeyword },
+      };
+      expect(await names(config)).toEqual(
+        [...catalogueFor(seenKeyword).all].toSorted()
+      );
+    }
+  });
+
+  it('fails loudly for an explicit request for the tool that is not there', () => {
+    expect(() => build(noKeyword({ allowTools: 'list_new_messages' }))).toThrow(
+      ToolFilterError
+    );
+    expect(() => build(noKeyword({ allowTools: 'list_new_messages' }))).toThrow(
+      /no tool matches "list_new_messages"/
+    );
+  });
+
+  it('still accepts the same request when the keyword is set', async () => {
+    expect(await names({ allowTools: 'list_new_messages' })).toEqual([
+      'list_new_messages',
+    ]);
+  });
+
+  it('gives "essential" exactly what is registered, one tool short of the full set', async () => {
+    const expected = ESSENTIAL_TOOLS.filter(
+      (t) => t !== 'list_new_messages'
+    ).toSorted();
+    expect(
+      await names(noKeyword({ readOnly: false, allowTools: 'essential' }))
+    ).toEqual(expected);
+    expect(expected).toHaveLength(ESSENTIAL_TOOLS.length - 1);
+  });
+
+  it('keeps a pattern that matches it working, without it', async () => {
+    expect(await names(noKeyword({ allowTools: 'list_*' }))).toEqual([
+      'list_mailboxes',
+      'list_messages',
+    ]);
   });
 });

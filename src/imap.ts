@@ -1,5 +1,6 @@
 import { ImapFlow } from 'imapflow';
 import type {
+  CopyResponseObject,
   FetchMessageObject,
   FetchQueryObject,
   ListResponse,
@@ -62,7 +63,10 @@ export interface ImapConnection {
   list(options?: {
     statusQuery?: { messages?: boolean; unseen?: boolean; uidNext?: boolean };
   }): Promise<ListResponse[]>;
-  status(path: string, query: Record<string, boolean>): Promise<StatusObject>;
+  status(
+    path: string,
+    query: Record<string, boolean>
+  ): Promise<StatusObject | false>;
   getMailboxLock(
     path: string,
     options?: { readOnly?: boolean }
@@ -70,7 +74,7 @@ export interface ImapConnection {
   search(
     query: SearchObject,
     options?: { uid?: boolean }
-  ): Promise<number[] | false>;
+  ): Promise<number[] | false | undefined>;
   fetch(
     range: number[] | string,
     query: FetchQueryObject,
@@ -94,16 +98,18 @@ export interface ImapConnection {
     flags: string[],
     options?: { uid?: boolean }
   ): Promise<boolean>;
+  // imapflow answers a NO or BAD to a write command with `false` instead of
+  // throwing. See requireOk: the result of every one of these has to be read.
   messageMove(
     range: number[],
     destination: string,
     options?: { uid?: boolean }
-  ): Promise<unknown>;
+  ): Promise<CopyResponseObject | false>;
   messageCopy(
     range: number[],
     destination: string,
     options?: { uid?: boolean }
-  ): Promise<unknown>;
+  ): Promise<CopyResponseObject | false>;
   messageDelete(range: number[], options?: { uid?: boolean }): Promise<boolean>;
   append(
     path: string,
@@ -111,7 +117,8 @@ export interface ImapConnection {
     flags?: string[],
     date?: Date
   ): Promise<unknown>;
-  mailboxCreate(path: string): Promise<unknown>;
+  /** `created: false` is imapflow's reading of ALREADYEXISTS. */
+  mailboxCreate(path: string): Promise<{ path: string; created: boolean }>;
   mailboxRename(path: string, newPath: string): Promise<unknown>;
   mailboxDelete(path: string): Promise<unknown>;
   readonly capabilities: Map<string, boolean | number>;
@@ -141,10 +148,41 @@ const defaultFactory: ImapClientFactory = (config) =>
     // Scoped to this connection: NODE_TLS_REJECT_UNAUTHORIZED would disable
     // certificate checking for the whole process, SMTP included.
     tls: config.insecureTls ? { rejectUnauthorized: false } : {},
+    // imapflow's own defaults are 1 GiB per literal and per line, and every
+    // size check here runs only after imapflow has buffered the bytes — so a
+    // hostile server, or anyone in the path of IMAP_TLS=none, could answer the
+    // 2 MiB partial fetch of get_message with a gigabyte.
+    ...IMAP_RESPONSE_LIMITS,
   }) as unknown as ImapConnection;
+
+/**
+ * The largest IMAP responses this server ever asks for. Attachments are
+ * downloaded in 64 KiB partial fetches, so the biggest literal is the 2 MiB
+ * source of get_message; a line without literals is at its longest in the
+ * SEARCH answer of a very large folder.
+ */
+export const IMAP_RESPONSE_LIMITS = {
+  maxLiteralSize: 4 * 1024 * 1024,
+  maxLineLength: 64 * 1024 * 1024,
+  maxResponseSize: 96 * 1024 * 1024,
+} as const;
 
 /** How long a single IMAP command may take before the call is abandoned. */
 const COMMAND_TIMEOUT_MS = 30_000;
+
+/**
+ * How long opening a connection may take, LOGIN included. imapflow's own
+ * connect deadline ends at the TCP handshake; after that only its five-minute
+ * idle timer runs, and any line from the server re-arms it.
+ */
+const CONNECT_TIMEOUT_MS = 60_000;
+
+/**
+ * The code of this server's own command timeout. It is not a dropped
+ * connection: the command may still be running — or have run — on the
+ * server, so the connection is closed and the call is not repeated.
+ */
+export const COMMAND_TIMEOUT = 'COMMAND_TIMEOUT';
 
 /**
  * How long a refused connection attempt is answered from memory.
@@ -272,7 +310,13 @@ export class ImapClient {
         };
         client.on('error', drop);
         client.on('close', drop);
-        await client.connect();
+        try {
+          await withTimeout(client.connect(), 'CONNECT', CONNECT_TIMEOUT_MS);
+        } catch (error) {
+          // A stalled LOGIN would otherwise hold every caller on this promise.
+          closeQuietly(client);
+          throw error;
+        }
         this.connection = client;
         return client;
       } catch (error) {
@@ -306,11 +350,11 @@ export class ImapClient {
     fn: (client: ImapConnection, path: string) => Promise<T>
   ): Promise<T> {
     const path = mailbox ?? this.config.imap.mailbox;
+    const started = Date.now();
     try {
       return await this.run(path, readOnly, fn);
     } catch (error) {
-      if (!isConnectionError(error)) throw error;
-      this.forget();
+      if (!this.retryable(error, readOnly, started)) throw error;
       return await this.run(path, readOnly, fn);
     }
   }
@@ -323,14 +367,26 @@ export class ImapClient {
     const client = await this.openConnection();
     let lock: { release(): void } | undefined;
     try {
-      lock = await client.getMailboxLock(path, { readOnly });
+      lock = await withTimeout(
+        client.getMailboxLock(path, { readOnly }),
+        'SELECT'
+      );
       // A NOOP before SEARCH: without it the server is free to keep reporting
       // the mailbox as it looked when the connection was opened, and mail that
       // arrived since then stays invisible.
       await withTimeout(client.noop(), 'NOOP');
+      // imapflow's NOOP swallows a failure, and a connection that died under
+      // it has dropped its selected mailbox.
+      if (client.mailbox === false) {
+        throw new MailError('The IMAP connection was lost', 'NoConnection');
+      }
       return await fn(client, path);
     } catch (error) {
-      throw asMailError(error);
+      const mailError = asMailError(error);
+      if (mailError.code === COMMAND_TIMEOUT || isConnectionError(mailError)) {
+        this.forget(client);
+      }
+      throw mailError;
     } finally {
       lock?.release();
     }
@@ -340,26 +396,60 @@ export class ImapClient {
   async withConnection<T>(
     fn: (client: ImapConnection) => Promise<T>
   ): Promise<T> {
-    try {
-      return await fn(await this.openConnection());
-    } catch (error) {
-      if (!isConnectionError(error)) throw asMailError(error);
-      this.forget();
+    const started = Date.now();
+    const attempt = async (): Promise<T> => {
+      const client = await this.openConnection();
       try {
-        return await fn(await this.openConnection());
-      } catch (retryError) {
-        throw asMailError(retryError);
+        return await fn(client);
+      } catch (error) {
+        const mailError = asMailError(error);
+        if (
+          mailError.code === COMMAND_TIMEOUT ||
+          isConnectionError(mailError)
+        ) {
+          this.forget(client);
+        }
+        throw mailError;
       }
+    };
+    try {
+      return await attempt();
+    } catch (error) {
+      if (!this.retryable(error, false, started)) throw error;
+      return await attempt();
     }
   }
 
-  private forget(): void {
-    try {
-      this.connection?.close();
-    } catch {
-      // Already gone; nothing to clean up.
-    }
-    this.connection = undefined;
+  /**
+   * Whether a failed call gets its one retry: only a connection that dropped
+   * under it. Never this server's own command timeout — the command may have
+   * run on the server — and never a connect that was itself refused during
+   * this call, which the retry would only answer from memory.
+   */
+  private retryable(
+    error: unknown,
+    readOnly: boolean,
+    started: number
+  ): boolean {
+    if (error instanceof ToolInputError) return false;
+    const mailError = asMailError(error);
+    if (mailError.code === COMMAND_TIMEOUT) return false;
+    if (this.refused !== undefined && this.refused.at >= started) return false;
+    return (
+      isConnectionError(mailError) ||
+      (readOnly && READ_RETRY_CODES.has(mailError.code ?? ''))
+    );
+  }
+
+  /**
+   * Closes a connection. Only the one that failed: a concurrent call may
+   * already have replaced it, and closing the successor would fail that
+   * call's retry.
+   */
+  private forget(client: ImapConnection | undefined = this.connection): void {
+    if (client === undefined) return;
+    closeQuietly(client);
+    if (this.connection === client) this.connection = undefined;
   }
 
   async listMailboxes(): Promise<MailboxListing> {
@@ -387,10 +477,16 @@ export class ImapClient {
           }
           queried += 1;
           try {
-            entry.status = await withTimeout(
+            const status = await withTimeout(
               client.status(entry.path, statusQuery),
               'STATUS'
             );
+            // imapflow answers a refused STATUS with false, not with an error.
+            if (status === false) {
+              statusOmitted += 1;
+              continue;
+            }
+            entry.status = status;
           } catch (error) {
             // A folder the server refuses to STATUS is still a folder. A
             // dropped connection, though, is the whole listing's problem.
@@ -463,8 +559,9 @@ export class ImapClient {
         { uid: true, envelope: true, headers: ['references', 'in-reply-to'] },
         { uid: true }
       )) {
-        const raw = message.headers?.toString('utf-8') ?? '';
-        const ids = (raw.match(/<[^\s<>]{1,255}>/g) ?? []).filter(isMessageId);
+        const { references, inReplyTo } = parseThreadHeaders(
+          message.headers?.toString('utf-8') ?? ''
+        );
         // The envelope's id is the server's rendering of a header the sender
         // wrote. It goes into the In-Reply-To header of a draft, so it has to
         // be shaped like a Message-ID before it is written anywhere: a value
@@ -475,12 +572,9 @@ export class ImapClient {
           envelopeId !== undefined && isMessageId(envelopeId)
             ? envelopeId
             : undefined;
-        const chain = [...ids, ...(messageId === undefined ? [] : [messageId])];
         return {
           messageId,
-          // Bounded: a long-running thread accumulates dozens of ids and each
-          // one lengthens the header we are about to write.
-          references: [...new Set(chain)].slice(-20),
+          references: referenceChain(references, inReplyTo, messageId),
         };
       }
       throw new ToolInputError(
@@ -499,7 +593,11 @@ export class ImapClient {
       client.search(query, { uid: true }),
       'SEARCH'
     );
-    if (found !== false) return found;
+    if (Array.isArray(found)) return found;
+    // undefined: imapflow found no selected mailbox, so the connection is gone.
+    if (found !== false) {
+      throw new MailError('The IMAP connection was lost', 'NoConnection');
+    }
     if (onRefusal === 'empty') return [];
     throw new MailError(
       'The mail server refused this search',
@@ -513,24 +611,24 @@ export class ImapClient {
     uids: number[]
   ): Promise<FetchMessageObject[]> {
     if (uids.length === 0) return [];
-    const messages: FetchMessageObject[] = [];
-    for await (const message of client.fetch(
-      uids,
-      {
-        uid: true,
-        envelope: true,
-        flags: true,
-        size: true,
-        internalDate: true,
-        // `hasAttachments` in every summary is read off the body structure.
-        // Without this item it was always false — the projection asked a
-        // question the fetch never carried the answer to.
-        bodyStructure: true,
-      },
-      { uid: true }
-    )) {
-      messages.push(message);
-    }
+    const messages = await collectFetch(
+      client.fetch(
+        uids,
+        {
+          uid: true,
+          envelope: true,
+          flags: true,
+          size: true,
+          internalDate: true,
+          // `hasAttachments` in every summary is read off the body structure.
+          // Without this item it was always false — the projection asked a
+          // question the fetch never carried the answer to.
+          bodyStructure: true,
+        },
+        { uid: true }
+      ),
+      uids
+    );
     return messages.toSorted((a, b) => b.uid - a.uid);
   }
 
@@ -544,15 +642,49 @@ export class ImapClient {
    */
   async tagSeen(client: ImapConnection, uids: number[]): Promise<void> {
     if (uids.length === 0 || this.config.imap.seenKeyword === '') return;
-    await withTimeout(
-      client.messageFlagsAdd(uids, [this.config.imap.seenKeyword], {
-        uid: true,
-      }),
+    requireOk(
+      await withTimeout(
+        client.messageFlagsAdd(uids, [this.config.imap.seenKeyword], {
+          uid: true,
+        }),
+        'STORE'
+      ),
       'STORE'
     );
   }
 
+  /**
+   * Every folder the server lists with the role it gave it, and how it came to
+   * that role — without the STATUS round trips {@link listMailboxes} makes.
+   *
+   * For callers that look for one folder by role. Counting messages in every
+   * folder of a large or shared account to find Drafts is a minute of work for
+   * a path.
+   */
+  async listMailboxRoles(): Promise<
+    Array<{
+      path: string;
+      specialUse: string | undefined;
+      specialUseSource: 'user' | 'extension' | 'name' | undefined;
+      selectable: boolean;
+    }>
+  > {
+    return this.withConnection(async (client) => {
+      const listed = await withTimeout(client.list(), 'LIST');
+      return listed.slice(0, MAX_MAILBOXES).map((entry) => ({
+        path: entry.path,
+        specialUse: entry.specialUse,
+        specialUseSource: entry.specialUseSource,
+        selectable:
+          !entry.flags.has('\\Noselect') && !entry.flags.has('\\NonExistent'),
+      }));
+    });
+  }
+
   async close(): Promise<void> {
+    // A connect still in flight would otherwise set `this.connection` after
+    // the close and keep the session open.
+    await this.connecting?.catch(() => undefined);
     // Held locally: a logout ends in a 'close' event, which already clears
     // `this.connection` before a failed logout gets to the fallback.
     const connection = this.connection;
@@ -564,6 +696,84 @@ export class ImapClient {
     }
     this.connection = undefined;
   }
+}
+
+/**
+ * The result of a write command, or a {@link MailError} when the server said no.
+ *
+ * imapflow does not throw for a NO or BAD to STORE, COPY, MOVE or EXPUNGE: it
+ * resolves to `false` (or, when its own preconditions are not met, to
+ * `undefined`). A call site that awaits the command and moves on reports a
+ * refused move as done, and writes it to the audit log as done.
+ */
+export function requireOk<T>(
+  result: T | false | undefined | null,
+  command: string
+): T {
+  if (result === false || result === undefined || result === null) {
+    throw new MailError(
+      `IMAP ${command} was refused by the mail server, so the change was not ` +
+        'made in full. List the mailbox to see what state it is in before ' +
+        'trying again.',
+      'COMMAND_REFUSED'
+    );
+  }
+  return result;
+}
+
+/** Message-IDs one draft's References header may carry. */
+export const MAX_REFERENCES = 20;
+
+/**
+ * The Message-IDs in the References and In-Reply-To headers of a raw header
+ * block, each kept apart and in the order the sender wrote them.
+ *
+ * Read per header, not as one list of everything that looks like an id: the
+ * order of the two headers in the message says nothing about the order of the
+ * thread, and Gmail and Apple Mail write In-Reply-To first.
+ */
+export function parseThreadHeaders(raw: string): {
+  references: string[];
+  inReplyTo: string[];
+} {
+  const found = { references: [] as string[], inReplyTo: [] as string[] };
+  for (const line of raw.replace(/\r?\n[ \t]+/g, ' ').split(/\r?\n/)) {
+    const header = /^(references|in-reply-to):(.*)$/is.exec(line);
+    if (header?.[1] === undefined) continue;
+    const ids = (header[2]?.match(/<[^\s<>]{1,255}>/g) ?? []).filter(
+      isMessageId
+    );
+    found[
+      header[1].toLowerCase() === 'references' ? 'references' : 'inReplyTo'
+    ].push(...ids);
+  }
+  return found;
+}
+
+/**
+ * The References chain for a reply: the parent's own chain, oldest first, then
+ * the parent.
+ *
+ * RFC 5322 puts the oldest ancestor first and the message replied to last. Ids
+ * only In-Reply-To names come after the References ones, the parent's own id
+ * last, and the first occurrence of a repeated id wins. A long thread keeps its
+ * root and its most recent {@link MAX_REFERENCES} - 1 ancestors — the two ends
+ * a client threads by — rather than only the tail.
+ */
+export function referenceChain(
+  references: string[],
+  inReplyTo: string[],
+  parent: string | undefined
+): string[] {
+  const chain = [
+    ...new Set([
+      ...references,
+      ...inReplyTo,
+      ...(parent === undefined ? [] : [parent]),
+    ]),
+  ];
+  if (chain.length <= MAX_REFERENCES) return chain;
+  return [chain[0] as string, ...chain.slice(-(MAX_REFERENCES - 1))];
 }
 
 /** Rejects a promise that outlives the command timeout. */
@@ -582,7 +792,7 @@ export async function withTimeout<T>(
             reject(
               new MailError(
                 `IMAP ${command} timed out after ${ms / 1000} seconds`,
-                'ETIMEDOUT'
+                COMMAND_TIMEOUT
               )
             ),
           ms
@@ -603,6 +813,52 @@ const CONNECTION_ERROR_CODES = new Set([
   'ENOTCONN',
   'NoConnection',
 ]);
+
+/**
+ * imapflow's own codes for a connection that went away under a command. A
+ * read is simply asked again; a write is not, because the server may have
+ * carried it out before the connection died.
+ */
+const READ_RETRY_CODES = new Set([
+  'EConnectionClosed',
+  'StateLogout',
+  'ETIMEOUT',
+  'ECONNABORTED',
+]);
+
+function closeQuietly(client: ImapConnection): void {
+  try {
+    client.close();
+  } catch {
+    // Already gone; nothing to clean up.
+  }
+}
+
+/**
+ * The rows of a FETCH, bounded in time and filtered to what was asked for.
+ *
+ * imapflow yields every untagged FETCH that arrives during the command —
+ * unsolicited flag updates without a UID included — and a row of a message
+ * nobody asked for is not one of the answers.
+ */
+export async function collectFetch(
+  rows: AsyncIterable<FetchMessageObject>,
+  uids: readonly number[]
+): Promise<FetchMessageObject[]> {
+  const wanted = new Set(uids);
+  return withTimeout(
+    (async () => {
+      const found: FetchMessageObject[] = [];
+      for await (const row of rows) {
+        if (Number.isSafeInteger(row.uid) && wanted.has(row.uid)) {
+          found.push(row);
+        }
+      }
+      return found;
+    })(),
+    'FETCH'
+  );
+}
 
 function isConnectionError(error: unknown): boolean {
   if (error instanceof MailError) {
@@ -625,6 +881,9 @@ export function asMailError(error: unknown): MailError {
     | {
         message?: unknown;
         code?: unknown;
+        serverResponseCode?: unknown;
+        authenticationFailed?: unknown;
+        tlsFailed?: unknown;
         responseText?: unknown;
         response?: unknown;
       }
@@ -632,7 +891,19 @@ export function asMailError(error: unknown): MailError {
     | undefined;
   const message =
     typeof source?.message === 'string' ? source.message : String(error);
-  const code = typeof source?.code === 'string' ? source.code : undefined;
+  // imapflow puts a refused LOGIN in `authenticationFailed` and the server's
+  // [CODE] in `serverResponseCode`, and leaves `code` unset — the hints keyed
+  // on the code never fired against the real library.
+  const code =
+    source?.authenticationFailed === true
+      ? 'AUTHENTICATIONFAILED'
+      : source?.tlsFailed === true
+        ? 'TLSFAILED'
+        : typeof source?.code === 'string'
+          ? source.code
+          : typeof source?.serverResponseCode === 'string'
+            ? source.serverResponseCode
+            : undefined;
   const responseText =
     typeof source?.responseText === 'string'
       ? source.responseText

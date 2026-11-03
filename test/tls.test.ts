@@ -71,6 +71,13 @@ describe('the real ImapFlow is constructed with', () => {
     expect(none.doSTARTTLS).toBe(false);
   });
 
+  it("response ceilings far below imapflow's 1 GiB defaults", async () => {
+    const options = await construct({});
+    expect(options.maxLiteralSize).toBe(4 * 1024 * 1024);
+    expect(options.maxLineLength).toBe(64 * 1024 * 1024);
+    expect(options.maxResponseSize).toBe(96 * 1024 * 1024);
+  });
+
   it('its traffic logger off, because stdout is the MCP transport', async () => {
     expect((await construct({})).logger).toBe(false);
   });

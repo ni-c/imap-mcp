@@ -2,7 +2,7 @@ import { createRequire } from 'node:module';
 import { McpServer } from '@modelcontextprotocol/server';
 import { buildToolFilter, installToolFilter } from 'mcp-tool-allowlist';
 
-import { ALL_TOOLS, ESSENTIAL_TOOLS, READ_TOOLS } from './tools/catalogue.js';
+import { catalogueFor } from './tools/catalogue.js';
 
 import type { Config } from './config.js';
 import { ConfirmationStore, createApproval } from 'mcp-approval';
@@ -37,17 +37,20 @@ export interface ServerDeps {
   imapFactory?: ImapClientFactory;
 }
 
+/** The IMAP client behind each server, so the process can log them out. */
+const clients = new WeakMap<McpServer, ImapClient>();
+
+export function imapClientOf(server: McpServer): ImapClient | undefined {
+  return clients.get(server);
+}
+
 export function createServer(config: Config, deps: ServerDeps = {}): McpServer {
   // Before anything is built: an unusable tool list should fail on the way in,
   // not leave a server running with tools quietly missing.
   const filter = buildToolFilter({
     allowTools: config.allowTools,
     denyTools: config.denyTools,
-    catalogue: {
-      all: ALL_TOOLS,
-      essential: ESSENTIAL_TOOLS,
-      ungated: READ_TOOLS,
-    },
+    catalogue: catalogueFor(config.imap.seenKeyword),
     names: {
       allow: 'IMAP_ALLOW_TOOLS',
       deny: 'IMAP_DENY_TOOLS',
@@ -120,5 +123,6 @@ export function createServer(config: Config, deps: ServerDeps = {}): McpServer {
     registerWriteTools(server, client, config, confirmations, approval);
   }
 
+  clients.set(server, client);
   return server;
 }

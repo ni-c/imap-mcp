@@ -1,4 +1,4 @@
-import type { ExtractKind, ExtractResponse } from './types.js';
+import type { ExtractFailed, ExtractKind, ExtractResponse } from './types.js';
 
 /**
  * Turns markup into readable text. Injected rather than imported.
@@ -110,6 +110,11 @@ export async function extractZipDocument(
   let admitted = 0;
   let bytesLeft = MAX_INFLATED_BYTES;
   let tooManyParts = false;
+  // Parts the allowlist wanted and the size limits refused. Not the same as a
+  // part that is absent: "this archive is too large to read" and "this is not
+  // the document it claims to be" are different answers, and so is a result
+  // that is missing a sheet.
+  const oversized = new Set<string>();
   let entries;
 
   try {
@@ -133,8 +138,13 @@ export async function extractZipDocument(
         // Deflate and stored only. fflate throws on any other method once the
         // filter has said yes, and an error is a worse answer than a skip.
         if (file.compression !== 0 && file.compression !== 8) return false;
-        if (file.originalSize > MAX_ENTRY_BYTES) return false;
-        if (file.originalSize > bytesLeft) return false;
+        if (
+          file.originalSize > MAX_ENTRY_BYTES ||
+          file.originalSize > bytesLeft
+        ) {
+          oversized.add(file.name);
+          return false;
+        }
         bytesLeft -= file.originalSize;
         return true;
       },
@@ -147,54 +157,77 @@ export async function extractZipDocument(
 
   if (tooManyParts) return { ok: false, reason: 'too-many-parts' };
 
+  /** The answer for a main part that is not there: refused, or never sent. */
+  const missing = (name: string): ExtractResponse => ({
+    ok: false,
+    reason: oversized.has(name) ? 'too-large' : 'not-a-document',
+  });
+
   const read = (name: string): string | undefined => {
     const raw = entries[name];
     return raw === undefined ? undefined : strFromU8(raw);
   };
 
   if (kind === 'xlsx') {
-    return sheetsResult(readXlsx(entries, strFromU8, maxChars), maxChars);
+    return sheetsResult(
+      readXlsx(entries, strFromU8, maxChars, oversized.size > 0),
+      maxChars
+    );
   }
   if (kind === 'ods') {
     const content = read('content.xml');
-    if (content === undefined) return { ok: false, reason: 'not-a-document' };
+    if (content === undefined) return missing('content.xml');
     return sheetsResult(readOds(content, maxChars, toText), maxChars);
   }
 
   const parts: string[] = [];
   let units = 0;
   let declared: number | undefined;
-  let clipped = false;
+  let clipped = oversized.size > 0;
   let runs: { total: number; hidden: number } | undefined;
+  let hasContent = true;
 
-  if (kind === 'docx') {
-    const document = read('word/document.xml');
-    if (document === undefined) return { ok: false, reason: 'not-a-document' };
-    clipped = document.length > maxChars;
-    runs = wordRuns(document.slice(0, maxChars));
-    parts.push(toText(document, maxChars));
-  } else if (kind === 'odt') {
-    const content = read('content.xml');
-    if (content === undefined) return { ok: false, reason: 'not-a-document' };
-    clipped = content.length > maxChars;
-    parts.push(toText(content, maxChars));
+  if (kind === 'docx' || kind === 'odt') {
+    const name = kind === 'docx' ? 'word/document.xml' : 'content.xml';
+    const markup = read(name);
+    if (markup === undefined) return missing(name);
+    if (kind === 'docx') runs = wordRuns(markup);
+    // The whole part, then the cut. The part is already capped in bytes, and
+    // cutting the markup instead of the text spends `maxChars` on tags: a
+    // document that is mostly formatting would be reported as complete a few
+    // paragraphs in.
+    const full = toText(markup, markup.length);
+    clipped = clipped || full.length > maxChars;
+    parts.push(full.slice(0, maxChars));
   } else {
-    // pptx: one heading per slide, in slide order rather than in whatever order
-    // the archive happens to list them.
-    const all = Object.keys(entries)
-      .filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
-      .toSorted((a, b) => slideNumber(a) - slideNumber(b));
-    if (all.length === 0) return { ok: false, reason: 'not-a-document' };
+    // pptx: one heading per slide, in the order the presentation lists them
+    // rather than in whatever order the archive — or the file names — have.
+    const all = slideOrder(entries, strFromU8);
+    if (all.length === 0) {
+      const refused = [...oversized].some((name) =>
+        name.startsWith('ppt/slides/')
+      );
+      return { ok: false, reason: refused ? 'too-large' : 'not-a-document' };
+    }
     const slides = all.slice(0, MAX_SLIDES);
-    if (all.length > slides.length) declared = all.length;
+    if (all.length > slides.length) {
+      declared = all.length;
+      clipped = true;
+    }
+    hasContent = false;
     for (const name of slides) {
       units += 1;
-      parts.push(
-        `== Slide ${units} ==\n${toText(read(name) ?? '', maxChars)}\n`
-      );
+      const markup = read(name);
+      if (markup === undefined) clipped = true;
+      const body = toText(markup ?? '', markup?.length ?? 0);
+      if (body.trim() !== '') hasContent = true;
+      parts.push(`== Slide ${units} ==\n${body}\n`);
     }
   }
 
+  // Content first, headings after: a deck of empty slides is not a document
+  // with text in it, whatever the headings add.
+  if (!hasContent) return { ok: false, reason: 'no-text-layer' };
   const joined = parts.join('');
   const text = joined.slice(0, maxChars);
   if (text.trim() === '') return { ok: false, reason: 'no-text-layer' };
@@ -223,13 +256,22 @@ interface Sheet {
 interface Sheets {
   sheets: Sheet[];
   clipped: boolean;
+  /** How many sheets the workbook has, when the walk read fewer. */
+  declared?: number;
 }
 
 function sheetsResult(
-  result: Sheets | undefined,
+  result: Sheets | ExtractFailed | undefined,
   maxChars: number
 ): ExtractResponse {
   if (result === undefined) return { ok: false, reason: 'not-a-document' };
+  if ('ok' in result) return result;
+  // Looked for before the headings are written: `== Sheet: A ==` is text this
+  // function adds, and a workbook of empty cells must not borrow it.
+  const hasContent = result.sheets.some((sheet) =>
+    sheet.rows.some((row) => row.some((value) => value.trim() !== ''))
+  );
+  if (!hasContent) return { ok: false, reason: 'no-text-layer' };
   const joined = result.sheets
     .map(
       (sheet) =>
@@ -246,17 +288,24 @@ function sheetsResult(
     text,
     unitLabel: 'sheets',
     unitCount: result.sheets.length,
+    ...(result.declared !== undefined && result.declared > result.sheets.length
+      ? { declaredUnitCount: result.declared }
+      : {}),
     clipped: result.clipped || joined.length > text.length,
   };
 }
 
 /* ------------------------------------------------------------------ xlsx -- */
 
+/** Sheets listed in a workbook that are counted; the rest are not worth a number. */
+const MAX_SHEET_REFS = 10_000;
+
 function readXlsx(
   entries: Record<string, Uint8Array>,
   strFromU8: (data: Uint8Array) => string,
-  maxChars: number
-): Sheets | undefined {
+  maxChars: number,
+  partsRefused: boolean
+): Sheets | ExtractFailed | undefined {
   const at = (name: string): string | undefined => {
     const raw = entries[name];
     return raw === undefined ? undefined : strFromU8(raw);
@@ -270,8 +319,11 @@ function readXlsx(
 
   const available = Object.keys(entries)
     .filter((name) => /^xl\/worksheets\/[^/]+\.xml$/.test(name))
-    .toSorted();
-  if (available.length === 0) return undefined;
+    // Numerically: `sheet10` is after `sheet2`, not before it.
+    .toSorted(NUMERIC_ORDER.compare);
+  if (available.length === 0) {
+    return partsRefused ? { ok: false, reason: 'too-large' } : undefined;
+  }
 
   // The rels file is how a tab's name is tied to its file, and `sheet1.xml` is
   // a convention rather than a rule — it is not necessarily the first tab. When
@@ -286,7 +338,7 @@ function readXlsx(
       ? planned
       : available.map((path, index) => ({ name: `Sheet ${index + 1}`, path }));
 
-  const budget: CharBudget = { left: maxChars, clipped: false };
+  const budget: CharBudget = { left: maxChars, clipped: partsRefused };
   const sheets: Sheet[] = [];
   for (const entry of plan.slice(0, MAX_SHEETS)) {
     if (budget.left <= 0) {
@@ -297,23 +349,76 @@ function readXlsx(
     if (xml === undefined) continue;
     sheets.push({ name: entry.name, rows: worksheetRows(xml, shared, budget) });
   }
-  return { sheets, clipped: budget.clipped };
+  if (plan.length > sheets.length) budget.clipped = true;
+  return { sheets, clipped: budget.clipped, declared: plan.length };
 }
 
-/** `<si>` entries in document order; a run-split string is its `<t>` pieces. */
+const NUMERIC_ORDER = new Intl.Collator('en', { numeric: true });
+
+/**
+ * `<si>` entries in document order, one per index.
+ *
+ * An empty `<si/>` still takes an index — skipping it shifts every string
+ * after it onto the wrong cell — and a run-split string is its `<t>` pieces,
+ * without the `<rPh>` phonetic guides East Asian writers add beside them: those
+ * are a reading aid for the same characters, not more text.
+ */
 function sharedStrings(xml: string | undefined): string[] {
   if (xml === undefined) return [];
   const out: string[] = [];
   let i = 0;
   while (out.length < 200_000) {
-    const open = xml.indexOf('<si>', i);
+    const open = xml.indexOf('<si', i);
     if (open < 0) break;
-    const close = xml.indexOf('</si>', open);
+    const after = xml[open + 3];
+    // `<si>`, `<si/>` and `<si attr>`, not `<sst>` or another element.
+    if (after !== '>' && after !== '/' && after !== ' ') {
+      i = open + 3;
+      continue;
+    }
+    const gt = xml.indexOf('>', open);
+    if (gt < 0) break;
+    if (xml[gt - 1] === '/') {
+      out.push('');
+      i = gt + 1;
+      continue;
+    }
+    const close = xml.indexOf('</si>', gt);
     if (close < 0) break;
-    out.push(cell(textRuns(xml.slice(open, close))));
+    out.push(cell(textRuns(withoutBlocks(xml.slice(gt + 1, close), 'rPh'))));
     i = close + 5;
   }
   return out;
+}
+
+/** The fragment without its `<name …>…</name>` blocks. Forward-only. */
+function withoutBlocks(fragment: string, name: string): string {
+  const open = `<${name}`;
+  let at = fragment.indexOf(open);
+  if (at < 0) return fragment;
+  const close = `</${name}>`;
+  const parts: string[] = [];
+  let i = 0;
+  while (at >= 0) {
+    const next = fragment[at + open.length];
+    if (next !== '>' && next !== ' ' && next !== '/') {
+      at = fragment.indexOf(open, at + open.length);
+      continue;
+    }
+    parts.push(fragment.slice(i, at));
+    const gt = fragment.indexOf('>', at);
+    if (gt < 0) return parts.join('');
+    if (fragment[gt - 1] === '/') {
+      i = gt + 1;
+    } else {
+      const end = fragment.indexOf(close, gt);
+      if (end < 0) return parts.join('');
+      i = end + close.length;
+    }
+    at = fragment.indexOf(open, i);
+  }
+  parts.push(fragment.slice(i));
+  return parts.join('');
 }
 
 /** Concatenates every `<t>…</t>` in a fragment. Forward-only. */
@@ -349,6 +454,34 @@ interface SheetRef {
   path: string;
 }
 
+/**
+ * The start tags named `name` in a fragment, as strings. Forward cursors only:
+ * a tag that never closes is answered once, instead of restarting a scan to
+ * the end of the part at every occurrence of its opening.
+ */
+function* startTags(source: string, name: string): Generator<string> {
+  const open = `<${name}`;
+  let at = source.indexOf(open);
+  while (at >= 0) {
+    const next = source[at + open.length];
+    if (
+      next !== ' ' &&
+      next !== '\t' &&
+      next !== '\n' &&
+      next !== '\r' &&
+      next !== '/' &&
+      next !== '>'
+    ) {
+      at = source.indexOf(open, at + open.length);
+      continue;
+    }
+    const gt = source.indexOf('>', at);
+    if (gt < 0) return;
+    yield source.slice(at, gt + 1);
+    at = source.indexOf(open, gt + 1);
+  }
+}
+
 function sheetOrder(
   workbook: string | undefined,
   rels: string | undefined
@@ -356,34 +489,66 @@ function sheetOrder(
   if (workbook === undefined) return [];
   const targets = new Map<string, string>();
   if (rels !== undefined) {
-    const pattern = /<Relationship\b[^>]*>/g;
-    for (
-      let match = pattern.exec(rels);
-      match !== null && targets.size < MAX_SHEETS * 4;
-      match = pattern.exec(rels)
-    ) {
-      const id = attribute(match[0], 'Id');
-      const target = attribute(match[0], 'Target');
+    for (const tag of startTags(rels, 'Relationship')) {
+      if (targets.size >= MAX_SHEET_REFS) break;
+      const id = attribute(tag, 'Id');
+      const target = attribute(tag, 'Target');
       if (id !== undefined && target !== undefined) targets.set(id, target);
     }
   }
 
   const out: SheetRef[] = [];
-  const pattern = /<sheet\b[^>]*>/g;
-  for (
-    let match = pattern.exec(workbook);
-    match !== null && out.length < MAX_SHEETS;
-    match = pattern.exec(workbook)
-  ) {
-    const name = attribute(match[0], 'name');
-    const id = attribute(match[0], 'r:id') ?? attribute(match[0], 'id');
+  for (const tag of startTags(workbook, 'sheet')) {
+    if (out.length >= MAX_SHEET_REFS) break;
+    const name = attribute(tag, 'name');
+    const id = attribute(tag, 'r:id') ?? attribute(tag, 'id');
     if (name === undefined || id === undefined) continue;
     const target = targets.get(id);
     if (target === undefined) continue;
-    const path = `xl/${target.replace(/^\/?xl\//, '').replace(/^\.\//, '')}`;
-    out.push({ name: decodeEntities(name), path });
+    out.push({ name: decodeEntities(name), path: resolvePart('xl/', target) });
   }
   return out;
+}
+
+/** A relationship target as a path inside the package. */
+function resolvePart(base: string, target: string): string {
+  if (target.startsWith('/')) return target.slice(1);
+  return `${base}${target.replace(/^\.\//, '')}`;
+}
+
+/** Slide parts in the order the presentation lists them. */
+function slideOrder(
+  entries: Record<string, Uint8Array>,
+  strFromU8: (data: Uint8Array) => string
+): string[] {
+  const present = Object.keys(entries).filter((name) =>
+    /^ppt\/slides\/slide\d+\.xml$/.test(name)
+  );
+  const byNumber = present.toSorted((a, b) => slideNumber(a) - slideNumber(b));
+  const presentation = entries['ppt/presentation.xml'];
+  const rels = entries['ppt/_rels/presentation.xml.rels'];
+  if (presentation === undefined || rels === undefined) return byNumber;
+
+  const targets = new Map<string, string>();
+  for (const tag of startTags(strFromU8(rels), 'Relationship')) {
+    const id = attribute(tag, 'Id');
+    const target = attribute(tag, 'Target');
+    if (id !== undefined && target !== undefined && targets.size < 4096)
+      targets.set(id, resolvePart('ppt/', target));
+  }
+  const listed: string[] = [];
+  const known = new Set(present);
+  for (const tag of startTags(strFromU8(presentation), 'p:sldId')) {
+    const id = attribute(tag, 'r:id');
+    const path = id === undefined ? undefined : targets.get(id);
+    // A slide the list names and the archive does not hold was refused for its
+    // size; it stays out of the order, and the caller says so.
+    if (path !== undefined && known.has(path) && !listed.includes(path))
+      listed.push(path);
+  }
+  // The list is what the presentation shows; a slide it does not name is
+  // deleted. Without one that resolves, file order is all there is.
+  return listed.length > 0 ? listed : byNumber;
 }
 
 function worksheetRows(
@@ -433,32 +598,61 @@ function worksheetRows(
     let body = '';
     if (!selfClosing) {
       const close = xml.indexOf('</c>', gt);
-      if (close < 0 || scan <= 0) break;
+      if (close < 0 || scan <= 0) {
+        // The rest of the sheet was not read.
+        budget.clipped = true;
+        break;
+      }
       scan -= close - gt;
       body = xml.slice(gt + 1, close);
       end = close + 4;
     }
 
-    if (row !== undefined && row.length < MAX_COLS) {
+    if (row !== undefined) {
       const column = columnIndex(attribute(tag, 'r'));
-      // A cell reference places the value, so a gap in the row stays a gap
-      // rather than shifting every later column one to the left.
-      if (column !== undefined) {
-        while (row.length < Math.min(column, MAX_COLS)) row.push('');
+      const value = cellValue(tag, body, shared);
+      if ((column ?? row.length) >= MAX_COLS) {
+        // Past the width this reader keeps. An empty styled cell out there is
+        // formatting, not content, and does not make the row short.
+        if (value !== '') budget.clipped = true;
+      } else {
+        // A cell reference places the value, so a gap in the row stays a gap
+        // rather than shifting every later column one to the left.
+        if (column !== undefined) while (row.length < column) row.push('');
+        row.push(value);
       }
-      row.push(cellValue(tag, body, shared));
     }
     i = end;
   }
+  if (rows.length >= MAX_ROWS && hasStartTag(xml, i, 'row')) {
+    budget.clipped = true;
+  }
   if (row !== undefined) finish(row);
   return rows;
+}
+
+/** Whether another `<name …>` start tag follows `from`. */
+function hasStartTag(source: string, from: number, name: string): boolean {
+  const open = `<${name}`;
+  for (
+    let at = source.indexOf(open, from);
+    at >= 0;
+    at = source.indexOf(open, at + open.length)
+  ) {
+    const next = source[at + open.length];
+    if (next === ' ' || next === '>' || next === '/') return true;
+  }
+  return false;
 }
 
 function cellValue(tag: string, body: string, shared: string[]): string {
   const type = attribute(tag, 't');
   if (type === 'inlineStr') return cell(textRuns(body));
   if (type === 's') {
-    const index = Number(between(body, '<v>', '</v>') ?? '');
+    // Empty is empty: `Number('')` is 0, and 0 is the first shared string.
+    const raw = (between(body, '<v>', '</v>') ?? '').trim();
+    if (raw === '') return '';
+    const index = Number(raw);
     return Number.isInteger(index) ? (shared[index] ?? '') : '';
   }
   const value = between(body, '<v>', '</v>');
@@ -483,28 +677,81 @@ function columnIndex(reference: string | undefined): number | undefined {
 function readOds(xml: string, maxChars: number, toText: MarkupToText): Sheets {
   const sheets: Sheet[] = [];
   const budget: CharBudget = { left: maxChars, clipped: false };
+  let declared = 0;
   let i = 0;
 
-  while (sheets.length < MAX_SHEETS) {
-    if (budget.left <= 0) {
-      budget.clipped = true;
-      break;
-    }
+  for (;;) {
     const open = xml.indexOf('<table:table ', i);
     if (open < 0) break;
     const gt = xml.indexOf('>', open);
     if (gt < 0) break;
-    const name = decodeEntities(
-      attribute(xml.slice(open, gt + 1), 'table:name') ??
-        `Sheet ${sheets.length + 1}`
-    );
     const close = xml.indexOf('</table:table>', gt);
-    const body = xml.slice(gt + 1, close < 0 ? xml.length : close);
-    sheets.push({ name, rows: odsRows(body, toText, budget) });
-    if (close < 0) break;
+    declared += 1;
+    if (sheets.length < MAX_SHEETS && budget.left > 0) {
+      const name = decodeEntities(
+        attribute(xml.slice(open, gt + 1), 'table:name') ??
+          `Sheet ${sheets.length + 1}`
+      );
+      const body = xml.slice(gt + 1, close < 0 ? xml.length : close);
+      sheets.push({ name, rows: odsRows(body, toText, budget) });
+    }
+    if (close < 0 || declared >= MAX_SHEET_REFS) break;
     i = close + 14;
   }
-  return { sheets, clipped: budget.clipped };
+  if (declared > sheets.length) budget.clipped = true;
+  return { sheets, clipped: budget.clipped, declared };
+}
+
+/** The cell tags of a row: a cell, or the placeholder a merge leaves behind. */
+type OdsCellName = 'table:table-cell' | 'table:covered-table-cell';
+const ODS_CELLS: OdsCellName[] = [
+  'table:table-cell',
+  'table:covered-table-cell',
+];
+
+/**
+ * Walks the cell start tags of one row in order.
+ *
+ * One forward cursor per tag name, each moved only when the walk passes it: a
+ * row with no merged cells would otherwise search for `covered-table-cell` to
+ * the end of the row after every cell it reads.
+ */
+function odsCells(body: string): {
+  next: () => { at: number; name: OdsCellName } | undefined;
+  skipTo: (position: number) => void;
+} {
+  const positions: number[] = ODS_CELLS.map(() => -2);
+  let from = 0;
+  const find = (name: string, start: number): number => {
+    for (
+      let at = body.indexOf(`<${name}`, start);
+      at >= 0;
+      at = body.indexOf(`<${name}`, at + name.length + 1)
+    ) {
+      const after = body[at + name.length + 1];
+      if (after === ' ' || after === '>' || after === '/') return at;
+    }
+    return -1;
+  };
+  const next = (): { at: number; name: OdsCellName } | undefined => {
+    let best: { at: number; name: OdsCellName } | undefined;
+    ODS_CELLS.forEach((name, index) => {
+      const cached = positions[index] as number;
+      if (cached === -2 || (cached >= 0 && cached < from)) {
+        positions[index] = find(name, from);
+      }
+      const at = positions[index] as number;
+      if (at >= 0 && (best === undefined || at < best.at)) best = { at, name };
+    });
+    if (best !== undefined) from = best.at + 1;
+    return best;
+  };
+  return {
+    next,
+    skipTo: (position) => {
+      from = Math.max(from, position);
+    },
+  };
 }
 
 function odsRows(
@@ -518,52 +765,104 @@ function odsRows(
   while (i < xml.length && rows.length < MAX_ROWS) {
     const open = xml.indexOf('<table:table-row', i);
     if (open < 0) break;
-    const close = xml.indexOf('</table:table-row>', open);
-    const body = xml.slice(open, close < 0 ? xml.length : close);
+    const kind = xml[open + 16];
+    // `<table:table-row>` and `<table:table-row …>`, not `<table:table-rows>`
+    // or `<table:table-row-group>`.
+    if (kind !== ' ' && kind !== '>' && kind !== '/') {
+      i = open + 16;
+      continue;
+    }
+    const rowGt = xml.indexOf('>', open);
+    if (rowGt < 0) break;
+    const rowTag = xml.slice(open, rowGt + 1);
+    const selfClosing = rowTag.endsWith('/>');
+    const close = selfClosing
+      ? rowGt
+      : xml.indexOf('</table:table-row>', rowGt);
+    const body = selfClosing
+      ? ''
+      : xml.slice(rowGt + 1, close < 0 ? xml.length : close);
     const row: string[] = [];
 
-    let j = 0;
-    while (row.length < MAX_COLS) {
-      const at = body.indexOf('<table:table-cell', j);
-      if (at < 0) break;
-      const gt = body.indexOf('>', at);
+    const cells = odsCells(body);
+    let readTo = 0;
+    // Bounded by the width kept, not by the markup: every cell read adds at
+    // least one column, so an unclosed cell is searched for at most that many
+    // times rather than once per cell tag in the row.
+    for (
+      let found = cells.next();
+      found !== undefined && row.length < MAX_COLS;
+      found = cells.next()
+    ) {
+      const gt = body.indexOf('>', found.at);
       if (gt < 0) break;
-      const tag = body.slice(at, gt + 1);
-      const cellClose = tag.endsWith('/>')
-        ? -1
-        : body.indexOf('</table:table-cell>', gt);
+      const tag = body.slice(found.at, gt + 1);
+      const closer = `</${found.name}>`;
+      const cellClose = tag.endsWith('/>') ? -1 : body.indexOf(closer, gt);
       // An OpenDocument cell holds `<text:p>`, not the `<t>` of OOXML, so the
-      // markup walk does the reading here rather than the run collector.
+      // markup walk does the reading here rather than the run collector. A
+      // covered cell is what a merge leaves in the columns it spans: it holds
+      // nothing, and skipping it shifts every later cell left. A comment is
+      // attached to its cell as `<office:annotation>` and is not its value.
       // Trimmed, because the markup walk emits a space for every tag it drops
       // and a cell padded with them stops lining up as a column.
       const value =
-        cellClose < 0
+        cellClose < 0 || found.name === 'table:covered-table-cell'
           ? ''
-          : cell(toText(body.slice(gt + 1, cellClose), MAX_CELL_CHARS)).trim();
+          : cell(
+              toText(
+                withoutBlocks(
+                  body.slice(gt + 1, cellClose),
+                  'office:annotation'
+                ),
+                MAX_CELL_CHARS
+              )
+            ).trim();
       // Clamped, and this is the guard that matters most in this file: every
       // row an office suite writes ends in a cell repeated 16 384 times.
-      const repeat = Math.min(
-        Math.max(
-          Number(attribute(tag, 'table:number-columns-repeated') ?? '1') || 1,
-          1
-        ),
-        MAX_REPEAT
+      const asked = Number(
+        attribute(tag, 'table:number-columns-repeated') ?? '1'
       );
-      for (let n = 0; n < repeat && row.length < MAX_COLS; n += 1)
+      const repeat = Math.min(Math.max(asked || 1, 1), MAX_REPEAT);
+      if (value !== '' && asked > MAX_REPEAT) budget.clipped = true;
+      for (let n = 0; n < repeat; n += 1) {
+        if (row.length >= MAX_COLS) {
+          if (value !== '') budget.clipped = true;
+          break;
+        }
         row.push(value);
-      j = cellClose < 0 ? gt + 1 : cellClose + 19;
+      }
+      readTo = cellClose < 0 ? gt + 1 : cellClose + closer.length;
+      cells.skipTo(readTo);
+    }
+    if (row.length >= MAX_COLS && body.indexOf('<text:p', readTo) >= 0) {
+      budget.clipped = true;
     }
 
     // Trailing empty cells are padding, not data.
     while (row.length > 0 && row[row.length - 1] === '') row.pop();
-    rows.push(row);
-    budget.left -= row.reduce((sum, value) => sum + value.length + 1, 0);
-    if (budget.left <= 0) {
-      budget.clipped = true;
-      break;
+    // An office suite writes a block of identical rows once and says how often.
+    // Capped like the columns: the last row of every sheet is repeated a
+    // million times.
+    const wantedRows = Number(
+      attribute(rowTag, 'table:number-rows-repeated') ?? '1'
+    );
+    const copies = Math.min(Math.max(wantedRows || 1, 1), MAX_REPEAT);
+    if (row.length > 0 && wantedRows > MAX_REPEAT) budget.clipped = true;
+    for (let n = 0; n < copies && rows.length < MAX_ROWS; n += 1) {
+      rows.push(row);
+      budget.left -= row.reduce((sum, value) => sum + value.length + 1, 0);
+      if (budget.left <= 0) {
+        budget.clipped = true;
+        break;
+      }
     }
+    if (budget.left <= 0) break;
     if (close < 0) break;
-    i = close + 18;
+    i = selfClosing ? rowGt + 1 : close + 18;
+  }
+  if (rows.length >= MAX_ROWS && xml.indexOf('<table:table-row', i) >= 0) {
+    budget.clipped = true;
   }
   // The same padding, one dimension up.
   while (rows.length > 0 && (rows[rows.length - 1] as string[]).length === 0)
@@ -635,7 +934,13 @@ function isHiddenRun(properties: string): boolean {
 function wanted(kind: Exclude<ExtractKind, 'pdf'>, name: string): boolean {
   if (kind === 'docx') return name === 'word/document.xml';
   if (kind === 'odt' || kind === 'ods') return name === 'content.xml';
-  if (kind === 'pptx') return /^ppt\/slides\/slide\d+\.xml$/.test(name);
+  if (kind === 'pptx') {
+    return (
+      name === 'ppt/presentation.xml' ||
+      name === 'ppt/_rels/presentation.xml.rels' ||
+      /^ppt\/slides\/slide\d+\.xml$/.test(name)
+    );
+  }
   return (
     name === 'xl/workbook.xml' ||
     name === 'xl/_rels/workbook.xml.rels' ||

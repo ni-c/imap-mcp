@@ -11,9 +11,27 @@ export const MAX_BODY_CHARS = 50_000;
  * Zero-width and directional-override characters. They are invisible to the
  * human reading the summary but not to the model, which makes them the cheapest
  * way to hide an instruction inside otherwise innocent text.
+ *
+ * Beyond the Basic Multilingual Plane too, which is why the class needs the
+ * `u` flag: the Unicode tag characters (U+E0000–E007F) spell ASCII that no
+ * font draws and a model reads as text — "ASCII smuggling" — and variation
+ * selectors and the musical formatting controls are just as invisible. Also
+ * the fillers that render as blank (Hangul, Khmer, Mongolian, the braille
+ * blank) and the interlinear annotation controls. U+2060–206F is taken whole:
+ * the deprecated format controls at its end (U+206A–206F) draw nothing either.
  */
 const INVISIBLE_CHARS =
-  /[\u00ad\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
+  // eslint-disable-next-line no-misleading-character-class
+  /[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\u2800\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff9-\ufffb\u{1d173}-\u{1d17a}\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]/gu;
+
+/**
+ * Every other way to end a line: CRLF, a lone CR, VT, FF, NEL and the Unicode
+ * line and paragraph separators. A renderer breaks the line at each of them,
+ * `split('\n')` does not — and deleting them with the control characters would
+ * glue the two lines together instead.
+ */
+// eslint-disable-next-line no-control-regex
+const LINE_SEPARATORS = /\r\n|[\r\u000b\u000c\u0085\u2028\u2029]/g;
 
 /**
  * C0/C1 control characters, tab and newline excepted.
@@ -67,9 +85,14 @@ const INJECTION_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
     'tool-coercion',
     /\b(call|invoke|run|execute|use)\b[^.]{0,30}\b(tool|function|command|api)\b/i,
   ],
+  // The address is anchored at the start of its run and bounded by what an
+  // address is. `[\w.-]+@` alone was tried from every position of a run and
+  // ran to its end looking for the `@`: "send-to-" repeated was quadratic —
+  // 16 000 characters took 1.5 s — while the space-separated trigger in the
+  // timing test could never cross into the next one and stayed linear.
   [
     'exfiltration',
-    /\b(send|forward|email|post|upload|leak)\b[^.]{0,40}\b(to|at)\b[^.]{0,20}[\w.-]+@[\w.-]+/i,
+    /\b(send|forward|email|post|upload|leak)\b[^.]{0,40}\b(to|at)\b[^.]{0,20}(?<![\w.-])[\w.-]{1,64}@[\w.-]{1,255}/i,
   ],
   // Both orders: "reveal the api-key" reads as naturally as "the api-key you
   // must reveal", and an attacker is not obliged to pick the awkward one.
@@ -198,13 +221,72 @@ const BLOCK_TAGS = new Set([
   'table:table-row',
 ]);
 
+/**
+ * Tags that end a line without closing a block: `<br>` and its OOXML,
+ * DrawingML and OpenDocument counterparts.
+ */
+const LINE_BREAK_TAGS = new Set(['br', 'w:br', 'a:br', 'text:line-break']);
+
+/**
+ * Tags that separate words without ending a line, opening or closing. Table
+ * cells, list wrappers and the sectioning elements, plus the tab and space
+ * elements of the document formats.
+ *
+ * Everything not named here and not in {@link BLOCK_TAGS} is inline and emits
+ * nothing: `Hel<b>lo</b>` is "Hello" to the reader, and a Word run split
+ * (`<w:r><w:t>wor</w:t></w:r><w:r><w:t>ld</w:t></w:r>`) is one word. Turning
+ * those into spaces split an injection phrase past {@link detectSuspicious}
+ * while the reader still saw it whole.
+ */
+const SPACING_TAGS = new Set([
+  'html',
+  'body',
+  'table',
+  'thead',
+  'tbody',
+  'tfoot',
+  'caption',
+  'td',
+  'th',
+  'ul',
+  'ol',
+  'dl',
+  'dt',
+  'dd',
+  'blockquote',
+  'pre',
+  'hr',
+  'section',
+  'article',
+  'header',
+  'footer',
+  'nav',
+  'aside',
+  'main',
+  'form',
+  'fieldset',
+  'figure',
+  'figcaption',
+  'address',
+  'details',
+  'summary',
+  'center',
+  'select',
+  'option',
+  'w:tc',
+  'w:tab',
+  'text:tab',
+  'text:s',
+  'table:table-cell',
+]);
+
 // The name may carry a namespace prefix and a hyphen: `</w:p>`, `</text:h>`,
 // `</table:table-row>`. Without the colon and the hyphen this matched `w` for
 // `</w:p>`, so every namespaced entry in the sets above would be dead code.
 // HTML is unaffected — no HTML element name contains either character, and a
 // custom element (`<my-widget>`) is in none of the sets under either reading.
 const TAG_NAME = /^<\/?([A-Za-z][A-Za-z0-9:_.-]*)/;
-const BR_TAG = /^<br\s*\/?$/i;
+const BR_TAG = /^<br(?![A-Za-z0-9:_.-])/i;
 const STYLE_ATTRIBUTE = /style\s*=\s*("|')/gi;
 const HIDDEN_VALUE =
   /display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0|font-size\s*:\s*0/i;
@@ -333,7 +415,6 @@ export function htmlToText(html: string, maxChars = MAX_HTML_CHARS): string {
     if (source.startsWith('<!--', lt)) {
       const end = commentEndFrom(lt + 4);
       if (end >= 0 && end - lt <= MAX_REMOVED_BLOCK_CHARS) {
-        out.push(' ');
         i = end + 3;
       } else {
         // Nothing closes it anywhere ahead, so it is text that looks like
@@ -364,18 +445,18 @@ export function htmlToText(html: string, maxChars = MAX_HTML_CHARS): string {
       if (window > 0) {
         const end = closingTagFrom(name, gt + 1, window);
         if (end >= 0) {
-          out.push(' ');
+          if (SPACING_TAGS.has(name) || BLOCK_TAGS.has(name)) out.push(' ');
           i = end + name.length + 3;
           continue;
         }
       }
     }
 
-    if (BR_TAG.test(tag)) {
+    if (!closing && (BR_TAG.test(tag) || LINE_BREAK_TAGS.has(name ?? ''))) {
       out.push('\n');
-    } else if (closing && name !== undefined && BLOCK_TAGS.has(name)) {
-      out.push('\n');
-    } else {
+    } else if (name !== undefined && BLOCK_TAGS.has(name)) {
+      out.push(closing ? '\n' : ' ');
+    } else if (name !== undefined && SPACING_TAGS.has(name)) {
       out.push(' ');
     }
     i = gt + 1;
@@ -394,41 +475,127 @@ export function htmlToText(html: string, maxChars = MAX_HTML_CHARS): string {
  * tokenizer reads *every* digit and takes the semicolon as optional — so
  * `&#0000000104;` reached the model as eleven literal characters and the
  * recipient as an `h`. Here a numeric reference is any digit run, with or
- * without its semicolon; the named ones are the five HTML mail and OOXML use.
+ * without its semicolon; the named ones are the table below.
  *
  * Out-of-range values, zero and surrogates decode to U+FFFD, which is what a
  * browser renders — a character, and not `''`, which would make `&#0;` an
  * invisible separator inside a word.
  */
 const CHARACTER_REFERENCE =
-  /&(?:#[xX]([0-9a-fA-F]+);?|#([0-9]+);?|(nbsp|lt|gt|quot|amp|apos);)/g;
+  /&(?:#[xX]([0-9a-fA-F]+);?|#([0-9]+);?|([A-Za-z][A-Za-z0-9]{1,31});)/g;
 
 export function decodeCharacterReferences(text: string): string {
   return text.replace(
     CHARACTER_REFERENCE,
-    (_match, hex: string | undefined, decimal: string | undefined, name) =>
+    (match, hex: string | undefined, decimal: string | undefined, name) =>
       hex !== undefined
         ? fromCodePoint(parseInt(hex, 16))
         : decimal !== undefined
           ? fromCodePoint(Number(decimal))
-          : (NAMED_REFERENCES.get(String(name).toLowerCase()) ?? _match)
+          : (NAMED_REFERENCES.get(String(name)) ?? match)
   );
 }
 
-const NAMED_REFERENCES = new Map([
+/**
+ * The named references mail actually carries: the markup five, all of Latin-1
+ * (U+00A0–U+00FF, in code point order below), and the typographic set a word
+ * processor or a newsletter tool writes. Looked up case-sensitively, as a
+ * browser does — `&Eacute;` and `&eacute;` are different letters — with the
+ * handful of upper-case spellings the HTML table also lists.
+ */
+const LATIN1_NAMES = (
+  'nbsp iexcl cent pound curren yen brvbar sect uml copy ordf laquo not shy ' +
+  'reg macr deg plusmn sup2 sup3 acute micro para middot cedil sup1 ordm ' +
+  'raquo frac14 frac12 frac34 iquest Agrave Aacute Acirc Atilde Auml Aring ' +
+  'AElig Ccedil Egrave Eacute Ecirc Euml Igrave Iacute Icirc Iuml ETH Ntilde ' +
+  'Ograve Oacute Ocirc Otilde Ouml times Oslash Ugrave Uacute Ucirc Uuml ' +
+  'Yacute THORN szlig agrave aacute acirc atilde auml aring aelig ccedil ' +
+  'egrave eacute ecirc euml igrave iacute icirc iuml eth ntilde ograve oacute ' +
+  'ocirc otilde ouml divide oslash ugrave uacute ucirc uuml yacute thorn yuml'
+).split(' ');
+
+const NAMED_REFERENCES = new Map<string, string>([
+  ...LATIN1_NAMES.map((name, index): [string, string] => [
+    name,
+    String.fromCodePoint(0xa0 + index),
+  ]),
   ['nbsp', ' '],
   ['lt', '<'],
   ['gt', '>'],
   ['quot', '"'],
   ['amp', '&'],
   ['apos', "'"],
+  ['LT', '<'],
+  ['GT', '>'],
+  ['QUOT', '"'],
+  ['AMP', '&'],
+  ['COPY', '©'],
+  ['REG', '®'],
+  ['euro', '€'],
+  ['ndash', '–'],
+  ['mdash', '—'],
+  ['lsquo', '‘'],
+  ['rsquo', '’'],
+  ['sbquo', '‚'],
+  ['ldquo', '“'],
+  ['rdquo', '”'],
+  ['bdquo', '„'],
+  ['hellip', '…'],
+  ['trade', '™'],
+  ['bull', '•'],
+  ['dagger', '†'],
+  ['Dagger', '‡'],
+  ['permil', '‰'],
+  ['lsaquo', '‹'],
+  ['rsaquo', '›'],
+  ['prime', '′'],
+  ['Prime', '″'],
+  ['ensp', '\u2002'],
+  ['emsp', '\u2003'],
+  ['thinsp', '\u2009'],
+  ['zwnj', '\u200c'],
+  ['zwj', '\u200d'],
+  ['lrm', '\u200e'],
+  ['rlm', '\u200f'],
+  ['larr', '←'],
+  ['rarr', '→'],
+  ['uarr', '↑'],
+  ['darr', '↓'],
+  ['minus', '−'],
+  ['ne', '≠'],
+  ['le', '≤'],
+  ['ge', '≥'],
+  ['infin', '∞'],
+  ['OElig', 'Œ'],
+  ['oelig', 'œ'],
+  ['Scaron', 'Š'],
+  ['scaron', 'š'],
+  ['Yuml', 'Ÿ'],
+  ['fnof', 'ƒ'],
+  ['circ', 'ˆ'],
+  ['tilde', '˜'],
 ]);
+
+/**
+ * What a browser makes of a numeric reference to U+0080–U+009F: not the C1
+ * control but the windows-1252 character a legacy writer meant, so `&#146;`
+ * is an apostrophe. The five code points windows-1252 leaves undefined stay
+ * the control character, as in the HTML tokenizer.
+ */
+const WINDOWS_1252 = [
+  0x20ac, 0x81, 0x201a, 0x192, 0x201e, 0x2026, 0x2020, 0x2021, 0x2c6, 0x2030,
+  0x160, 0x2039, 0x152, 0x8d, 0x17d, 0x8f, 0x90, 0x2018, 0x2019, 0x201c, 0x201d,
+  0x2022, 0x2013, 0x2014, 0x2dc, 0x2122, 0x161, 0x203a, 0x153, 0x9d, 0x17e,
+  0x178,
+];
 
 /** One character from a numeric reference, U+FFFD where no client has one. */
 function fromCodePoint(value: number): string {
   if (!Number.isInteger(value) || value < 1 || value > 0x10ffff)
     return String.fromCodePoint(0xfffd);
   if (value >= 0xd800 && value <= 0xdfff) return String.fromCodePoint(0xfffd);
+  if (value >= 0x80 && value <= 0x9f)
+    return String.fromCodePoint(WINDOWS_1252[value - 0x80] as number);
   return String.fromCodePoint(value);
 }
 
@@ -460,7 +627,10 @@ export function escapeInvisible(input: string): string {
 
 /** One character as a Unicode escape, for `escapeInvisible`. */
 function escapeCodePoint(match: string): string {
-  return `\\u${(match.codePointAt(0) as number).toString(16).padStart(4, '0')}`;
+  const value = match.codePointAt(0) as number;
+  return value > 0xffff
+    ? `\\u{${value.toString(16)}}`
+    : `\\u${value.toString(16).padStart(4, '0')}`;
 }
 
 /**
@@ -478,7 +648,9 @@ function escapeCodePoint(match: string): string {
  * normalising would miss it.
  */
 export function sanitizeText(input: string, maxChars = MAX_BODY_CHARS): string {
-  const normalized = defuseAutoFetch(stripInvisible(input.normalize('NFKC')))
+  const normalized = defuseAutoFetch(
+    stripInvisible(input.normalize('NFKC').replace(LINE_SEPARATORS, '\n'))
+  )
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
@@ -559,17 +731,46 @@ export function detectScriptMix(text: string): string[] {
  * forgeable — noisier, and the honest reading of "pass, says a header anyone
  * could have written".
  */
+const AUTH_CLAUSE = /^\s*(spf|dkim|dmarc)\s*=\s*([a-z]+)/i;
+
+/**
+ * Removes RFC 5322 comments, nested ones included, in one pass. A comment that
+ * is never closed swallows the rest, which is how a mail client reads it too;
+ * a stray `)` is ordinary text. Depth is a counter, so there is nothing to
+ * bound but the length of the header.
+ */
+function stripComments(value: string): string {
+  let depth = 0;
+  let out = '';
+  for (const char of value) {
+    if (char === '(') depth += 1;
+    else if (char === ')' && depth > 0) depth -= 1;
+    else if (depth === 0) out += char;
+  }
+  return out;
+}
+
 export function parseAuthResults(
   header: string | undefined,
   trustedAuthservId?: string
 ): SecurityAssessment['auth'] {
   // headerValue joins multiple instances with \n, topmost first.
   const topmost = header?.split('\n')[0];
-  const read = (name: string): string => {
-    if (topmost === undefined) return 'unknown';
-    const match = new RegExp(`\\b${name}=([a-z]+)`, 'i').exec(topmost);
-    return match?.[1]?.toLowerCase() ?? 'unknown';
-  };
+  // RFC 8601: `authserv-id; method=result props; method=result props`, with
+  // comments anywhere. A verdict is the *start* of a clause: the same letters
+  // inside a comment, a property value (`smtp.mailfrom=dmarc=pass@evil.test`)
+  // or a longer name (`x-spf=fail`) are not one.
+  const clauses = stripComments(topmost ?? '').split(';');
+  const verdicts = new Map<string, string>();
+  for (const clause of clauses.slice(1)) {
+    const match = AUTH_CLAUSE.exec(clause);
+    const method = match?.[1]?.toLowerCase();
+    if (match === null || method === undefined) continue;
+    if (!verdicts.has(method))
+      verdicts.set(method, match[2]?.toLowerCase() ?? '');
+  }
+  const read = (name: string): string =>
+    topmost === undefined ? 'unknown' : (verdicts.get(name) ?? 'unknown');
   // Bounded like a hostname, which is what an authserv-id is. Unbounded, the
   // id went into the metadata block beside the fence — the one part of a
   // `get_message` answer with its own budget and nothing array-shaped to
@@ -577,7 +778,7 @@ export function parseAuthResults(
   // unreadable through this server. The verdict is what matters; an id past
   // this length is not an id, and the header is reported as forgeable.
   const authservId = /^\s*([A-Za-z0-9._-]{1,253})(?![A-Za-z0-9._-])/.exec(
-    topmost ?? ''
+    clauses[0] ?? ''
   )?.[1];
   return {
     spf: read('spf'),
@@ -605,6 +806,46 @@ export function assess(
 }
 
 /**
+ * What stands where an image was. It opens with a parenthesis and never with a
+ * bracket: the old `[inline image removed …]` plus a `!` in front of it, plus
+ * a reference definition of that very label further down, was an image again —
+ * `!![x]` followed by `[inline image removed — not fetched. alt="x"]: https://…`.
+ * `!(` is not image syntax in any dialect, and no definition can be written
+ * for a label that starts with one.
+ */
+const REMOVED = '(inline image removed — not fetched.';
+
+/** What an opener becomes when no complete image follows it. */
+const BARE_IMAGE = `${REMOVED})[`;
+
+/**
+ * Text taken from inside a match goes out with any `![` of its own broken, or
+ * `![![y](u)](v)` would write one into the alt text of its replacement.
+ */
+function breakOpeners(piece: string): string {
+  return piece.replaceAll('![', BARE_IMAGE);
+}
+const URL_END = /[)\s]/g;
+const INLINE_TITLE = /\s+"[^"]*"\)/y;
+const REFERENCE = /\s{0,3}\[([^\]]*)\]/y;
+
+/**
+ * Wraps a search for the next occurrence of something so that a sequence of
+ * calls with growing `from` costs one pass over the text in total: a result
+ * still ahead of `from` is the answer, and "nothing ahead" stays true.
+ */
+function forwardSearch(
+  find: (from: number) => number
+): (from: number) => number {
+  let found = -2;
+  return (from) => {
+    if (found === -1 || found >= from) return found;
+    found = find(from);
+    return found;
+  };
+}
+
+/**
  * Neutralises the markup a rendering client would fetch on its own.
  *
  * This is the EchoLeak channel (CVE-2025-32711): the injected instruction tells
@@ -615,30 +856,64 @@ export function assess(
  * where it pointed.
  */
 export function defuseAutoFetch(text: string): string {
-  return (
-    text
-      .replace(
-        /!\[([^\]]{0,200})\]\(([^)\s]{1,2000})(?:\s+"[^"]*")?\)/g,
-        (_match, alt: string, url: string) =>
-          `[inline image removed — not fetched. alt="${alt}" src=${url}]`
-      )
-      // Reference style: ![alt][id] with the URL defined elsewhere as
-      // [id]: url. Defusing the usage is enough — a definition without a
-      // usage renders as nothing — and it leaves ordinary [text][id] links
-      // alone, which are click-only and fetch nothing on their own.
-      .replace(
-        /!\[([^\]]{0,200})\]\s{0,3}\[([^\]]{0,200})\]/g,
-        (_match, alt: string, ref: string) =>
-          `[inline image removed — not fetched. alt="${alt}" ref="${ref}"]`
-      )
-      // Shortcut reference: ![id] alone. Everything with a (...) or [...] after
-      // it was handled above, so what is left is exactly this form.
-      .replace(
-        /!\[([^\]]{1,200})\]/g,
-        (_match, alt: string) =>
-          `[inline image removed — not fetched. alt="${alt}"]`
-      )
-  );
+  let at = text.indexOf('![');
+  if (at < 0) return text;
+  const closeBracket = forwardSearch((from) => text.indexOf(']', from));
+  const terminator = forwardSearch((from) => {
+    URL_END.lastIndex = from;
+    return URL_END.exec(text)?.index ?? -1;
+  });
+
+  // What follows the `]` that ends an alt text: where the construct ends, and
+  // the part of the replacement that says where it pointed. A title that never
+  // closes is remembered by the place it was looked for, so the openers piled
+  // up in front of one pay for that search once between them.
+  let titleFailedAt = -1;
+  const imageFormAfter = (close: number): { end: number; tail: string } => {
+    if (text[close + 1] === '(') {
+      const start = close + 2;
+      const end = terminator(start);
+      if (end > start) {
+        const url = breakOpeners(text.slice(start, end));
+        if (text[end] === ')') return { end: end + 1, tail: ` src=${url}` };
+        if (end !== titleFailedAt) {
+          INLINE_TITLE.lastIndex = end;
+          const title = INLINE_TITLE.exec(text);
+          if (title !== null) {
+            return { end: end + title[0].length, tail: ` src=${url}` };
+          }
+          titleFailedAt = end;
+        }
+      }
+    }
+    REFERENCE.lastIndex = close + 1;
+    const reference = REFERENCE.exec(text);
+    if (reference !== null) {
+      return {
+        end: close + 1 + reference[0].length,
+        tail: ` ref="${breakOpeners(reference[1] as string)}"`,
+      };
+    }
+    // Shortcut reference: ![id] alone, what is left once the forms above are ruled out.
+    return { end: close + 1, tail: '' };
+  };
+
+  let out = '';
+  let copied = 0;
+  while (at >= 0) {
+    out += text.slice(copied, at);
+    copied = at + 2;
+    let replacement = BARE_IMAGE;
+    const close = closeBracket(at + 2);
+    if (close > at + 2) {
+      const form = imageFormAfter(close);
+      replacement = `${REMOVED} alt="${breakOpeners(text.slice(at + 2, close))}"${form.tail})`;
+      copied = form.end;
+    }
+    out += replacement;
+    at = text.indexOf('![', copied);
+  }
+  return out + text.slice(copied);
 }
 
 /**
@@ -667,7 +942,7 @@ export function wrapUntrusted(body: string): string {
   const nonce = randomUUID();
   const mark = nonce.replace(/-/g, '').slice(0, 8);
   const marked = body
-    .split('\n')
+    .split(/\n|[\u2028\u2029]/)
     .map((line) => `${mark}| ${line}`)
     .join('\n');
   return (

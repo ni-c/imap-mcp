@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { deflateRawSync } from 'node:zlib';
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -14,6 +15,8 @@ import {
 import { expandsTooFar, extractPdf } from '../src/extract/pdf.js';
 import { extractZipDocument } from '../src/extract/ooxml.js';
 import {
+  ascii85Encode,
+  buildBombPdf,
   buildDocx,
   buildDocxRaw,
   buildFilteredPdf,
@@ -22,9 +25,11 @@ import {
   buildOdt,
   buildPdf,
   buildPptx,
+  buildStreamPdf,
   buildXlsx,
   buildXlsxBomb,
   patchDeclaredSize,
+  type BombVariant,
   zip,
 } from './document-fixtures.js';
 
@@ -226,6 +231,62 @@ describe('extractPdf', () => {
     );
     expect(image).toBe(false);
   });
+});
+
+describe('the PDF pre-scan measures by trial, not by declaration', () => {
+  // pdf.js reads `dict.get('F', 'Filter')`, resolves references and decodes
+  // `#xx` in names. Each of these is a stream it inflates in full and a
+  // reader of the dictionary that is not pdf.js does not recognise.
+  const variants: BombVariant[] = [
+    'plain',
+    'abbreviated-key',
+    'escaped-name',
+    'indirect-filter',
+    'indirect-filter-array',
+    'decoy-obj',
+    'padded-dictionary',
+    'planted-endstream',
+  ];
+  for (const variant of variants) {
+    it(`refuses a 64 MiB Flate stream written as ${variant}`, async () => {
+      const pdf = buildBombPdf(variant);
+      expect(await expandsTooFar(new Uint8Array(pdf))).toBe(true);
+      expect(await extractPdf(pdf, MAX)).toEqual({
+        ok: false,
+        reason: 'too-large',
+      });
+    }, 30_000);
+  }
+
+  it('still reads a text stream that no filter touches', async () => {
+    // The trial decoders see this stream too, and must find nothing in it.
+    expect(await expandsTooFar(new Uint8Array(buildPdf()))).toBe(false);
+  });
+
+  it('measures ASCII85 by what it produces, not by how long it is', async () => {
+    // `z` is one input byte and four output bytes, so sizing the output from
+    // the input length clamps it and the decoder never reaches the tail: here
+    // four megabytes of zeros in stored deflate blocks, then the bomb.
+    const zeros = 4 * 1024 * 1024;
+    const parts: Buffer[] = [Buffer.from([0x78, 0x01])];
+    for (let done = 0; done < zeros; done += 65_535) {
+      const n = Math.min(65_535, zeros - done);
+      const header = Buffer.alloc(5);
+      header.writeUInt16LE(n, 1);
+      header.writeUInt16LE(~n & 0xffff, 3);
+      parts.push(header, Buffer.alloc(n));
+    }
+    parts.push(deflateRawSync(Buffer.alloc(96 * 1024 * 1024), { level: 9 }));
+    const encoded = ascii85Encode(Buffer.concat(parts));
+    expect([...encoded].filter((byte) => byte === 0x7a).length).toBeGreaterThan(
+      1_000_000
+    );
+    const pdf = buildStreamPdf(
+      '/Filter [/ASCII85Decode /FlateDecode]',
+      encoded
+    );
+    expect(await expandsTooFar(new Uint8Array(pdf))).toBe(true);
+  }, 30_000);
 });
 
 const extractZip = (
@@ -501,7 +562,9 @@ describe('extractZipDocument refuses hostile archives', () => {
     const started = Date.now();
     const archive = patchDeclaredSize(buildDocx(['hidden']), 0xffffff00);
     const response = await extractZip('docx', archive);
-    expect(response).toEqual({ ok: false, reason: 'not-a-document' });
+    // Refused for its size, which is not the same answer as "not a
+    // document": the second tells the sender to stop trying.
+    expect(response).toEqual({ ok: false, reason: 'too-large' });
     expect(Date.now() - started).toBeLessThan(1_000);
   });
 
@@ -646,6 +709,412 @@ describe('extractZipDocument refuses hostile archives', () => {
   });
 });
 
+const formatted = (count: number): string =>
+  Array.from(
+    { length: count },
+    (_, n) =>
+      '<w:p w:rsidR="00A1B2C3"><w:pPr><w:spacing w:after="120" w:line="276"/>' +
+      '<w:jc w:val="both"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Calibri"/>' +
+      `<w:sz w:val="22"/></w:rPr><w:t>Paragraph ${n}</w:t></w:r></w:p>`
+  ).join('');
+
+const workbook = (cells: string, sheets = 1): Record<string, string> => {
+  const files: Record<string, string> = {
+    'xl/workbook.xml':
+      '<workbook><sheets>' +
+      Array.from(
+        { length: sheets },
+        (_, n) =>
+          `<sheet name="S${n + 1}" sheetId="${n + 1}" r:id="rId${n + 1}"/>`
+      ).join('') +
+      '</sheets></workbook>',
+    'xl/_rels/workbook.xml.rels':
+      '<Relationships>' +
+      Array.from(
+        { length: sheets },
+        (_, n) =>
+          `<Relationship Id="rId${n + 1}" Target="worksheets/sheet${n + 1}.xml"/>`
+      ).join('') +
+      '</Relationships>',
+  };
+  for (let n = 1; n <= sheets; n += 1) {
+    files[`xl/worksheets/sheet${n}.xml`] =
+      `<worksheet><sheetData>${cells}</sheetData></worksheet>`;
+  }
+  return files;
+};
+
+const column = (index: number): string =>
+  (index < 26 ? '' : String.fromCharCode(64 + Math.floor(index / 26))) +
+  String.fromCharCode(65 + (index % 26));
+
+const sheetBook = (sheet: string, shared?: string): Buffer =>
+  zip({
+    'xl/workbook.xml':
+      '<workbook><sheets><sheet name="A" sheetId="1" r:id="rId1"/></sheets></workbook>',
+    'xl/_rels/workbook.xml.rels':
+      '<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>',
+    ...(shared === undefined ? {} : { 'xl/sharedStrings.xml': shared }),
+    'xl/worksheets/sheet1.xml': `<worksheet><sheetData>${sheet}</sheetData></worksheet>`,
+  });
+
+const ods = (rows: string): Buffer =>
+  zip({
+    'content.xml': `<office:spreadsheet><table:table table:name="T">${rows}</table:table></office:spreadsheet>`,
+  });
+
+const slide = (text: string): string =>
+  `<p:sld><a:p><a:r><a:t>${text}</a:t></a:r></a:p></p:sld>`;
+
+const XML_HEAD = '<?xml version="1.0" encoding="UTF-8"?>';
+
+/** The text of a successful result, or a failing assertion naming why. */
+function okResult(response: Awaited<ReturnType<typeof extractZip>>) {
+  if (!response.ok) {
+    throw new Error(`expected text, got reason "${response.reason}"`);
+  }
+  return response;
+}
+
+describe('document readers say what they left out', () => {
+  it('cuts a Word document at maxChars of text, not of markup', async () => {
+    // Formatting is most of a .docx. Slicing the XML first spent the budget on
+    // tags and reported a few dozen paragraphs as the whole document.
+    const archive = buildDocxRaw(
+      `<w:document><w:body>${formatted(3000)}</w:body></w:document>`
+    );
+    const response = okResult(
+      await extractZipDocument(
+        'docx',
+        new Uint8Array(archive),
+        4000,
+        htmlToText
+      )
+    );
+    expect(response.text).toHaveLength(4000);
+    expect(response.text).toContain('Paragraph 2');
+    expect(response.clipped).toBe(true);
+    const whole = okResult(
+      await extractZipDocument('docx', new Uint8Array(archive), MAX, htmlToText)
+    );
+    expect(whole.clipped).toBe(false);
+  });
+
+  it('does not call a short document clipped because its markup is long', async () => {
+    const archive = buildDocxRaw(
+      `<w:document><w:body>${formatted(20)}</w:body></w:document>`
+    );
+    const response = okResult(
+      await extractZipDocument(
+        'docx',
+        new Uint8Array(archive),
+        1500,
+        htmlToText
+      )
+    );
+    expect(response.text).toContain('Paragraph 19');
+    expect(response.clipped).toBe(false);
+  });
+
+  it('cuts an OpenDocument text at maxChars of text, not of markup', async () => {
+    const paragraphs = Array.from(
+      { length: 2000 },
+      (_, n) =>
+        `<text:p text:style-name="P1"><text:span text:style-name="T1">Absatz ${n}</text:span></text:p>`
+    ).join('');
+    const archive = zip({
+      'content.xml': `${XML_HEAD}<office:document-content><office:body>${paragraphs}</office:body></office:document-content>`,
+    });
+    const response = okResult(
+      await extractZipDocument('odt', new Uint8Array(archive), 3000, htmlToText)
+    );
+    expect(response.text).toHaveLength(3000);
+    expect(response.clipped).toBe(true);
+  });
+
+  it('says so when rows were left out of a sheet', async () => {
+    let rows = '';
+    for (let r = 1; r <= 5_200; r += 1) {
+      rows += `<row r="${r}"><c r="A${r}" t="inlineStr"><is><t>r${r}</t></is></c></row>`;
+    }
+    const response = okResult(await extractZip('xlsx', zip(workbook(rows))));
+    expect(response.text).toContain('r5000');
+    expect(response.text).not.toContain('r5001');
+    expect(response.clipped).toBe(true);
+    const few = okResult(
+      await extractZip('xlsx', zip(workbook(rows.slice(0, 200))))
+    );
+    expect(few.clipped).toBe(false);
+  });
+
+  it('says so when columns were left out of a row', async () => {
+    let cells = '';
+    for (let c = 0; c < 200; c += 1) {
+      cells += `<c r="${column(c)}1" t="inlineStr"><is><t>v${c}</t></is></c>`;
+    }
+    const response = okResult(
+      await extractZip('xlsx', zip(workbook(`<row r="1">${cells}</row>`)))
+    );
+    expect(response.clipped).toBe(true);
+    // Empty styled cells far to the right are formatting, not content.
+    const padded = okResult(
+      await extractZip(
+        'xlsx',
+        zip(
+          workbook(
+            `<row r="1"><c r="A1" t="inlineStr"><is><t>x</t></is></c><c r="ZZ1" s="3"/></row>`
+          )
+        )
+      )
+    );
+    expect(padded.clipped).toBe(false);
+  });
+
+  it('reports how many sheets a workbook has when it reads fewer', async () => {
+    const response = okResult(
+      await extractZip(
+        'xlsx',
+        zip(
+          workbook(
+            '<row r="1"><c r="A1" t="inlineStr"><is><t>x</t></is></c></row>',
+            40
+          )
+        )
+      )
+    );
+    expect(response.unitCount).toBe(32);
+    expect(response.declaredUnitCount).toBe(40);
+    expect(response.clipped).toBe(true);
+  });
+
+  it('says so when the walk gave up on a sheet', async () => {
+    const response = okResult(
+      await extractZip(
+        'xlsx',
+        zip(
+          workbook(
+            '<row r="1"><c r="A1" t="inlineStr"><is><t>kept</t></is></c><c r="B1">never closed'
+          )
+        )
+      )
+    );
+    expect(response.text).toContain('kept');
+    expect(response.clipped).toBe(true);
+  });
+
+  it('refuses a workbook whose sheets were all refused for their size', async () => {
+    const archive = patchDeclaredSize(
+      zip(workbook('<row r="1"><c r="A1"><v>1</v></c></row>')),
+      0xffffff00
+    );
+    expect(await extractZip('xlsx', archive)).toEqual({
+      ok: false,
+      reason: 'too-large',
+    });
+  });
+
+  it('says so when a slide was refused for its size', async () => {
+    const archive = zip({
+      'ppt/slides/slide1.xml':
+        '<p:sld><a:p><a:r><a:t>small</a:t></a:r></a:p></p:sld>',
+      'ppt/slides/slide2.xml': `<p:sld>${' '.repeat(17 * 1024 * 1024)}</p:sld>`,
+    });
+    const response = okResult(await extractZip('pptx', archive));
+    expect(response.text).toContain('small');
+    expect(response.clipped).toBe(true);
+  });
+
+  it('says so when slides were left out', async () => {
+    const files: Record<string, string> = {};
+    for (let n = 1; n <= 210; n += 1) {
+      files[`ppt/slides/slide${n}.xml`] =
+        `<p:sld><a:p><a:r><a:t>s${n}</a:t></a:r></a:p></p:sld>`;
+    }
+    const response = okResult(await extractZip('pptx', zip(files)));
+    expect(response.unitCount).toBe(200);
+    expect(response.declaredUnitCount).toBe(210);
+    expect(response.clipped).toBe(true);
+  });
+
+  it('does not report headings as a document', async () => {
+    const slides = zip({
+      'ppt/slides/slide1.xml': '<p:sld><p:pic/></p:sld>',
+      'ppt/slides/slide2.xml': '<p:sld><p:pic/></p:sld>',
+    });
+    expect(await extractZip('pptx', slides)).toEqual({
+      ok: false,
+      reason: 'no-text-layer',
+    });
+    const sheet = zip(
+      workbook(
+        '<row r="1"><c r="A1"/><c r="B1" t="inlineStr"><is><t> </t></is></c></row>'
+      )
+    );
+    expect(await extractZip('xlsx', sheet)).toEqual({
+      ok: false,
+      reason: 'no-text-layer',
+    });
+    const emptyOds = zip({
+      'content.xml':
+        '<office:spreadsheet><table:table table:name="T"><table:table-row><table:table-cell/></table:table-row></table:table></office:spreadsheet>',
+    });
+    expect(await extractZip('ods', emptyOds)).toEqual({
+      ok: false,
+      reason: 'no-text-layer',
+    });
+  });
+});
+
+describe('spreadsheet details', () => {
+  it('keeps an empty shared string in the index', async () => {
+    const response = okResult(
+      await extractZip(
+        'xlsx',
+        sheetBook(
+          '<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>2</v></c></row>',
+          '<sst><si><t>zero</t></si><si/><si><t>two</t></si></sst>'
+        )
+      )
+    );
+    expect(response.text).toContain('zero\ttwo');
+  });
+
+  it('leaves phonetic guides out of a shared string', async () => {
+    const response = okResult(
+      await extractZip(
+        'xlsx',
+        sheetBook(
+          '<row r="1"><c r="A1" t="s"><v>0</v></c></row>',
+          '<sst><si><r><t>kan</t></r><rPh sb="0" eb="1"><t>FURIGANA</t></rPh><r><t>ji</t></r></si></sst>'
+        )
+      )
+    );
+    expect(response.text).toContain('kanji');
+    expect(response.text).not.toContain('FURIGANA');
+  });
+
+  it('reads an empty shared-string cell as empty, not as the first string', async () => {
+    const response = okResult(
+      await extractZip(
+        'xlsx',
+        sheetBook(
+          '<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"/><c r="C1" t="s"><v></v></c></row>',
+          '<sst><si><t>first</t></si></sst>'
+        )
+      )
+    );
+    expect(response.text).toContain('first\t\t');
+    expect(response.text.match(/first/g)).toHaveLength(1);
+  });
+
+  it('orders sheets numerically when there are no relationships', async () => {
+    const files: Record<string, string> = {};
+    for (const n of [1, 2, 10]) {
+      files[`xl/worksheets/sheet${n}.xml`] =
+        `<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>content${n}</t></is></c></row></sheetData></worksheet>`;
+    }
+    const response = okResult(await extractZip('xlsx', zip(files)));
+    expect(response.text.indexOf('content2')).toBeLessThan(
+      response.text.indexOf('content10')
+    );
+  });
+
+  it('keeps the columns after a merged cell in place', async () => {
+    const response = okResult(
+      await extractZip(
+        'ods',
+        ods(
+          '<table:table-row><table:table-cell table:number-columns-spanned="2"><text:p>merged</text:p></table:table-cell>' +
+            '<table:covered-table-cell/><table:table-cell><text:p>after</text:p></table:table-cell></table:table-row>'
+        )
+      )
+    );
+    expect(response.text).toContain('merged\t\tafter');
+  });
+
+  it('honours number-rows-repeated, within a cap', async () => {
+    const response = okResult(
+      await extractZip(
+        'ods',
+        ods(
+          '<table:table-row table:number-rows-repeated="3"><table:table-cell><text:p>rep</text:p></table:table-cell></table:table-row>' +
+            '<table:table-row table:number-rows-repeated="1000000"><table:table-cell><text:p>many</text:p></table:table-cell></table:table-row>'
+        )
+      )
+    );
+    expect(response.text.match(/rep/g)).toHaveLength(3);
+    expect(response.text.match(/many/g)?.length).toBeLessThanOrEqual(256);
+    expect(response.clipped).toBe(true);
+  });
+
+  it('does not repeat a trailing empty row a million times', async () => {
+    const started = Date.now();
+    const response = okResult(
+      await extractZip(
+        'ods',
+        ods(
+          '<table:table-row><table:table-cell><text:p>x</text:p></table:table-cell></table:table-row>' +
+            '<table:table-row table:number-rows-repeated="1048575"><table:table-cell table:number-columns-repeated="16384"/></table:table-row>'
+        )
+      )
+    );
+    expect(response.clipped).toBe(false);
+    expect(response.text.trim().endsWith('x')).toBe(true);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it('keeps a cell comment out of the cell value', async () => {
+    const response = okResult(
+      await extractZip(
+        'ods',
+        ods(
+          '<table:table-row><table:table-cell><office:annotation><dc:creator>Bob</dc:creator>' +
+            '<text:p>note text</text:p></office:annotation><text:p>42</text:p></table:table-cell></table:table-row>'
+        )
+      )
+    );
+    expect(response.text).toContain('42');
+    expect(response.text).not.toContain('note text');
+    expect(response.text).not.toContain('Bob');
+  });
+});
+
+describe('slide order', () => {
+  it('follows the presentation, not the file names', async () => {
+    const archive = zip({
+      'ppt/slides/slide1.xml': slide('first-file'),
+      'ppt/slides/slide2.xml': slide('second-file'),
+      'ppt/slides/slide3.xml': slide('deleted-slide'),
+      'ppt/presentation.xml':
+        '<p:presentation><p:sldIdLst><p:sldId id="257" r:id="rId3"/><p:sldId id="256" r:id="rId2"/></p:sldIdLst></p:presentation>',
+      'ppt/_rels/presentation.xml.rels':
+        '<Relationships><Relationship Id="rId2" Target="slides/slide1.xml"/><Relationship Id="rId3" Target="slides/slide2.xml"/>' +
+        '<Relationship Id="rId9" Target="slides/slide3.xml"/></Relationships>',
+    });
+    const response = okResult(await extractZip('pptx', archive));
+    expect(response.text.indexOf('second-file')).toBeGreaterThan(
+      response.text.indexOf('== Slide 1 ==')
+    );
+    expect(response.text.indexOf('second-file')).toBeLessThan(
+      response.text.indexOf('first-file')
+    );
+    expect(response.text).not.toContain('deleted-slide');
+    expect(response.unitCount).toBe(2);
+  });
+
+  it('falls back to file order without a usable list', async () => {
+    const archive = zip({
+      'ppt/slides/slide2.xml': slide('second-file'),
+      'ppt/slides/slide10.xml': slide('tenth-file'),
+      'ppt/slides/slide1.xml': slide('first-file'),
+    });
+    const response = okResult(await extractZip('pptx', archive));
+    const at = (word: string): number => response.text.indexOf(word);
+    expect(at('first-file')).toBeLessThan(at('second-file'));
+    expect(at('second-file')).toBeLessThan(at('tenth-file'));
+  });
+});
+
 describe('extractDocumentText', () => {
   it('runs the parse in a worker and comes back with the text', async () => {
     // Also the proof that the worker file resolves at all: this module is
@@ -666,6 +1135,26 @@ describe('extractDocumentText', () => {
       maxChars: MAX,
     });
     expect(textOf(response)).toContain('Aus dem Worker');
+  });
+
+  it('reads every supported type through the sandboxed child', async () => {
+    // The child runs with read access to its own modules and two packages and
+    // nothing else; a format that needed one more file would fail only here.
+    const cases = [
+      ['xlsx', buildXlsx([{ name: 'S', rows: [['alpha', 'beta']] }]), 'alpha'],
+      ['pptx', buildPptx(['gamma slide']), 'gamma slide'],
+      ['odt', buildOdt(['delta text']), 'delta text'],
+      ['ods', buildOds([{ name: 'S', rows: [['epsilon']] }]), 'epsilon'],
+      ['pdf', buildFilteredPdf('lzw', 0.01), 'AAAA'],
+    ] as const;
+    for (const [kind, bytes, expected] of cases) {
+      const response = await extractDocumentText({
+        kind,
+        bytes: new Uint8Array(bytes),
+        maxChars: MAX,
+      });
+      expect(textOf(response)).toContain(expected);
+    }
   });
 
   it('answers again after a refusal', async () => {
@@ -722,6 +1211,84 @@ describe('extractDocumentText', () => {
     expect(after.ok).toBe(true);
   });
 
+  it('stops a child whose resident memory passes the ceiling', async () => {
+    // pdf.js inflates into typed arrays outside the V8 heap, and a synchronous
+    // inflate cannot be interrupted from inside; the parent is the only one who
+    // can stop it. The ceiling is narrowed far below an honest document so the
+    // kill happens on a PDF that would otherwise be read.
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const response = await extractDocumentText(
+        { kind: 'pdf', bytes: new Uint8Array(buildPdf()), maxChars: MAX },
+        { rssMb: 5 }
+      );
+      expect(response).toEqual({ ok: false, reason: 'too-large' });
+    } finally {
+      error.mockRestore();
+    }
+    const after = await extractDocumentText({
+      kind: 'pdf',
+      bytes: new Uint8Array(buildPdf()),
+      maxChars: MAX,
+    });
+    expect(after.ok).toBe(true);
+  });
+
+  it('stops a child by its own heartbeat where /proc is not read', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const response = await extractDocumentText(
+        { kind: 'pdf', bytes: new Uint8Array(buildPdf()), maxChars: MAX },
+        { rssMb: 5, heartbeatOnly: true }
+      );
+      expect(response).toEqual({ ok: false, reason: 'too-large' });
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('keeps a child from reading the parent environment', async () => {
+    // Under the permission model, `delete process.env` is not the defence: the
+    // password stays readable at /proc/<ppid>/environ for as long as the server
+    // lives. The child has to be unable to open it.
+    process.env.IMAP_PASSWORD = 'hunter2-not-a-secret';
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const response = await extractDocumentText(
+        { kind: 'pdf', bytes: new Uint8Array(buildPdf()), maxChars: MAX },
+        { probe: 'parent-environ' }
+      );
+      expect(response).toEqual({ ok: false, reason: 'internal' });
+      const logged = error.mock.calls.map((call) => String(call[0])).join('\n');
+      expect(logged).toContain('ERR_ACCESS_DENIED');
+      expect(logged).not.toContain('ENV_INHERITED');
+      expect(logged).not.toContain('READ_SUCCEEDED');
+      expect(logged).not.toContain('hunter2');
+    } finally {
+      error.mockRestore();
+      delete process.env.IMAP_PASSWORD;
+    }
+  });
+
+  it('forwards the child stderr escaped and capped, line by line', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await extractDocumentText(
+        { kind: 'pdf', bytes: new Uint8Array(buildPdf()), maxChars: MAX },
+        { probe: 'stderr-escape' }
+      );
+      const lines = error.mock.calls.map((call) => String(call[0]));
+      const forwarded = lines.find((line) => line.includes('red'));
+      expect(forwarded).toBeDefined();
+      // eslint-disable-next-line no-control-regex
+      expect(forwarded).not.toMatch(/[\u0000-\u0008\u000b-\u001f]/);
+      expect(forwarded).toContain('\\u001b');
+      expect(forwarded!.length).toBeLessThan(400);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
   it('answers busy past the in-flight cap instead of queueing a ninth process', async () => {
     // The queue is what bounds memory: one child at a time, the next when
     // the previous is gone. The cap on the queue is what bounds latency —
@@ -753,9 +1320,11 @@ describe('extractDocumentText', () => {
       expect(error).toHaveBeenCalled();
       // A code, never the message: the message is where a parser quotes the
       // document.
-      expect(String(error.mock.calls[0]?.[0])).toMatch(
-        /extraction (process|request)/
-      );
+      expect(
+        error.mock.calls.some((call) =>
+          /extraction (process|request)/.test(String(call[0]))
+        )
+      ).toBe(true);
     } finally {
       error.mockRestore();
     }

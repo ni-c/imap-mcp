@@ -9,6 +9,7 @@ import {
   tokenOf,
 } from './harness.js';
 import { message } from './fake-imap.js';
+import { audit } from '../src/audit.js';
 
 function mailboxes() {
   return [
@@ -351,14 +352,14 @@ describe('audit log', () => {
     const entry = lines.find((line) => line.includes('imap-mcp audit'));
     expect(entry).toBeDefined();
     expect(entry).toContain('delete');
-    expect(entry).toContain('mailbox=INBOX');
+    expect(entry).toContain('mailbox="INBOX"');
     expect(entry).toContain('uids=[2]');
     // stderr is the one channel the model does not read, but a human does — and
     // attacker-chosen prose has no business in an operator's log viewer.
     expect(entry).not.toContain('Ignore all previous rules');
   });
 
-  it('abbreviates a bulk UID list instead of flooding the log', async () => {
+  it('writes every UID of a bulk call, as ranges', async () => {
     const lines: string[] = [];
     const spy = vi
       .spyOn(console, 'error')
@@ -377,7 +378,10 @@ describe('audit log', () => {
     spy.mockRestore();
 
     const entry = lines.find((line) => line.includes('imap-mcp audit')) ?? '';
-    expect(entry).toContain('+20]');
+    // A 40-UID delete has to be recoverable from the log, which a list cut at
+    // twenty entries is not — and ranges keep it one short token.
+    expect(entry).toContain('uids=[1:40]');
+    expect(entry).not.toContain('…');
   });
 
   it('escapes a folder name that would misrepresent itself in the log', async () => {
@@ -409,8 +413,78 @@ describe('audit log', () => {
     spy.mockRestore();
 
     const entry = lines.find((line) => line.includes(' move from=')) ?? '';
-    expect(entry).toContain('to=Archive\\u202edlofretsam');
+    expect(entry).toContain('to="Archive\\u202edlofretsam"');
     expect(entry).not.toContain('\u202e');
+  });
+});
+
+/** The line audit() wrote, with the timestamp and operation cut off. */
+function written(details: Record<string, unknown>): string {
+  const lines: string[] = [];
+  const spy = vi
+    .spyOn(console, 'error')
+    .mockImplementation((...args: unknown[]) => {
+      lines.push(args.map(String).join(' '));
+    });
+  audit('probe', details);
+  spy.mockRestore();
+  return (lines[0] ?? '').replace(/^imap-mcp audit \S+ probe /, '');
+}
+
+describe('audit line format', () => {
+  it('keeps a folder name that imitates other fields inside its own token', () => {
+    // A bare `key=value` join let a folder called `Archive uids=[1] to=Trash`
+    // write the fields a reader looks for, and the line read as another call.
+    const line = written({ mailbox: 'Archive uids=[1] to=Trash', uids: [7] });
+    expect(line).toBe('mailbox="Archive uids=[1] to=Trash" uids=[7]');
+  });
+
+  it('cannot be broken out of with a quote or a backslash', () => {
+    const line = written({ mailbox: 'a" uids=[9] x="b\\' });
+    expect(line).toBe('mailbox="a\\" uids=[9] x=\\"b\\\\"');
+    // One field, so exactly one key= outside the quotes.
+    expect(line.replace(/"(?:[^"\\]|\\.)*"/g, '""')).toBe('mailbox=""');
+  });
+
+  it('writes line breaks, separators and invisible characters as escapes', () => {
+    const line = written({ mailbox: 'a\r\nimap-mcp audit x\u2028y\u202ez' });
+    expect(line).not.toMatch(/[\r\n\u2028\u202e]/);
+    expect(line).toBe('mailbox="a\\r\\nimap-mcp audit x\\u2028y\\u202ez"');
+  });
+
+  it('writes a UID set whole, as sorted ranges', () => {
+    expect(written({ uids: [9, 1, 2, 3, 4, 5, 7, 8, 5] })).toBe(
+      'uids=[1:5,7:9]'
+    );
+    expect(written({ uids: [1, 3, 5] })).toBe('uids=[1,3,5]');
+    expect(written({ uids: [] })).toBe('uids=[]');
+    const many = Array.from(
+      { length: 200 },
+      (_u, i) => (i % 2) * 1 + i * 2 + 1
+    );
+    const line = written({ uids: many });
+    expect(line).not.toContain('…');
+    // Nothing is lost: expanding the ranges gives the set back.
+    const expanded = (/^uids=\[(.*)\]$/.exec(line)?.[1] ?? '')
+      .split(',')
+      .flatMap((part) => {
+        const [from, to] = part.split(':').map(Number);
+        return Array.from(
+          { length: (to ?? from!) - from! + 1 },
+          (_u, i) => from! + i
+        );
+      });
+    expect(expanded).toEqual([...new Set(many)].toSorted((a, b) => a - b));
+  });
+
+  it('quotes each string in a list and leaves numbers and booleans bare', () => {
+    expect(written({ added: ['\\Seen', 'a b'], n: 3, flag: true })).toBe(
+      'added=["\\\\Seen","a b"] n=3 flag=true'
+    );
+  });
+
+  it('omits an undefined field', () => {
+    expect(written({ a: undefined, b: 1 })).toBe('b=1');
   });
 });
 

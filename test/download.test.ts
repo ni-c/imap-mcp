@@ -1,6 +1,7 @@
 import {
   chmod,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   stat,
@@ -10,13 +11,48 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { saveAttachment } from '../src/download.js';
 import { ToolInputError } from '../src/errors.js';
 
 import { call, connect, jsonOf, testConfig, textOf } from './harness.js';
 import { message } from './fake-imap.js';
+
+// Lets a test make the write itself misbehave. The real `open` is used for
+// everything else, so the rest of the file runs against a real file system.
+const faults = vi.hoisted(() => ({
+  mode: 'none' as 'none' | 'short' | 'fail',
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    open: async (...args: Parameters<typeof actual.open>) => {
+      const handle = await actual.open(...args);
+      if (faults.mode === 'none') return handle;
+      return new Proxy(handle, {
+        get(target, key) {
+          if (key === 'write' && faults.mode === 'short') {
+            // One byte at a time, reporting the truth: a short write.
+            return async (data: Buffer) => target.write(data.subarray(0, 1));
+          }
+          if (key === 'writeFile' && faults.mode === 'fail') {
+            return async () => {
+              await target.write(Buffer.from('par'));
+              throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+            };
+          }
+          const value = Reflect.get(target, key) as unknown;
+          return typeof value === 'function'
+            ? (value as (...a: unknown[]) => unknown).bind(target)
+            : value;
+        },
+      });
+    },
+  };
+});
 
 let directory: string;
 
@@ -25,6 +61,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  faults.mode = 'none';
   await rm(directory, { recursive: true, force: true });
 });
 
@@ -121,6 +158,28 @@ describe('saveAttachment', () => {
     await expect(
       saveAttachment(directory, '../escaped.txt', Buffer.from('x'))
     ).rejects.toBeInstanceOf(ToolInputError);
+  });
+
+  it('writes everything even when the file system takes it a byte at a time', async () => {
+    faults.mode = 'short';
+    const content = Buffer.from('0123456789abcdef');
+    const saved = await saveAttachment(directory, 'slow.bin', content);
+    faults.mode = 'none';
+    expect(saved.bytes).toBe(content.length);
+    expect(await readFile(saved.path)).toEqual(content);
+  });
+
+  it('removes the partial file and maps the error when the write fails', async () => {
+    faults.mode = 'fail';
+    const error = await saveAttachment(
+      directory,
+      'full.pdf',
+      Buffer.from('%PDF-1.7 body')
+    ).catch((caught: unknown) => caught);
+    faults.mode = 'none';
+    expect(error).toBeInstanceOf(ToolInputError);
+    expect((error as Error).message).toContain('no space left');
+    expect(await readdir(directory)).toEqual([]);
   });
 
   it('explains a missing directory instead of leaking the errno', async () => {
@@ -306,6 +365,9 @@ describe('get_attachments to disk', () => {
   });
 });
 
+const blobOf = (result: { contents: unknown[] }) =>
+  Buffer.from((result.contents[0] as { blob: string }).blob, 'base64');
+
 describe('attachment resources', () => {
   const pdf = Buffer.from('%PDF-1.7 body');
 
@@ -397,6 +459,217 @@ describe('attachment resources', () => {
     await harness.close();
   });
 
+  describe('mailbox in the URI', () => {
+    const other = Buffer.from('%PDF-1.7 other mailbox');
+
+    function twoMailboxes() {
+      return connect({
+        mailboxes: [
+          {
+            path: 'INBOX',
+            messages: [
+              message(7, {
+                attachments: [
+                  {
+                    partId: '2',
+                    filename: 'inbox.pdf',
+                    contentType: 'application/pdf',
+                    content: pdf,
+                  },
+                ],
+              }),
+            ],
+          },
+          {
+            path: 'INBOX/Rechnungen',
+            messages: [
+              message(7, {
+                attachments: [
+                  {
+                    partId: '2',
+                    filename: 'other.pdf',
+                    contentType: 'application/pdf',
+                    content: other,
+                  },
+                ],
+              }),
+            ],
+          },
+        ],
+      });
+    }
+
+    it('reads the message of the named mailbox, not UID n of the default one', async () => {
+      const harness = await twoMailboxes();
+      const result = await harness.client.readResource({
+        uri: 'imap://message/7/part/2?mailbox=INBOX%2FRechnungen',
+      });
+      expect(blobOf(result).equals(other)).toBe(true);
+      expect(
+        harness.imap.calls.some(
+          (entry) =>
+            entry.name === 'getMailboxLock' &&
+            entry.args[0] === 'INBOX/Rechnungen'
+        )
+      ).toBe(true);
+      await harness.close();
+    });
+
+    it('keeps the form without a mailbox working for the default one', async () => {
+      const harness = await twoMailboxes();
+      const result = await harness.client.readResource({
+        uri: 'imap://message/7/part/2',
+      });
+      expect(blobOf(result).equals(pdf)).toBe(true);
+      await harness.close();
+    });
+
+    it('advertises both templates', async () => {
+      const harness = await twoMailboxes();
+      const { resourceTemplates } =
+        await harness.client.listResourceTemplates();
+      expect(resourceTemplates.map((t) => t.uriTemplate).toSorted()).toEqual([
+        'imap://message/{uid}/part/{partId}',
+        'imap://message/{uid}/part/{partId}{?mailbox}',
+      ]);
+      await harness.close();
+    });
+
+    it.each([
+      'imap://message/7/part/2?mailbox=',
+      'imap://message/7/part/2?mailbox=%2A',
+      'imap://message/7/part/2?mailbox=a%0Ab',
+    ])('refuses the mailbox in %s before any FETCH', async (uri) => {
+      const harness = await twoMailboxes();
+      await expect(harness.client.readResource({ uri })).rejects.toThrow();
+      expect(
+        harness.imap.calls.some((entry) => entry.name === 'download')
+      ).toBe(false);
+      await harness.close();
+    });
+
+    it('does not take the query for part of the part id', async () => {
+      const harness = await twoMailboxes();
+      await expect(
+        harness.client.readResource({
+          uri: 'imap://message/7/part/2?other=1',
+        })
+      ).rejects.toThrow(/no valid MIME part id/);
+      await harness.close();
+    });
+  });
+
+  it.each([
+    'imap://message/0x10/part/2',
+    'imap://message/1e1/part/2',
+    'imap://message/07/part/2',
+    'imap://message/+7/part/2',
+    'imap://message/7.0/part/2',
+    'imap://message/4294967296/part/2',
+    'imap://message/12345678901/part/2',
+  ])('reads %s strictly: not a UID', async (uri) => {
+    // Number() accepts every one of these as a number.
+    const harness = await harnessWithPdf();
+    await expect(harness.client.readResource({ uri })).rejects.toThrow(
+      /no valid UID/
+    );
+    await harness.close();
+  });
+
+  it('accepts the largest UID', async () => {
+    const harness = await harnessWithPdf();
+    await expect(
+      harness.client.readResource({ uri: 'imap://message/4294967295/part/2' })
+    ).rejects.toThrow(/no message with UID 4294967295/);
+    await harness.close();
+  });
+
+  it('puts an error through the same escaping as a tool error', async () => {
+    // The library quotes the mailbox it could not open, and a mailbox name may
+    // carry a directional override. A tool result spells it out; so must this.
+    const harness = await harnessWithPdf();
+    const error = await harness.client
+      .readResource({
+        uri: `imap://message/7/part/2?mailbox=${encodeURIComponent('no\u202esuch')}`,
+      })
+      .catch((caught: unknown) => caught as Error);
+    const text = String((error as Error).message);
+    expect(text).toContain("Mailbox doesn't exist");
+    expect(text).not.toContain('\u202e');
+    await harness.close();
+  });
+
+  it('labels the blob with the type of the bytes for an image', async () => {
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0]);
+    const harness = await connect({
+      mailboxes: mailbox({
+        attachments: [
+          {
+            partId: '2',
+            filename: 'a.png',
+            contentType: 'image/png',
+            content: jpeg,
+          },
+          {
+            partId: '3',
+            filename: 'b.png',
+            contentType: 'image/png',
+            content: Buffer.from('<svg onload="x()"/>'),
+          },
+        ],
+      }),
+    });
+    const real = await harness.client.readResource({
+      uri: 'imap://message/7/part/2',
+    });
+    expect(real.contents[0]?.mimeType).toBe('image/jpeg');
+    const fake = await harness.client.readResource({
+      uri: 'imap://message/7/part/3',
+    });
+    expect(fake.contents[0]?.mimeType).toBe('application/octet-stream');
+    await harness.close();
+  });
+
+  it('refuses a content one byte over the cap although the declaration says it fits', async () => {
+    const harness = await connect({
+      config: { imap: { ...testConfig().imap, maxAttachmentBytes: 64 } },
+      mailboxes: mailbox({
+        attachments: [
+          {
+            partId: '2',
+            filename: 'a.txt',
+            contentType: 'text/plain',
+            content: Buffer.alloc(65, 0x61),
+            declaredSize: 10,
+          },
+        ],
+      }),
+    });
+    await expect(
+      harness.client.readResource({ uri: 'imap://message/7/part/2' })
+    ).rejects.toThrow(/IMAP_MAX_ATTACHMENT_BYTES/);
+    await harness.close();
+  });
+
+  it('says why a script declared as text/plain is refused', async () => {
+    const harness = await connect({
+      mailboxes: mailbox({
+        attachments: [
+          {
+            partId: '2',
+            filename: 'notes.txt',
+            contentType: 'text/plain',
+            content: Buffer.from('#!/bin/sh\necho hi\n'),
+          },
+        ],
+      }),
+    });
+    await expect(
+      harness.client.readResource({ uri: 'imap://message/7/part/2' })
+    ).rejects.toThrow(/starts with "#!"/);
+    await harness.close();
+  });
+
   it('is closed by the tool filter along with get_attachments', async () => {
     // The resource is the same door as the tool. Denying the tool used to
     // remove it from tools/list and leave imap://message/{uid}/part/{partId}
@@ -473,3 +746,38 @@ describe('attachment resources', () => {
 function mailbox(attachments: Parameters<typeof message>[1]) {
   return [{ path: 'INBOX', messages: [message(7, attachments)] }];
 }
+
+describe('the download deadline', () => {
+  it('grows with the cap and never drops below the command timeout', async () => {
+    const { downloadDeadline } = await import('../src/stream.js');
+    expect(downloadDeadline(0)).toBe(30_000);
+    expect(downloadDeadline(1)).toBe(40_000);
+    expect(downloadDeadline(25 * 1024 * 1024)).toBe(280_000);
+  });
+});
+
+describe('a download that trickles', () => {
+  it('gives up at the deadline instead of holding the mailbox', async () => {
+    const { PassThrough } = await import('node:stream');
+    const { downloadCapped } = await import('../src/stream.js');
+    vi.useFakeTimers();
+    try {
+      const stream = new PassThrough();
+      stream.write(Buffer.from('a'));
+      const connection = {
+        download: async () => ({
+          content: stream,
+          meta: { contentType: 'text/plain' },
+        }),
+      } as never;
+      const pending = downloadCapped(connection, 1, '2', 1024);
+      const assertion = expect(pending).rejects.toMatchObject({
+        code: 'COMMAND_TIMEOUT',
+      });
+      await vi.advanceTimersByTimeAsync(41_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { ToolInputError } from './errors.js';
+import { addressParam } from './schema.js';
 
 /** Headers linking a draft into an existing conversation. */
 export interface ThreadHeaders {
@@ -33,6 +34,11 @@ const ENCODED_WORD_PAYLOAD = 45;
  * send under their own name. The schemas reject line breaks already; this is
  * the second lock on the same door.
  */
+/** Whether the login can stand as a From address. */
+export function fromIsAddress(from: string): boolean {
+  return addressParam.safeParse(from).success;
+}
+
 export function buildDraft(input: DraftInput): Buffer {
   const from = input.from;
   if (from === undefined || from === '') {
@@ -41,15 +47,19 @@ export function buildDraft(input: DraftInput): Buffer {
     );
   }
 
+  // The sender is the IMAP login, and a login is not always an address:
+  // `alice` and `DOMAIN\\alice` are accounts. Such a login is left out rather
+  // than written as an unusable From header; the mail client fills in the
+  // identity when the draft is sent.
   const headers: Array<[string, string]> = [
-    ['From', from],
-    ['To', input.to.join(', ')],
+    ...(fromIsAddress(from) ? [['From', from] as [string, string]] : []),
+    ['To', foldAddresses('To', input.to)],
   ];
   if (input.cc !== undefined && input.cc.length > 0) {
-    headers.push(['Cc', input.cc.join(', ')]);
+    headers.push(['Cc', foldAddresses('Cc', input.cc)]);
   }
   if (input.bcc !== undefined && input.bcc.length > 0) {
-    headers.push(['Bcc', input.bcc.join(', ')]);
+    headers.push(['Bcc', foldAddresses('Bcc', input.bcc)]);
   }
   headers.push(['Subject', encodeHeaderValue(input.subject)]);
   headers.push(['Date', (input.date ?? new Date()).toUTCString()]);
@@ -72,10 +82,15 @@ export function buildDraft(input: DraftInput): Buffer {
   });
 
   // base64 for the body: it survives any charset, cannot contain a line that
-  // looks like a header, and keeps lines inside the 998-octet limit.
-  const encoded = Buffer.from(input.body, 'utf-8')
-    .toString('base64')
-    .replace(/(.{76})/g, '$1\r\n');
+  // looks like a header, and keeps lines inside the 998-octet limit. Line
+  // breaks are made CRLF first: text/plain on the wire is CRLF text, and a
+  // client decoding the part would otherwise show bare LFs as it received them.
+  const text = input.body.replace(/\r\n|\r|\n/g, '\r\n');
+  const encoded = (
+    Buffer.from(text, 'utf-8')
+      .toString('base64')
+      .match(/.{1,76}/g) ?? []
+  ).join('\r\n');
 
   return Buffer.from(`${lines.join('\r\n')}\r\n\r\n${encoded}\r\n`, 'utf-8');
 }
@@ -102,6 +117,35 @@ function foldReferences(references: string[]): string {
       line = reference;
     } else {
       line = `${line} ${reference}`;
+    }
+  }
+  if (line !== '') lines.push(line);
+  return lines.join('\r\n ');
+}
+
+/**
+ * Joins an address list, folding after a comma when a line would pass the
+ * limit.
+ *
+ * Fifty addresses of 254 characters are 13 kB on one line, which servers
+ * answer by refusing the APPEND or by cutting the header off. A fold between
+ * two addresses is invisible to every parser; one inside an address would not
+ * be, and an address is never split.
+ */
+function foldAddresses(name: string, addresses: string[]): string {
+  const lines: string[] = [];
+  let line = '';
+  // The first line also carries "Name: ".
+  let used = name.length + 2;
+  for (const address of addresses) {
+    if (line === '') {
+      line = address;
+    } else if (used + line.length + 2 + address.length > MAX_HEADER_LINE) {
+      lines.push(`${line},`);
+      line = address;
+      used = 1;
+    } else {
+      line = `${line}, ${address}`;
     }
   }
   if (line !== '') lines.push(line);

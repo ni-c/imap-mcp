@@ -12,13 +12,73 @@ import {
   uidParam,
 } from '../schema.js';
 
-import { escapeInvisible, stripInvisible } from '../analyze.js';
+import { escapeInvisible, sanitizeText, stripInvisible } from '../analyze.js';
 import { audit } from '../audit.js';
 import type { Config } from '../config.js';
 import { ToolInputError } from '../errors.js';
-import { canStoreFlag, ImapClient, withTimeout } from '../imap.js';
-import { buildDraft } from '../draft.js';
-import { errorResult, jsonResult, run } from '../result.js';
+import {
+  canStoreFlag,
+  ImapClient,
+  requireOk,
+  withTimeout,
+  type ImapConnection,
+} from '../imap.js';
+import { buildDraft, fromIsAddress } from '../draft.js';
+import { untrustedFields } from '../output-schema.js';
+import { errorResult, jsonResult, run, untrustedResult } from '../result.js';
+
+/** The longest mailbox name `mailboxParam` lets through. */
+const MAILBOX_NAME_MAX = 255;
+
+/**
+ * Whether two mailbox names are the same mailbox. INBOX is the one name IMAP
+ * defines as case-insensitive (RFC 3501); every other name is compared as is.
+ */
+function sameMailbox(a: string, b: string): boolean {
+  return withoutInboxCase(a) === withoutInboxCase(b);
+}
+
+function withoutInboxCase(name: string): string {
+  return name.toUpperCase() === 'INBOX' ? 'INBOX' : name;
+}
+
+/**
+ * Refuses a delete, or a move on a server without MOVE, that would take
+ * messages nobody asked about with it.
+ *
+ * Without UIDPLUS (RFC 4315) imapflow can only send a bare EXPUNGE, which
+ * removes every message in the mailbox flagged \Deleted — including those
+ * another client flagged and has not expunged yet. The dialog named the
+ * approved UIDs and nothing else, so the approval would cover more than it
+ * said. A move on a server without MOVE is COPY, flag, EXPUNGE and has the same
+ * reach. Servers with UIDPLUS (or, for a move, MOVE) address the UIDs exactly
+ * and are not asked.
+ */
+async function refuseStrayDeleted(
+  client: ImapClient,
+  connection: ImapConnection,
+  approved: number[],
+  operation: 'delete' | 'move'
+): Promise<void> {
+  const capabilities = connection.capabilities;
+  const exact =
+    capabilities.has('UIDPLUS') ||
+    (operation === 'move' && capabilities.has('MOVE'));
+  if (exact) return;
+  const flagged = await client.search(connection, { deleted: true }, 'throw');
+  const wanted = new Set(approved);
+  const stray = flagged.filter((uid) => !wanted.has(uid));
+  if (stray.length === 0) return;
+  throw new ToolInputError(
+    `imap-mcp: this server supports neither UIDPLUS${operation === 'move' ? ' nor MOVE' : ''}, ` +
+      `so ${operation === 'move' ? 'moving' : 'deleting'} these messages would also permanently ` +
+      `remove ${stray.length} other message(s) in this mailbox that another mail client has ` +
+      `already flagged \\Deleted (UIDs ${stray.slice(0, 20).join(', ')}${stray.length > 20 ? ', …' : ''}). ` +
+      'Nothing was changed. Expunge those in your mail client first, or clear ' +
+      'their \\Deleted flag with set_message_flags (remove ["\\Deleted"]) if they ' +
+      'should stay, then call again.'
+  );
+}
 
 /**
  * A caller-chosen value as the person deciding should see it.
@@ -124,14 +184,20 @@ export function registerWriteTools(
             );
           }
           if (add !== undefined) {
-            await withTimeout(
-              connection.messageFlagsAdd(uids, add, { uid: true }),
+            requireOk(
+              await withTimeout(
+                connection.messageFlagsAdd(uids, add, { uid: true }),
+                'STORE'
+              ),
               'STORE'
             );
           }
           if (remove !== undefined) {
-            await withTimeout(
-              connection.messageFlagsRemove(uids, remove, { uid: true }),
+            requireOk(
+              await withTimeout(
+                connection.messageFlagsRemove(uids, remove, { uid: true }),
+                'STORE'
+              ),
               'STORE'
             );
           }
@@ -189,12 +255,33 @@ export function registerWriteTools(
         source: z.string(),
         destination: z.string(),
         uids: z.array(z.number().int()),
+        unconfirmed_uids: z
+          .array(z.number().int())
+          .optional()
+          .describe(
+            'Present when the server confirmed new UIDs for fewer messages than were named.'
+          ),
+        note: z.string().optional(),
       }),
     },
     async ({ uids, destination, mailbox, mode, confirm_token }, mcp) =>
       run(async () => {
         const copying = mode === 'copy';
         const source = mailbox ?? client.defaultMailbox;
+        // Before the dialog: a copy onto itself duplicates every message, and
+        // a move onto itself on a server without MOVE is COPY, flag and
+        // EXPUNGE, which recreates each message under a new UID.
+        if (sameMailbox(source, destination)) {
+          throw new ToolInputError(
+            'imap-mcp: the destination is the mailbox the messages are already ' +
+              'in. Nothing was changed; name another mailbox.'
+          );
+        }
+        if (!copying) {
+          await client.withMailbox(mailbox, true, (connection) =>
+            refuseStrayDeleted(client, connection, uids, 'move')
+          );
+        }
         // Copying is confirmed as well. The old rule — a token for "move",
         // nothing for "copy" — reasoned about deletion, and deletion is not the
         // only thing that cannot be taken back. `destination` is a free-form
@@ -255,27 +342,55 @@ export function registerWriteTools(
         if (outcome.decision === 'pending') return outcome.result;
 
         return client.withMailbox(mailbox, false, async (connection) => {
-          if (copying) {
-            await withTimeout(
-              connection.messageCopy(uids, destination, { uid: true }),
-              'COPY'
-            );
-          } else {
-            await withTimeout(
-              connection.messageMove(uids, destination, { uid: true }),
-              'MOVE'
-            );
+          if (!copying) {
+            await refuseStrayDeleted(client, connection, uids, 'move');
           }
+          const result = copying
+            ? requireOk(
+                await withTimeout(
+                  connection.messageCopy(uids, destination, { uid: true }),
+                  'COPY'
+                ),
+                'COPY'
+              )
+            : requireOk(
+                await withTimeout(
+                  connection.messageMove(uids, destination, { uid: true }),
+                  'MOVE'
+                ),
+                'MOVE'
+              );
+          // A UID map smaller than the set means the server acted on fewer
+          // messages than were named: the rest were gone already. Servers
+          // without UIDPLUS send no map, and then nothing can be said.
+          const wanted = [...new Set(uids)];
+          const unconfirmed =
+            result.uidMap === undefined
+              ? []
+              : wanted.filter((uid) => !result.uidMap?.has(uid));
           audit(copying ? 'copy' : 'move', {
             from: source,
             to: destination,
             uids,
+            ...(result.uidMap === undefined
+              ? {}
+              : { confirmed: result.uidMap.size }),
           });
           return jsonResult({
             action: copying ? 'copied' : 'moved',
             source,
             destination,
             uids,
+            ...(unconfirmed.length === 0
+              ? {}
+              : {
+                  unconfirmed_uids: unconfirmed,
+                  note:
+                    `The server confirmed ${wanted.length - unconfirmed.length} of ` +
+                    `${wanted.length} message(s) as ${copying ? 'copied' : 'moved'}. The others ` +
+                    'were probably already gone or moved by another client; ' +
+                    'list_messages shows what is where.',
+                }),
           });
         });
       })
@@ -312,6 +427,11 @@ export function registerWriteTools(
     async ({ uids, mailbox, confirm_token }, mcp) =>
       run(async () => {
         const source = mailbox ?? client.defaultMailbox;
+        // Before the dialog, so nobody is asked to approve what would then be
+        // refused; checked again below, where it is the last word.
+        await client.withMailbox(mailbox, true, (connection) =>
+          refuseStrayDeleted(client, connection, uids, 'delete')
+        );
         const outcome = await approval.requestApproval(
           server,
           mcp,
@@ -340,8 +460,12 @@ export function registerWriteTools(
         if (outcome.decision === 'pending') return outcome.result;
 
         return client.withMailbox(mailbox, false, async (connection) => {
-          await withTimeout(
-            connection.messageDelete(uids, { uid: true }),
+          await refuseStrayDeleted(client, connection, uids, 'delete');
+          requireOk(
+            await withTimeout(
+              connection.messageDelete(uids, { uid: true }),
+              'EXPUNGE'
+            ),
             'EXPUNGE'
           );
           audit('delete', { mailbox: source, uids });
@@ -383,6 +507,13 @@ export function registerWriteTools(
         action: z.enum(['create', 'rename', 'delete']),
         mailbox: z.string(),
         new_name: z.string().optional(),
+        already_existed: z
+          .boolean()
+          .optional()
+          .describe(
+            '"create" found the mailbox there already; nothing was made.'
+          ),
+        note: z.string().optional(),
       }),
     },
     async ({ action, mailbox, new_name, confirm_token }, mcp) =>
@@ -445,7 +576,20 @@ export function registerWriteTools(
 
         return client.withConnection(async (connection) => {
           if (action === 'create') {
-            await withTimeout(connection.mailboxCreate(mailbox), 'CREATE');
+            const created = requireOk(
+              await withTimeout(connection.mailboxCreate(mailbox), 'CREATE'),
+              'CREATE'
+            );
+            // imapflow turns ALREADYEXISTS into a normal answer. Nothing was
+            // made, so there is nothing to put in the audit log either.
+            if (!created.created) {
+              return jsonResult({
+                action,
+                mailbox,
+                already_existed: true,
+                note: 'This mailbox already existed, so nothing was created.',
+              });
+            }
           } else if (action === 'rename') {
             await withTimeout(
               connection.mailboxRename(mailbox, new_name as string),
@@ -506,8 +650,22 @@ export function registerWriteTools(
         openWorldHint: false,
       },
       outputSchema: z.object({
+        ...untrustedFields,
         action: z.literal('draft_saved'),
-        mailbox: z.string().describe('The Drafts folder this server found.'),
+        mailbox: z
+          .string()
+          .describe(
+            'The Drafts folder, exactly as the server spelled it: the handle other tools take. Not sanitised; read display_name.'
+          ),
+        display_name: z
+          .string()
+          .describe(
+            'The same folder name, sanitised. Read and quote this one.'
+          ),
+        name_warning: z
+          .string()
+          .optional()
+          .describe('Present when mailbox and display_name differ invisibly.'),
         recipients: z.array(z.string()),
         flags: z
           .array(z.string())
@@ -562,16 +720,32 @@ export function registerWriteTools(
           recipients: to.length + (cc?.length ?? 0) + (bcc?.length ?? 0),
           in_reply_to: thread?.messageId,
         });
-        return jsonResult({
+        // The folder name is the server's, or a colleague's on a shared
+        // account: it goes back the way list_mailboxes returns one, the exact
+        // handle beside a sanitised copy, under the untrusted marker, and never
+        // inside a sentence of this server's own.
+        const display = sanitizeText(folder, MAILBOX_NAME_MAX);
+        return untrustedResult({
           action: 'draft_saved',
           mailbox: folder,
+          display_name: display,
+          ...(display === folder
+            ? {}
+            : {
+                name_warning:
+                  'This folder name contains invisible, control or auto-fetching ' +
+                  `characters. As written: ${escapeInvisible(folder).slice(0, MAILBOX_NAME_MAX)}`,
+              }),
           recipients: [...to, ...(cc ?? []), ...(bcc ?? [])],
           flags,
           note:
             'The draft is stored but not sent. This server has no way to send mail; open it in your mail client to send it.' +
             (dropped.length === 0
               ? ''
-              : ` The ${folder} folder does not store ${dropped.join(' or ')}, so the draft was saved without it; some mail clients may then not list it as a draft.`),
+              : ` The Drafts folder does not store ${dropped.join(' or ')}, so the draft was saved without it; some mail clients may then not list it as a draft.`) +
+            (fromIsAddress(client.user ?? '')
+              ? ''
+              : ' The IMAP login is not an email address, so the draft has no From header; the mail client sets the sender when it is sent.'),
         });
       })
   );
@@ -580,9 +754,15 @@ export function registerWriteTools(
 /**
  * Finds the Drafts folder.
  *
- * The `\Drafts` special-use flag is the right answer where the server reports
+ * The `\\Drafts` special-use flag is the right answer where the server reports
  * it, because folder names are localised — "Entwürfe", "Brouillons" — and
  * guessing wrong creates a stray folder rather than failing loudly.
+ *
+ * Only a role the server itself asserted counts. imapflow also assigns roles by
+ * matching folder *names*, in every namespace the account can see, so on a
+ * shared account a colleague's `Public/Drafts` can be picked for the draft —
+ * and a draft of the account holder's mail then sits where others read it.
+ * `IMAP_DRAFTS_MAILBOX` is the answer for a server that sends no SPECIAL-USE.
  */
 async function resolveDraftsMailbox(
   client: ImapClient,
@@ -591,12 +771,17 @@ async function resolveDraftsMailbox(
   if (config.imap.draftsMailbox !== undefined) {
     return config.imap.draftsMailbox;
   }
-  const { mailboxes } = await client.listMailboxes();
-  const found = mailboxes.find((box) => box.specialUse === '\\Drafts');
+  const found = (await client.listMailboxRoles()).find(
+    (box) =>
+      box.specialUse === '\\Drafts' &&
+      box.selectable &&
+      (box.specialUseSource === 'extension' || box.specialUseSource === 'user')
+  );
   if (found === undefined) {
     throw new ToolInputError(
       'imap-mcp: this account does not advertise a \\Drafts folder. Call ' +
-        'list_mailboxes to find the right one and set IMAP_DRAFTS_MAILBOX to it.'
+        'list_mailboxes to find the right one and set IMAP_DRAFTS_MAILBOX to it. ' +
+        '(A folder that only looks like Drafts by its name is not used.)'
     );
   }
   return found.path;

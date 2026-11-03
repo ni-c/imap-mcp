@@ -74,3 +74,14 @@ export interface ExtractFailed {
 }
 
 export type ExtractResponse = ExtractOk | ExtractFailed;
+
+/**
+ * Sent by the child on a timer, so the host has a figure for its memory use
+ * where it cannot read one from the operating system. Absent from
+ * {@link ExtractResponse} on purpose: it is never an answer.
+ */
+export interface ExtractHeartbeat {
+  heartbeat: true;
+  /** Resident set size, in bytes. */
+  rss: number;
+}

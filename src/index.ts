@@ -3,8 +3,18 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 
 import { loadConfig } from './config.js';
-import { createServer } from './server.js';
+import { createServer, imapClientOf } from './server.js';
+import { createShutdown } from './shutdown.js';
 import { ToolFilterError } from 'mcp-tool-allowlist';
+
+const servers = new Set<McpServer>();
+const shutdown = createShutdown(
+  () =>
+    [...servers]
+      .map((server) => imapClientOf(server))
+      .filter((client) => client !== undefined),
+  (code) => process.exit(code)
+);
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -34,6 +44,7 @@ async function main(): Promise<void> {
   let pending: McpServer | undefined;
   try {
     pending = createServer(config);
+    servers.add(pending);
   } catch (error) {
     // A bad tool list is operator feedback, not a crash.
     if (error instanceof ToolFilterError) {
@@ -54,9 +65,13 @@ async function main(): Promise<void> {
   // is safe because `createServer` only registers tools.
   serveStdio(() => {
     const server = pending ?? createServer(config);
+    servers.add(server);
     pending = undefined;
     return server;
   });
+  // The client closing stdin is the end of the session, signal or not.
+  process.stdin.once('end', () => void shutdown(0));
+  process.stdin.once('close', () => void shutdown(0));
   console.error(
     config.imap.host === undefined
       ? 'imap-mcp: connected without configuration — tools are listed but every call will fail'
@@ -66,8 +81,8 @@ async function main(): Promise<void> {
 
 // In a container node runs as PID 1 with no default signal disposition, so
 // without this handler `docker stop` waits out the grace period and SIGKILLs.
-process.on('SIGTERM', () => process.exit(0));
-process.on('SIGINT', () => process.exit(0));
+process.on('SIGTERM', () => void shutdown(0));
+process.on('SIGINT', () => void shutdown(0));
 
 main().catch((error: unknown) => {
   console.error('imap-mcp: fatal error:', error);

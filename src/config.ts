@@ -1,7 +1,8 @@
 import { realpathSync, statSync } from 'node:fs';
+import { isIPv4, isIPv6 } from 'node:net';
 
 import { isMediaType } from './attachments.js';
-import { MAILBOX_CONTROL_CHARS } from './schema.js';
+import { MAILBOX_CONTROL_CHARS, MAX_LIMIT } from './schema.js';
 
 /** How the IMAP connection is encrypted. */
 export type TlsMode = 'implicit' | 'starttls' | 'none';
@@ -177,13 +178,17 @@ export function missingConfigKeys(config: Config): string[] {
  * IMAP session, and a bad port would connect somewhere unintended.
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const host = env.IMAP_HOST;
+  // Empty counts as unset, as it does for every other variable: compose files
+  // write `${VAR:-}`, and an empty host used to end the process where a
+  // missing one only warns.
+  const rawHost = env.IMAP_HOST || undefined;
   const user = env.IMAP_USER;
   const password = env.IMAP_PASSWORD;
 
-  // Removed here, before any branch below can return or exit: the password must
-  // not stay in the environment for the process lifetime, where it is visible
-  // to child processes and in /proc/<pid>/environ.
+  // Removed here, before any branch below can return or exit, so that child
+  // processes do not inherit it. This does not reach /proc/<pid>/environ:
+  // the kernel serves that from the block the process started with, and a
+  // process of the same user can still read it there.
   delete env.IMAP_PASSWORD;
 
   const tls = parseTlsMode(env.IMAP_TLS);
@@ -192,14 +197,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   // whatever runs next.
   const elicitation = parseElicitation(env.ELICITATION);
 
-  if (host !== undefined) assertSafeHost(host, 'IMAP_HOST');
+  const host =
+    rawHost === undefined ? undefined : normalizeHost(rawHost, 'IMAP_HOST');
   // A user name is written into a LOGIN command and into the From header of
   // every draft. Neither tolerates a line break, and neither is a place for a
   // value that was meant for the line above it.
   if (user !== undefined) assertSingleLine(user, 'IMAP_USER');
   const mailbox = env.IMAP_MAILBOX || 'INBOX';
   assertMailboxName(mailbox, 'IMAP_MAILBOX');
-  const draftsMailbox = env.IMAP_DRAFTS_MAILBOX;
+  const draftsMailbox = env.IMAP_DRAFTS_MAILBOX?.trim() || undefined;
   if (draftsMailbox !== undefined) {
     assertMailboxName(draftsMailbox, 'IMAP_DRAFTS_MAILBOX');
   }
@@ -224,10 +230,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       seenKeyword: parseKeyword(env.IMAP_SEEN_KEYWORD),
       draftsMailbox,
       trustedAuthservId,
+      // The same ceiling as the `limit` parameter: the default page must not
+      // be the one way past the documented hard cap.
       maxMessages: parseCount(
         env.IMAP_MAX_MESSAGES,
         DEFAULT_MAX_MESSAGES,
-        'IMAP_MAX_MESSAGES'
+        'IMAP_MAX_MESSAGES',
+        MAX_LIMIT
       ),
       maxAttachmentBytes: parseCount(
         env.IMAP_MAX_ATTACHMENT_BYTES,
@@ -323,6 +332,17 @@ export function parseElicitation(raw: string | undefined): boolean {
  * Every variable this file reads has a neighbour that is a secret, and the
  * value that fails a shape check is the one most likely to be that neighbour.
  */
+/**
+ * A plain decimal integer, or undefined. `Number()` also takes `0x3e1`,
+ * `1e3`, `+5` and `993.0`, and reads past the integers it can represent.
+ */
+function decimal(raw: string): number | undefined {
+  const trimmed = raw.trim();
+  if (!/^[0-9]{1,15}$/.test(trimmed)) return undefined;
+  const value = Number(trimmed);
+  return Number.isSafeInteger(value) ? value : undefined;
+}
+
 function describeValue(raw: string): string {
   return `a ${raw.length}-character value`;
 }
@@ -333,8 +353,8 @@ function parsePort(
   name: string
 ): number {
   if (raw === undefined || raw === '') return fallback;
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value < 1 || value > 65535) {
+  const value = decimal(raw);
+  if (value === undefined || value < 1 || value > 65535) {
     // The value itself is not echoed: config errors end up in logs.
     console.error(`imap-mcp: ${name} must be an integer between 1 and 65535`);
     process.exit(1);
@@ -349,8 +369,8 @@ function parseCount(
   max?: number
 ): number {
   if (raw === undefined || raw === '') return fallback;
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value < 1) {
+  const value = decimal(raw);
+  if (value === undefined || value < 1) {
     console.error(`imap-mcp: ${name} must be a positive integer`);
     process.exit(1);
   }
@@ -399,6 +419,9 @@ function parseTypes(raw: string | undefined): string[] {
     .split(',')
     .map((t) => t.trim().toLowerCase())
     .filter((t) => t !== '');
+  // "," is as empty as "": an allowlist of nothing would block every
+  // attachment in a way nobody asked for.
+  if (entries.length === 0) return DEFAULT_ATTACHMENT_TYPES;
   if (entries.length > MAX_ATTACHMENT_TYPES) {
     console.error(
       `imap-mcp: IMAP_ATTACHMENT_TYPES lists ${entries.length} entries; at most ${MAX_ATTACHMENT_TYPES} are accepted`
@@ -449,6 +472,29 @@ function parseDownloadDir(raw: string | undefined): string | undefined {
  * line protocol; a CR or LF in a hostname is a command-smuggling primitive, not
  * a typo.
  */
+/**
+ * The host as the socket wants it: an IPv6 literal without its brackets, which
+ * `net.connect` does not accept — `[::1]` used to pass the check here and then
+ * fail every connection with ENOTFOUND.
+ */
+function normalizeHost(value: string, name: string): string {
+  const unbracketed = /^\[([^\]]*)\]$/.exec(value)?.[1];
+  if (unbracketed !== undefined) {
+    if (!isIPv6(unbracketed)) failHost(value, name);
+    return unbracketed;
+  }
+  assertSafeHost(value, name);
+  return value;
+}
+
+function failHost(value: string, name: string): never {
+  console.error(
+    `imap-mcp: ${name} must be a plain hostname or IP address without ` +
+      `scheme, port, credentials or whitespace (got ${describeValue(value)})`
+  );
+  process.exit(1);
+}
+
 function assertSafeHost(value: string, name: string): void {
   // A hostname or IPv4 address — or an IPv6 address, which is the only place
   // a colon is legal. Allowing ":" everywhere would silently accept
@@ -456,7 +502,7 @@ function assertSafeHost(value: string, name: string): void {
   // The length is checked first: nothing below walks a value longer than a
   // hostname can be.
   const hostname = /^[A-Za-z0-9._-]+$/.test(value);
-  const ipv6 = /^\[?[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*\]?$/.test(value);
+  const ipv6 = value.length <= MAX_HOST_LENGTH && isIPv6(value);
   if (value.length > MAX_HOST_LENGTH || (!hostname && !ipv6)) {
     console.error(
       `imap-mcp: ${name} must be a plain hostname or IP address without ` +
@@ -516,7 +562,8 @@ function isLoopbackHost(hostname: string | undefined): boolean {
   return (
     host === 'localhost' ||
     host.endsWith('.localhost') ||
-    host.startsWith('127.') ||
+    // An address, not a name: "127.mail.example.net" is a remote host.
+    (isIPv4(host) && host.startsWith('127.')) ||
     host === '::1' ||
     // Every dual-stack client dials ::ffff:127.0.0.1 as plain 127.0.0.1, and
     // URL normalises the mapped form to hex (::ffff:7f00:1).
