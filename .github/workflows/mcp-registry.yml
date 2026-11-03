@@ -34,15 +34,22 @@ jobs:
         # tar, then run with `id-token: write`, was the one exception.
         env:
           MCP_PUBLISHER_VERSION: v1.8.1
+          # Written here rather than read from the release: its checksums
+          # file sits next to the binary in the same mutable release, so
+          # whoever can replace one can replace both. A version bump updates
+          # all three values together.
+          MCP_PUBLISHER_SHA256_AMD64: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
+          MCP_PUBLISHER_SHA256_ARM64: 8dd75a6cf6845688b5d4e46df58d3ca26d5c8d233bb0626606e1db82c5e883e4
         run: |
-          os="$(uname -s | tr '[:upper:]' '[:lower:]')"
           arch="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+          case "$arch" in
+            amd64) expected="$MCP_PUBLISHER_SHA256_AMD64" ;;
+            arm64) expected="$MCP_PUBLISHER_SHA256_ARM64" ;;
+            *) echo "no pinned mcp-publisher hash for $arch" >&2; exit 1 ;;
+          esac
           base="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}"
-          curl -fsSL -o mcp-publisher.tar.gz "${base}/mcp-publisher_${os}_${arch}.tar.gz"
-          curl -fsSL -o checksums.txt "${base}/registry_${MCP_PUBLISHER_VERSION#v}_checksums.txt"
-          grep " mcp-publisher_${os}_${arch}.tar.gz\$" checksums.txt \
-            | sed "s| mcp-publisher_${os}_${arch}.tar.gz| mcp-publisher.tar.gz|" \
-            | sha256sum -c -
+          curl -fsSL -o mcp-publisher.tar.gz "${base}/mcp-publisher_linux_${arch}.tar.gz"
+          echo "${expected}  mcp-publisher.tar.gz" | sha256sum -c -
           tar xzf mcp-publisher.tar.gz mcp-publisher
       - run: ./mcp-publisher login github-oidc
       - run: ./mcp-publisher publish

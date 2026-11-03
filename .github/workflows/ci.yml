@@ -233,7 +233,7 @@ jobs:
     # party's registry is having an afternoon would be a gate with nothing to
     # say. It blocks pull requests, which is where a regression in this server
     # can still be stopped cheaply.
-    needs: [test, codeql, container-scan]
+    needs: [test, codeql, audit, container-scan]
     # Same gate as codeql, for a different reason: pushing an image out of a
     # private repository would create a package nobody can pull, and `codeql`
     # being skipped would skip this anyway. It starts working when the

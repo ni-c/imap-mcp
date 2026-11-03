@@ -9,3 +9,5 @@ docs/.vitepress/dist/
 *.local
 .npmrc
 .DS_Store
+.npm/
+.local/

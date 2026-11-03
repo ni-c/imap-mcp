@@ -12,3 +12,8 @@ data
 .env
 *.log
 docker-compose*.yml
+.env.*
+.npmrc
+*.local
+.local
+.npm

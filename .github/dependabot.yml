@@ -4,6 +4,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # A release this new has had no time to collect an advisory, and the
+    # auto-merge would land it on main — and in the next image and npm
+    # release — without anyone reading it. Security updates are not delayed.
+    cooldown:
+      default-days: 7
     # In semver, 0.x has its breaking changes in the *minor*, and these three are
     # still there. Dependabot classifies 0.1 → 0.2 as semver-minor, which the
     # auto-merge allowlist accepts — so a breaking 0.2.0 would merge itself into
@@ -46,6 +51,11 @@ updates:
     directory: /docs
     schedule:
       interval: weekly
+    # A release this new has had no time to collect an advisory, and the
+    # auto-merge would land it on main — and in the next image and npm
+    # release — without anyone reading it. Security updates are not delayed.
+    cooldown:
+      default-days: 7
     groups:
       docs:
         patterns:
@@ -59,6 +69,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # A release this new has had no time to collect an advisory, and the
+    # auto-merge would land it on main — and in the next image and npm
+    # release — without anyone reading it. Security updates are not delayed.
+    cooldown:
+      default-days: 7
     ignore:
       - dependency-name: node
         update-types:
@@ -68,6 +83,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # A release this new has had no time to collect an advisory, and the
+    # auto-merge would land it on main — and in the next image and npm
+    # release — without anyone reading it. Security updates are not delayed.
+    cooldown:
+      default-days: 7
     groups:
       # init and analyze are separate dependencies to Dependabot. Ungrouped,
       # one of them bumps first and the version mismatch fails the CodeQL job.
