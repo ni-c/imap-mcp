@@ -153,12 +153,15 @@ tool — an absent tool is not something anyone traces back to an environment va
 filtered tool is never registered, so it is absent from `tools/list` and unknown to
 `tools/call` alike, exactly like a write tool under `IMAP_READ_ONLY`.
 
-It covers **tools**. The attachment resources this server also exposes are not filtered.
+It covers **tools**, and the attachment resources follow `get_attachments`: when that tool
+is filtered out, they are not registered either.
 
 If you run several of these servers at once, [mcp-hub](https://mcp-hub.ni-c.de) is the other
 answer — its `/hub` endpoint replaces every server's tools with six meta-tools.
-The password is deleted from the process environment as soon as it is read, so it is not
-visible to child processes or in `/proc/<pid>/environ`.
+The password is deleted from the process environment as soon as it is read, so child
+processes do not inherit it. `/proc/<pid>/environ` still holds the environment the process
+started with, readable by any process of the same user; the child that parses attachments
+runs under Node's permission model and cannot read it.
 
 Without `IMAP_DOWNLOAD_DIR` this server never writes to the filesystem. The three size limits are
 separate on purpose, because they answer three different questions:
@@ -327,8 +330,9 @@ A refusal is now an **error result**: an attachment the policy rejects, one whos
 bytes are an executable whatever it claimed, one too large to inline. Each was a
 plain result that read like an answer.
 
-Attachments are also available as MCP resources at `imap://message/{uid}/part/{partId}`, which
-matters where the server has no useful filesystem. The resource path runs the same allowlist,
+Attachments are also available as MCP resources at `imap://message/{uid}/part/{partId}`
+(with `?mailbox=…` for a folder other than the default), which matters where the server has
+no useful filesystem. The resource path runs the same allowlist,
 size limit and magic-byte check as the tool — it is not a second, unguarded door.
 
 ## Not exposed, on purpose
@@ -338,11 +342,6 @@ composition, no OAuth2, and **no OCR** — a scanned PDF has no text to extract 
 rather than guessing. The first is the whole security argument (see `SECURITY.md`); the
 second would make every guard here optional; the last is planned but needs a test account
 before it ships.
-
-And one thing the tool filter does not cover: **attachment resources**. `IMAP_ALLOW_TOOLS`
-narrows `tools/list`, not `resources/list`, so a server with a narrow allow list still serves
-those. `IMAP_DOWNLOAD_DIR` and the content-type allowlist are what constrain them — worth
-knowing before concluding that a filtered install reaches less of the mailbox than it does.
 
 ## Safety
 

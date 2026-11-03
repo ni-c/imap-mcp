@@ -119,11 +119,14 @@ There is no OCR. A scanned PDF has no text layer, and the refusal says so and na
 two ways to get the bytes instead — rather than returning an empty string that reads
 like an empty document.
 
-## Resources, which the filter does not cover
+## Resources
 
-Attachments are also exposed as MCP **resources**. `IMAP_ALLOW_TOOLS` narrows
-`tools/list`, not `resources/list`, so a filtered server still serves those.
-`IMAP_DOWNLOAD_DIR` and the attachment type allowlist are what constrain them. Note that
+Attachments are also exposed as MCP **resources**, at
+`imap://message/{uid}/part/{partId}` for the default mailbox and
+`imap://message/{uid}/part/{partId}?mailbox=…` for any other. They follow
+`get_attachments`: when the tool filter leaves that tool out, the resources are not
+registered either. `IMAP_DOWNLOAD_DIR` and the attachment type allowlist constrain
+them like the tool, and an image is labelled with the type of its bytes. Note that
 resources carry the raw bytes: the text extraction above is on the tool only, because
 extracted text is the sender's text and belongs inside the nonce fence, which a resource
 has nowhere to put.

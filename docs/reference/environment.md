@@ -130,14 +130,17 @@ switching on. A pattern covering write tools is accepted and merely contributes
 nothing, with a warning on stderr. Deny entries are exempt: denying an
 already-suppressed tool is how a defensive list is written.
 
-## What the filter does not cover
+## Attachment resources and the filter
 
-Tools. This server also exposes **attachment resources**, and those are not filtered:
-`IMAP_ALLOW_TOOLS` narrows `tools/list`, not `resources/list`. `IMAP_DOWNLOAD_DIR`
-and the attachment type allowlist are what constrain those.
+This server also exposes **attachment resources**. They follow `get_attachments`: when
+the filter leaves that tool out, the resources are not registered either, so
+`IMAP_DENY_TOOLS=get_attachments` closes both doors. `IMAP_DOWNLOAD_DIR` and the
+attachment type allowlist constrain them like the tool.
 
 ## Credentials in the environment
 
-`IMAP_PASSWORD` is read once and then deleted from `process.env`, so it is not visible
-to child processes or in `/proc/<pid>/environ`, and a later crash report cannot carry
-it.
+`IMAP_PASSWORD` is read once and then deleted from `process.env`, so child processes do
+not inherit it and a later crash report cannot carry it. It is not gone from
+`/proc/<pid>/environ`: the kernel serves that from the environment the process started
+with, and any process of the same user can read it there. The child that parses
+attachments runs under Node's permission model and cannot.

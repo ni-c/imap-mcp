@@ -132,9 +132,9 @@ from being widened between the two calls, which is why it remains the fallback w
 cannot show a dialog, and why the result says so plainly instead of implying an approval that
 did not happen.
 
-Tokens are random, single-use, expire after five minutes, and are bound to a SHA-256
-fingerprint of the sorted target set: a confirmation obtained for one message cannot be
-replayed for a longer list.
+Tokens are random, single-use, expire after five minutes, and are bound to a fingerprint of
+the sorted target set — the first 16 hex characters (64 bits) of its SHA-256: a confirmation
+obtained for one message cannot be replayed for a longer list.
 
 The key also names the mailboxes, and how it names them matters. A mailbox name may contain `:`
 — the parameter allows it on purpose, because a folder somebody else created may have one — so a
@@ -150,9 +150,12 @@ call goes unannounced — and the server prints one line at startup saying it is
 Confirmation text never quotes a subject, sender or body. That text is read by a human and by a
 model, and putting attacker-chosen prose into it would hand the attacker the last word at
 exactly the wrong moment. A folder name has to appear — it is what the person is deciding about —
-so it appears on its own labelled line, with its invisible characters removed and spelled out
-beside it. `Archive` and `Archive<U+200B>` are the same pixels; a dialog that renders the second
-one verbatim asks about the folder the reader recognises and acts on the one they do not.
+so it appears on its own labelled line, with its invisible characters spelled out as escapes.
+`Archive` and `Archive<U+200B>` are the same pixels; a dialog that renders the second one
+verbatim asks about the folder the reader recognises and acts on the one they do not. The same
+holds for whitespace: `Public/Projects` with a trailing space, a no-break space or a tab, and two
+long names that differ only near their end, must not render alike — mcp-approval escapes every
+whitespace but a single interior space and shows a long value's start, end, length and hash.
 
 ### What a confirmation binds
 
@@ -165,12 +168,18 @@ honoured. Both revisions of the protocol reach that code. `src/index.ts` serves 
 the question never leaves the process, on the newer one it travels through the client as a return
 value and comes back with the answer, and the nonce is what makes the second trip worthless.
 
-What is left, stated honestly: the record of spent nonces is per process. A restart forgets it, so
-a sealed answer captured before a restart and presented within its lifetime afterwards is accepted
-once more. The two-call token — the fallback for clients that cannot show a dialog — is single-use
-and spent by `consume`, with the same per-process caveat.
+A restart does not reopen that: the key that seals the state is drawn per process, so a sealed
+answer captured before a restart fails the seal afterwards. The two-call token — the fallback for
+clients that cannot show a dialog — is single-use and spent by `consume`, and a restart forgets
+every outstanding one.
 
 ### Where a confirmation is not asked
+
+`set_message_flags` and `save_draft` never ask — flags are reversible and `\Deleted` is refused,
+and a draft does not leave the mailbox, though it is written only into a folder the server marks
+`\Drafts` itself (or the one `IMAP_DRAFTS_MAILBOX` names), never one picked by its name alone.
+`manage_mailbox` asks for `delete`, uses only the two-call token for `rename`, and does not ask
+for `create`.
 
 `get_attachments` with `mode: "file"` writes bytes a stranger sent onto the operator's disk without
 a dialog. The tool is registered under `IMAP_READ_ONLY`, annotated `destructiveHint: true` whenever

@@ -16,8 +16,10 @@ Where the provider offers **app passwords**, use one. It is scoped to this serve
 and can be revoked without changing the account password, which matters more than
 usual here: a mailbox password is often the account password.
 
-`IMAP_PASSWORD` is deleted from `process.env` as soon as it has been read, so it is
-not visible to child processes or in `/proc/<pid>/environ`.
+`IMAP_PASSWORD` is deleted from `process.env` as soon as it has been read, so child
+processes do not inherit it. `/proc/<pid>/environ` still shows the environment the
+process started with to any process of the same user — keep that in mind on a shared
+host.
 
 ### Gmail
 
@@ -152,8 +154,7 @@ A filtered tool is never registered, so it is absent from `tools/list` and unkno
 There is no "hidden but callable" state to reason about.
 :::
 
-## What the filter does not cover
+## Attachment resources and the filter
 
-Tools. This server also registers **attachment resources**, and `IMAP_ALLOW_TOOLS`
-does not touch those — it narrows `tools/list`, not `resources/list`. Worth knowing
-before you conclude that a filtered install reaches less of the mailbox than it does.
+This server also registers **attachment resources**. They follow `get_attachments`:
+when the filter leaves that tool out, the resources are not registered either.

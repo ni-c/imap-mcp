@@ -29,8 +29,114 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it missed replies Gmail itself groups into the conversation. Other servers keep the
   header search. Contributed by @juriSacchetta (#73).
 
+### Security
+
+- **Denial of service through one mail.** The `exfiltration` injection heuristic was
+  quadratic: `send-to-` repeated took 1.5 s for 16 000 characters and would have held the
+  whole stdio server for hours on the million characters a document may yield. The address
+  is now anchored and bounded, the heuristics scan the capped subject rather than the raw
+  header, and the timing test repeats every trigger with the separators that defeated it.
+- **PDF bombs past the pre-scan.** The scan read a stream's filter differently from
+  pdf.js — `/F` for `/Filter`, `#xx` name escapes, an indirect `/Filter`, a decoy `obj`,
+  padding past its window, whitespace before `endstream`, and ASCII85's `z` all hid a
+  stream that pdf.js then inflated outside every heap limit. Every stream is now decoded
+  by trial whatever it declares, the scan is linear, and the parent kills the extraction
+  child once its resident memory passes 768 MiB.
+- **The extraction child is sandboxed.** It runs under Node's permission model, may read
+  only its own modules, unpdf and fflate, and starts with an empty environment. Deleting
+  `IMAP_PASSWORD` from `process.env` never removed it from `/proc/<pid>/environ`, which a
+  parser exploit in the child could read; the documentation said otherwise and is
+  corrected. The child's stderr is escaped line by line before it reaches the terminal.
+- **Executables past the attachment policy.** A trailing dot or space, `::$DATA`, a
+  Windows device name, or a name long enough that truncation dropped its extension let
+  `Rechnung.bat.` and `aaa….exe` through as text; little-endian Mach-O binaries were not
+  recognised; and eighteen launchable extensions were missing. Names are now normalised the
+  way Windows stores them and checked on the name that is saved.
+- **A bare EXPUNGE no longer takes more than was approved.** Without UIDPLUS (and, for a
+  move, without MOVE) imapflow removes every message in the folder flagged `\Deleted`, not
+  only the ones in the dialog. Such a delete or move is refused while other messages carry
+  the flag.
+- **Refused writes are no longer reported as done.** imapflow answers a refused STORE,
+  MOVE, COPY or EXPUNGE with `false`; every write now checks it, and the audit line is
+  written only after success. `list_new_messages` no longer claims to have marked messages
+  the server refused to tag.
+- **Invisible characters beyond the BMP.** Unicode tag characters ("ASCII smuggling"),
+  variation selectors, U+206A–U+206F, U+2800 and the Hangul fillers passed every sanitiser;
+  U+2028/U+2029 broke a line without the datamark. They are removed (escaped in dialogs and
+  logs) and line separators become line breaks.
+- **HTML-only mail bypassed the HTML filter.** mailparser built the text itself, so
+  CSS-hidden text reached the model; ours runs now. `parseAuthResults` read verdicts out of
+  comments the sender controls (`dmarc=pass` in a comment counted), and a `!` before a
+  defused image turned it back into one. Both are fixed.
+- **Addresses in drafts are bare addresses.** `AliceSmith<alice@evil.example>`, comments,
+  groups, commas and invisible characters passed the check, so a draft could show one
+  recipient and address another. Recipients must now be ASCII addr-specs, and a login that
+  is not an address is left out rather than written as the From header.
+- **save_draft only writes into a real Drafts folder.** A folder chosen by imapflow's name
+  heuristic — a colleague's `Public/Drafts` could win — is no longer used; the folder must
+  carry `\Drafts` from the server or be configured, and its name is returned as untrusted.
+- **The audit log cannot be forged.** Values are quoted, so a folder named
+  `Archive uids=[1] to=Trash` stays one field, and UID lists are logged in full.
+- **IMAP responses are bounded.** imapflow's defaults allow a gigabyte per literal and per
+  line, and every size check ran after the bytes were buffered. Literals are capped at
+  4 MiB, lines at 64 MiB, responses at 96 MiB.
+- **Release pipeline.** The npm package is packed in a job without a token and published
+  as a tarball with `--ignore-scripts` from an `npm` environment, so neither the dev
+  toolchain nor any other job holding `id-token: write` can publish; a tag must point at a
+  commit on main; mcp-publisher is checked against pinned hashes; Dependabot waits seven
+  days before proposing a release, and the image publish waits for `npm audit`.
+- **Dependency floors.** `@modelcontextprotocol/server` ^2.4.0 (GHSA-46jr-4wx8-v453,
+  GHSA-jm63-cq47-j5jp, GHSA-rvq5-wwqv-78pq, GHSA-f897-62hf-6gxq), `zod` ^4.6.7
+  (GHSA-mrhx-c7xc-m3w5), `imapflow` ^2.10.0 (literal parsing without recursion, bounded
+  parse cost, unknown search keys refused) and `mailparser` ^3.14.1. The installed tree was
+  already on these versions; the ranges let a consumer resolve older ones.
+
 ### Fixed
 
+- `list_new_messages` marked the whole page as handed over before the result budget
+  dropped part of it, so the dropped messages never came back. Only the messages that are
+  returned are tagged now, and `list_messages` computes `returned` and `next_offset` from
+  what survived the budget instead of paging past it.
+- The `get_message` metadata budget cut the References list on a tie with the thread and
+  then failed the call; it now shortens the array carrying the most bytes first and moves
+  on to the next before giving up, and `thread_truncated` describes the list that is there.
+- A message larger than 2 MiB was parsed as if it were whole, with its later parts — often
+  its text — missing; `source_truncated` and a note say so now.
+- This server's own command timeout no longer replays the call on a new connection: the
+  command may have run, so the connection is closed and the error says to check first. A
+  connect, a SELECT, a FETCH and a download each have a deadline, a connection that died
+  under the NOOP is reopened, and a first refused connect is not reported as "repeated
+  from memory".
+- The credentials and TLS hints fired only for error shapes imapflow never produces; they
+  now read `authenticationFailed`, `serverResponseCode` and the TLS failure codes.
+- The process now logs out and exits when the client closes stdin; it used to stay up
+  with a logged-in IMAP session, one per client restart.
+- Attachments: a message whose only part is the attachment listed nothing, an attached
+  `.eml` was invisible, a part over the size cap was returned cut short as if complete, a
+  vanished part failed with a TypeError, a short write left a partial file, text starting
+  with `MZ` was refused as an executable, image blocks carried the declared instead of the
+  detected type, and the resource URI named no mailbox, so following it from another
+  folder read a different message. Resources now take `?mailbox=`.
+- Extracted text: docx and odt were cut by characters of markup rather than of text, the
+  row, sheet and slide caps truncated without saying so, ODS shifted columns after merged
+  cells and dropped repeated rows, pptx slides followed file names instead of the
+  presentation order, xlsx shared strings shifted after an empty entry, a deck of empty
+  slides read as text, and a page edge inside a surrogate pair broke the character on
+  both pages.
+- Text from mail: words were split at inline tags, `<br class=…>` ran lines together,
+  named entities beyond six and windows-1252 references were not decoded, a lone CR was
+  deleted instead of breaking the line, several In-Reply-To ids were dropped, an
+  unparseable Date header was reported as the current time, and a 257-character
+  Message-ID was cut.
+- Drafts: References came out in header order rather than root first, long recipient
+  lists were not folded below 998 octets, the body was not CRLF-normalised, and a move
+  into the mailbox it came from is refused.
+- `get_server_info` reported `storable` from a list cut at 100 entries and is now marked
+  untrusted; `IMAP_MAX_MESSAGES` is capped at 200 like `limit`; empty `IMAP_HOST` and
+  `IMAP_DRAFTS_MAILBOX` count as unset; a bracketed IPv6 literal reaches the socket
+  without its brackets; numbers are plain decimals; a DNS name starting with `127.` is no
+  longer treated as loopback; and with `IMAP_SEEN_KEYWORD` empty the tool filter knows
+  that `list_new_messages` is not registered.
 - A conversation longer than 50 messages listed its oldest 50, without saying so. The
   newest 50 are listed now, and `thread_truncated` gives the total.
 - A thread id that is missing or malformed falls back to the `References` chain instead
