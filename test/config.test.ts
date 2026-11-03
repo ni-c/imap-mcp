@@ -348,3 +348,57 @@ describe('values the audit found read the wrong way', () => {
     expect(quiet.mock.calls.flat().join(' ')).not.toContain('unencrypted');
   });
 });
+
+describe('IMAP_COMMAND_TIMEOUT_SECONDS', () => {
+  it('defaults to thirty seconds, unset or empty', () => {
+    expect(loadConfig(env()).imap.commandTimeoutMs).toBe(30_000);
+    expect(
+      loadConfig(env({ IMAP_COMMAND_TIMEOUT_SECONDS: '' })).imap
+        .commandTimeoutMs
+    ).toBe(30_000);
+  });
+
+  it.each([
+    [' 45 ', 45_000],
+    ['1', 1_000],
+    ['600', 600_000],
+  ])('reads %j as %i ms', (raw, ms) => {
+    expect(
+      loadConfig(env({ IMAP_COMMAND_TIMEOUT_SECONDS: raw })).imap
+        .commandTimeoutMs
+    ).toBe(ms);
+  });
+
+  it.each([
+    '0',
+    '-5',
+    '1.5',
+    '30s',
+    '0x1e',
+    '1e3',
+    '+30',
+    '   ',
+    '9'.repeat(16),
+  ])('refuses %j at startup', (raw) => {
+    expect(refuses({ IMAP_COMMAND_TIMEOUT_SECONDS: raw })).toContain(
+      'IMAP_COMMAND_TIMEOUT_SECONDS must be a positive integer'
+    );
+  });
+
+  it.each(['601', '120000', '9'.repeat(15)])(
+    'refuses %j past the ceiling rather than clamping it',
+    (raw) => {
+      // 120000 is the classic slip: thirty seconds' worth of milliseconds
+      // times four. Clamped, it would quietly become ten minutes.
+      expect(refuses({ IMAP_COMMAND_TIMEOUT_SECONDS: raw })).toContain(
+        'IMAP_COMMAND_TIMEOUT_SECONDS must not exceed 600'
+      );
+    }
+  );
+
+  it('never echoes the refused value', () => {
+    expect(
+      refuses({ IMAP_COMMAND_TIMEOUT_SECONDS: '30 seconds' })
+    ).not.toContain('30 seconds');
+  });
+});

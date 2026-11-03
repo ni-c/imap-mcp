@@ -77,6 +77,7 @@ describe('the server and its mailboxes', () => {
     // expunge paths take their fast branches rather than the fallbacks.
     expect(info).toContain('MOVE');
     expect(info).toContain('"write_tools_enabled": true');
+    expect(info).toContain('"command_timeout_seconds": 60');
     // The password must not come back out.
     expect(info).not.toContain('integration-not-a-secret');
   });

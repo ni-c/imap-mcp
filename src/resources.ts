@@ -2,6 +2,7 @@ import { ResourceTemplate } from '@modelcontextprotocol/server';
 import type {
   McpServer,
   ReadResourceResult,
+  ServerContext,
 } from '@modelcontextprotocol/server';
 import {
   checkPolicy,
@@ -14,7 +15,7 @@ import {
 import { escapeInvisible } from './analyze.js';
 import type { Config } from './config.js';
 import { ToolInputError } from './errors.js';
-import { ImapClient } from './imap.js';
+import { collectFetch, ImapClient } from './imap.js';
 import { errorMessageOf } from './result.js';
 import { mailboxParam } from './schema.js';
 import { downloadCapped } from './stream.js';
@@ -47,10 +48,17 @@ export function registerAttachmentResources(
   };
   const read = async (
     uri: URL,
-    variables: Record<string, string | string[]>
+    variables: Record<string, string | string[]>,
+    ctx: ServerContext
   ): Promise<ReadResourceResult> => {
     try {
-      return await readAttachment(uri, variables, client, config);
+      return await readAttachment(
+        uri,
+        variables,
+        client,
+        config,
+        ctx.mcpReq.signal
+      );
     } catch (error) {
       // A resource read has no isError result to return, so the error is
       // thrown — but it takes the same road as a tool error: the library's
@@ -81,7 +89,8 @@ async function readAttachment(
   uri: URL,
   variables: Record<string, string | string[]>,
   client: ImapClient,
-  config: Config
+  config: Config,
+  signal: AbortSignal | undefined
 ): Promise<ReadResourceResult> {
   const uidText = first(variables.uid);
   const partId = first(variables.partId);
@@ -107,15 +116,19 @@ async function readAttachment(
     mailbox = requested;
   }
 
-  return client.withMailbox(mailbox, true, async (connection) => {
-    let structure;
-    for await (const message of connection.fetch(
+  return client.withMailbox(mailbox, true, signal, async (connection) => {
+    const rows = await collectFetch(
+      connection.fetch(
+        [uid],
+        { uid: true, bodyStructure: true },
+        { uid: true }
+      ),
       [uid],
-      { uid: true, bodyStructure: true },
-      { uid: true }
-    )) {
-      structure = message.bodyStructure;
-    }
+      client.commandTimeoutMs
+    );
+    const structure = rows.find(
+      (row) => row.bodyStructure !== undefined
+    )?.bodyStructure;
     if (structure === undefined) {
       throw new ToolInputError(
         `imap-mcp: no message with UID ${uid} in this mailbox.`
@@ -153,7 +166,8 @@ async function readAttachment(
       connection,
       uid,
       partId,
-      config.imap.maxAttachmentBytes
+      config.imap.maxAttachmentBytes,
+      client.commandTimeoutMs
     );
     if (buffer === undefined) {
       throw new ToolInputError(

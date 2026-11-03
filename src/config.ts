@@ -59,6 +59,8 @@ export interface ImapConfig {
    * terminated, which is a memory question and neither of the other two.
    */
   maxExtractBytes: number;
+  /** How long one IMAP command may take before the call is abandoned. */
+  commandTimeoutMs: number;
 }
 
 export interface Config {
@@ -131,6 +133,9 @@ const DEFAULT_MAX_EXTRACT_BYTES = 10 * 1024 * 1024;
  * there is a limit. 64 MiB is past any document that arrives by mail.
  */
 const MAX_MAX_EXTRACT_BYTES = 64 * 1024 * 1024;
+const DEFAULT_COMMAND_TIMEOUT_SECONDS = 30;
+/** Refused above, not clamped: a value typed in milliseconds must not become hours. */
+const MAX_COMMAND_TIMEOUT_SECONDS = 600;
 const DEFAULT_SEEN_KEYWORD = 'AiSeen';
 /** A hostname is at most 253 characters; an IPv6 literal far fewer. */
 const MAX_HOST_LENGTH = 253;
@@ -256,6 +261,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         'IMAP_MAX_EXTRACT_BYTES',
         MAX_MAX_EXTRACT_BYTES
       ),
+      commandTimeoutMs:
+        parseCount(
+          env.IMAP_COMMAND_TIMEOUT_SECONDS,
+          DEFAULT_COMMAND_TIMEOUT_SECONDS,
+          'IMAP_COMMAND_TIMEOUT_SECONDS',
+          MAX_COMMAND_TIMEOUT_SECONDS
+        ) * 1000,
     },
     // Defaults to true, unlike the rest of the family — see the field comment.
     readOnly: env.IMAP_READ_ONLY !== 'false',

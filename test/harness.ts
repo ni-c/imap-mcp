@@ -31,6 +31,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
       downloadDir: undefined,
       maxDownloadBytes: 25 * 1024 * 1024,
       maxExtractBytes: 10 * 1024 * 1024,
+      commandTimeoutMs: 30_000,
       ...overrides.imap,
     },
     // Mirrors the real default: read-only unless the test says otherwise.

@@ -104,32 +104,37 @@ guard. See [Asking a person](https://imap-mcp.ni-c.de/guide/approval).
 
 ## Configuration
 
-| Variable                    | Required | Default       | Description                                                  |
-| --------------------------- | -------- | ------------- | ------------------------------------------------------------ |
-| `IMAP_HOST`                 | yes      | —             | Hostname of the IMAP server, e.g. `imap.example.net`         |
-| `IMAP_USER`                 | yes      | —             | Account username, usually the address                        |
-| `IMAP_PASSWORD`             | yes      | —             | Password or app-specific password                            |
-| `IMAP_PORT`                 | no       | `993` / `143` | Defaults by TLS mode                                         |
-| `IMAP_TLS`                  | no       | `implicit`    | `implicit`, `starttls` or `none`                             |
-| `IMAP_MAILBOX`              | no       | `INBOX`       | Mailbox the message tools default to                         |
-| `IMAP_READ_ONLY`            | no       | **`true`**    | Exactly `false` registers the five mailbox tools             |
-| `IMAP_ALLOW_TOOLS`          | no       | —             | Tool names, `list_*` prefixes or `essential`                 |
-| `IMAP_DENY_TOOLS`           | no       | —             | Same syntax; subtracted from the allow list                  |
-| `IMAP_SEEN_KEYWORD`         | no       | `AiSeen`      | Keyword for new-mail tracking; empty turns it off            |
-| `IMAP_TRUSTED_AUTHSERV_ID`  | no       | —             | The authserv-id your provider stamps; see below              |
-| `IMAP_DRAFTS_MAILBOX`       | no       | auto          | Overrides the folder found via the `\Drafts` flag            |
-| `IMAP_MAX_MESSAGES`         | no       | `100`         | Default page size                                            |
-| `IMAP_MAX_ATTACHMENT_BYTES` | no       | `1048576`     | Ceiling for returning an attachment inline                   |
-| `IMAP_MAX_DOWNLOAD_BYTES`   | no       | `26214400`    | Ceiling for writing one to disk                              |
-| `IMAP_MAX_EXTRACT_BYTES`    | no       | `10485760`    | Ceiling for reading a document's text; max `67108864`        |
-| `IMAP_ATTACHMENT_TYPES`     | no       | see below     | Comma-separated content-type allowlist                       |
-| `IMAP_DOWNLOAD_DIR`         | no       | —             | Setting it allows saving attachments there                   |
-| `IMAP_INSECURE_TLS`         | no       | `false`       | Exactly `true` accepts a self-signed certificate             |
-| `ELICITATION`               | no       | `true`        | `false` replaces the dialog with the token. **Not prefixed** |
+| Variable                       | Required | Default       | Description                                                  |
+| ------------------------------ | -------- | ------------- | ------------------------------------------------------------ |
+| `IMAP_HOST`                    | yes      | —             | Hostname of the IMAP server, e.g. `imap.example.net`         |
+| `IMAP_USER`                    | yes      | —             | Account username, usually the address                        |
+| `IMAP_PASSWORD`                | yes      | —             | Password or app-specific password                            |
+| `IMAP_PORT`                    | no       | `993` / `143` | Defaults by TLS mode                                         |
+| `IMAP_TLS`                     | no       | `implicit`    | `implicit`, `starttls` or `none`                             |
+| `IMAP_MAILBOX`                 | no       | `INBOX`       | Mailbox the message tools default to                         |
+| `IMAP_READ_ONLY`               | no       | **`true`**    | Exactly `false` registers the five mailbox tools             |
+| `IMAP_ALLOW_TOOLS`             | no       | —             | Tool names, `list_*` prefixes or `essential`                 |
+| `IMAP_DENY_TOOLS`              | no       | —             | Same syntax; subtracted from the allow list                  |
+| `IMAP_SEEN_KEYWORD`            | no       | `AiSeen`      | Keyword for new-mail tracking; empty turns it off            |
+| `IMAP_TRUSTED_AUTHSERV_ID`     | no       | —             | The authserv-id your provider stamps; see below              |
+| `IMAP_DRAFTS_MAILBOX`          | no       | auto          | Overrides the folder found via the `\Drafts` flag            |
+| `IMAP_MAX_MESSAGES`            | no       | `100`         | Default page size                                            |
+| `IMAP_MAX_ATTACHMENT_BYTES`    | no       | `1048576`     | Ceiling for returning an attachment inline                   |
+| `IMAP_MAX_DOWNLOAD_BYTES`      | no       | `26214400`    | Ceiling for writing one to disk                              |
+| `IMAP_MAX_EXTRACT_BYTES`       | no       | `10485760`    | Ceiling for reading a document's text; max `67108864`        |
+| `IMAP_COMMAND_TIMEOUT_SECONDS` | no       | `30`          | Seconds one IMAP command may take; max `600`                 |
+| `IMAP_ATTACHMENT_TYPES`        | no       | see below     | Comma-separated content-type allowlist                       |
+| `IMAP_DOWNLOAD_DIR`            | no       | —             | Setting it allows saving attachments there                   |
+| `IMAP_INSECURE_TLS`            | no       | `false`       | Exactly `true` accepts a self-signed certificate             |
+| `ELICITATION`                  | no       | `true`        | `false` replaces the dialog with the token. **Not prefixed** |
 
 Booleans are compared against the literal string `true`; `1`, `yes` and `True` are not true.
 `IMAP_READ_ONLY` is the mirror image: only the literal `false` turns it off, so a typo leaves
 the write tools unregistered.
+
+`IMAP_COMMAND_TIMEOUT_SECONDS` applies to each IMAP command, not to a whole tool call, and your
+MCP client has a deadline of its own; read
+[slow servers](https://imap-mcp.ni-c.de/guide/configuration#slow-servers) before raising it.
 
 ### Choosing which tools load
 

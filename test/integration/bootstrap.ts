@@ -282,6 +282,8 @@ export async function bootstrap(): Promise<Sandbox> {
       // Stated rather than defaulted, so the suite pins the value the
       // documentation gives.
       IMAP_MAX_EXTRACT_BYTES: '10485760',
+      // Not the default, so the suite sees it travel from the environment.
+      IMAP_COMMAND_TIMEOUT_SECONDS: '60',
     },
   };
 }

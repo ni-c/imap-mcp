@@ -55,6 +55,35 @@ because the password and every message would cross the network in the clear.
 connection, not `NODE_TLS_REJECT_UNAUTHORIZED`, so validation stays on for
 everything else in the process. Prefer adding the CA to the trust store.
 
+## Slow servers
+
+Every IMAP command gets 30 seconds by default. A server that is slow rather than
+unreachable — a `body` search over a large archive is the usual case, since some
+servers use their full-text index only for their own client and not for IMAP — can
+be given more, up to 600 seconds:
+
+```sh
+IMAP_COMMAND_TIMEOUT_SECONDS=120
+```
+
+Three things to know before you raise it:
+
+- **It is per command.** A tool call runs several — `list_messages` selects the
+  folder, searches and fetches — and each gets the full time.
+- **Your MCP client has a deadline of its own** and stops waiting when it passes,
+  whatever this value says. Clients built on the MCP TypeScript SDK wait 60 seconds
+  unless they choose otherwise, Claude Code reads `MCP_TOOL_TIMEOUT` (in
+  milliseconds), and behind [mcp-hub](https://github.com/ni-c/mcp-hub) a call has
+  five minutes (`MCP_CALL_TIMEOUT_MS`).
+- **A server that has stopped answering is noticed only this late, too.** The
+  deadline cannot tell a slow command from a dead connection.
+
+When the deadline passes, the connection is closed and the call is not repeated: the
+command may still be running on the server, or have run, so nothing is sent twice.
+The same happens when the client cancels a call while its command is on the wire —
+the next call gets a fresh connection instead of waiting behind a search nobody will
+read.
+
 ## Read-only, and why it is the default
 
 ```sh

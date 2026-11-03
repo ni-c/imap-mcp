@@ -5,10 +5,16 @@ import {
   connect,
   defaultMailboxes,
   jsonOf,
+  testConfig,
   textOf,
   toolNames,
 } from './harness.js';
-import { message, type FakeAttachment } from './fake-imap.js';
+import {
+  message,
+  stalledFetch,
+  stalledUntilClosed,
+  type FakeAttachment,
+} from './fake-imap.js';
 import {
   buildDocx,
   buildFilteredPdf,
@@ -224,6 +230,7 @@ describe('tool registration', () => {
           downloadDir: undefined,
           maxDownloadBytes: 1024,
           maxExtractBytes: 1024,
+          commandTimeoutMs: 30_000,
         },
       },
     });
@@ -2244,5 +2251,89 @@ describe('get_message on a message larger than it reads', () => {
     const content = result.structuredContent as { source_truncated?: unknown };
     expect(content.source_truncated).toBeUndefined();
     expect(textOf(result)).not.toContain('only the first');
+  });
+});
+
+async function reportedTimeout(
+  options?: Parameters<typeof connect>[0]
+): Promise<number> {
+  const harness = await connect(options);
+  const info = jsonOf(await call(harness.client, 'get_server_info')) as {
+    limits: { command_timeout_seconds: number };
+  };
+  await harness.close();
+  return info.limits.command_timeout_seconds;
+}
+
+describe('the command timeout, end to end', () => {
+  it('is reported by get_server_info', async () => {
+    expect(await reportedTimeout()).toBe(30);
+    expect(
+      await reportedTimeout({
+        config: { imap: { ...testConfig().imap, commandTimeoutMs: 120_000 } },
+      })
+    ).toBe(120);
+  });
+
+  it('bounds the message fetch of get_message, which had no deadline of its own', async () => {
+    const harness = await connect({
+      config: { imap: { ...testConfig().imap, commandTimeoutMs: 50 } },
+    });
+    harness.imap.fetch = () => stalledFetch(harness.imap) as never;
+    const result = await call(harness.client, 'get_message', { uid: 1 });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('IMAP FETCH timed out after 0.05 seconds');
+    expect(textOf(result)).toContain('IMAP_COMMAND_TIMEOUT_SECONDS');
+    await harness.close();
+  });
+});
+
+async function cancelDuring(
+  stall: (harness: Awaited<ReturnType<typeof connect>>) => Promise<void>,
+  name: string,
+  args: Record<string, unknown>
+) {
+  const harness = await connect();
+  const started = stall(harness);
+  const closed = vi.spyOn(harness.imap, 'close');
+  const controller = new AbortController();
+  const pending = harness.client.callTool(
+    { name, arguments: args },
+    { signal: controller.signal }
+  );
+  await started;
+  controller.abort();
+  await expect(pending).rejects.toThrow();
+  // The cancellation travels to the server, which ends the IMAP command
+  // rather than holding the connection until its own deadline.
+  await vi.waitFor(() => expect(closed).toHaveBeenCalled());
+  await harness.close();
+}
+
+describe('a tool call the client cancels', () => {
+  it('closes the IMAP connection under a get_message fetch', async () => {
+    await cancelDuring(
+      (harness) =>
+        new Promise<void>((resolve) => {
+          harness.imap.fetch = () =>
+            stalledFetch(harness.imap, resolve) as never;
+        }),
+      'get_message',
+      { uid: 1 }
+    );
+  });
+
+  it('closes the IMAP connection under a list_mailboxes LIST', async () => {
+    await cancelDuring(
+      (harness) =>
+        new Promise<void>((resolve) => {
+          harness.imap.list = () => {
+            resolve();
+            return stalledUntilClosed(harness.imap);
+          };
+        }),
+      'list_mailboxes',
+      {}
+    );
   });
 });

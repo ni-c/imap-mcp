@@ -17,7 +17,7 @@ import { saveAttachment } from '../src/download.js';
 import { ToolInputError } from '../src/errors.js';
 
 import { call, connect, jsonOf, testConfig, textOf } from './harness.js';
-import { message } from './fake-imap.js';
+import { message, stalledFetch } from './fake-imap.js';
 
 // Lets a test make the write itself misbehave. The real `open` is used for
 // everything else, so the rest of the file runs against a real file system.
@@ -749,31 +749,43 @@ function mailbox(attachments: Parameters<typeof message>[1]) {
 
 describe('the download deadline', () => {
   it('grows with the cap and never drops below the command timeout', async () => {
-    const { downloadDeadline } = await import('../src/stream.js');
-    expect(downloadDeadline(0)).toBe(30_000);
-    expect(downloadDeadline(1)).toBe(40_000);
-    expect(downloadDeadline(25 * 1024 * 1024)).toBe(280_000);
+    const { downloadDeadline } = await import('../src/imap.js');
+    expect(downloadDeadline(0, 30_000)).toBe(30_000);
+    expect(downloadDeadline(1, 30_000)).toBe(40_000);
+    expect(downloadDeadline(25 * 1024 * 1024, 30_000)).toBe(280_000);
     // A started MiB counts whole: on the boundary, and one byte past it.
-    expect(downloadDeadline(1024 * 1024)).toBe(40_000);
-    expect(downloadDeadline(1024 * 1024 + 1)).toBe(50_000);
+    expect(downloadDeadline(1024 * 1024, 30_000)).toBe(40_000);
+    expect(downloadDeadline(1024 * 1024 + 1, 30_000)).toBe(50_000);
+  });
+
+  it('starts from the configured command timeout', async () => {
+    const { downloadDeadline } = await import('../src/imap.js');
+    expect(downloadDeadline(0, 45_000)).toBe(45_000);
+    expect(downloadDeadline(1, 45_000)).toBe(55_000);
+    expect(downloadDeadline(25 * 1024 * 1024, 600_000)).toBe(850_000);
+    expect(downloadDeadline(0, 1_000)).toBe(1_000);
   });
 });
 
+async function trickling(commandTimeoutMs: number) {
+  const { PassThrough } = await import('node:stream');
+  const { downloadCapped } = await import('../src/stream.js');
+  const stream = new PassThrough();
+  stream.write(Buffer.from('a'));
+  const connection = {
+    download: async () => ({
+      content: stream,
+      meta: { contentType: 'text/plain' },
+    }),
+  } as never;
+  return downloadCapped(connection, 1, '2', 1024, commandTimeoutMs);
+}
+
 describe('a download that trickles', () => {
   it('gives up at the deadline instead of holding the mailbox', async () => {
-    const { PassThrough } = await import('node:stream');
-    const { downloadCapped } = await import('../src/stream.js');
     vi.useFakeTimers();
     try {
-      const stream = new PassThrough();
-      stream.write(Buffer.from('a'));
-      const connection = {
-        download: async () => ({
-          content: stream,
-          meta: { contentType: 'text/plain' },
-        }),
-      } as never;
-      const pending = downloadCapped(connection, 1, '2', 1024);
+      const pending = trickling(30_000);
       const assertion = expect(pending).rejects.toMatchObject({
         code: 'COMMAND_TIMEOUT',
       });
@@ -782,5 +794,97 @@ describe('a download that trickles', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('measures the deadline from the configured command timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      let settled = false;
+      const pending = trickling(5_000);
+      pending.catch(() => undefined).finally(() => (settled = true));
+      // 5 s plus 10 s for the one started MiB of the cap.
+      await vi.advanceTimersByTimeAsync(14_900);
+      expect(settled).toBe(false);
+      const assertion = expect(pending).rejects.toThrow(
+        /FETCH timed out after 15 seconds/
+      );
+      await vi.advanceTimersByTimeAsync(200);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('gives up on a download that never starts at the command timeout', async () => {
+    const { downloadCapped } = await import('../src/stream.js');
+    vi.useFakeTimers();
+    try {
+      const connection = {
+        download: () => new Promise<never>(() => {}),
+      } as never;
+      const pending = downloadCapped(connection, 1, '2', 1024, 5_000);
+      const assertion = expect(pending).rejects.toThrow(
+        /FETCH timed out after 5 seconds/
+      );
+      await vi.advanceTimersByTimeAsync(5_001);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('an attachment read the client cancels', () => {
+  it('closes the IMAP connection under the fetch', async () => {
+    const harness = await connect({
+      mailboxes: mailbox({
+        attachments: [
+          {
+            partId: '2',
+            filename: 'notes.txt',
+            contentType: 'text/plain',
+            content: Buffer.from('hello'),
+          },
+        ],
+      }),
+    });
+    const fake = harness.imap;
+    const started = new Promise<void>((resolve) => {
+      fake.fetch = () => stalledFetch(fake, resolve) as never;
+    });
+    const closed = vi.spyOn(fake, 'close');
+    const controller = new AbortController();
+    const pending = harness.client.readResource(
+      { uri: 'imap://message/7/part/2' },
+      { signal: controller.signal }
+    );
+    await started;
+    controller.abort();
+    await expect(pending).rejects.toThrow();
+    await vi.waitFor(() => expect(closed).toHaveBeenCalled());
+    await harness.close();
+  });
+});
+
+describe('an attachment read on a slow server', () => {
+  it('gives up at the command timeout, which it used to have none of', async () => {
+    const harness = await connect({
+      config: { imap: { ...testConfig().imap, commandTimeoutMs: 50 } },
+      mailboxes: mailbox({
+        attachments: [
+          {
+            partId: '2',
+            filename: 'notes.txt',
+            contentType: 'text/plain',
+            content: Buffer.from('hello'),
+          },
+        ],
+      }),
+    });
+    harness.imap.fetch = () => stalledFetch(harness.imap) as never;
+    await expect(
+      harness.client.readResource({ uri: 'imap://message/7/part/2' })
+    ).rejects.toThrow(/FETCH timed out after 0\.05 seconds/);
+    await harness.close();
   });
 });

@@ -1,5 +1,5 @@
 import { ToolInputError } from './errors.js';
-import { withTimeout, type ImapConnection } from './imap.js';
+import { downloadDeadline, withTimeout, type ImapConnection } from './imap.js';
 
 /**
  * Buffers a stream, giving up once the cap is passed.
@@ -48,7 +48,8 @@ export async function downloadCapped(
   connection: ImapConnection,
   uid: number,
   partId: string,
-  maxBytes: number
+  maxBytes: number,
+  commandTimeoutMs: number
 ): Promise<{
   buffer: Buffer | undefined;
   meta: { contentType: string; charset?: string; filename?: string };
@@ -58,7 +59,8 @@ export async function downloadCapped(
       uid: true,
       maxBytes: maxBytes + 1,
     }),
-    'FETCH'
+    'FETCH',
+    commandTimeoutMs
   )) as Partial<Awaited<ReturnType<ImapConnection['download']>>>;
   if (response.content === undefined || response.meta === undefined) {
     throw new ToolInputError(
@@ -73,13 +75,8 @@ export async function downloadCapped(
     buffer: await withTimeout(
       readCapped(response.content, maxBytes),
       'FETCH',
-      downloadDeadline(maxBytes)
+      downloadDeadline(maxBytes, commandTimeoutMs)
     ),
     meta: response.meta,
   };
-}
-
-/** 30 seconds plus 10 per MiB the cap allows. */
-export function downloadDeadline(maxBytes: number): number {
-  return 30_000 + Math.ceil(maxBytes / (1024 * 1024)) * 10_000;
 }

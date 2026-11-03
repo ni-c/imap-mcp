@@ -363,7 +363,10 @@ function hintFor(error: MailError): string {
       return (
         '\nHint: the server did not answer in time. The command may still have ' +
         'run on the server, so the connection was closed and the call not ' +
-        'repeated — check the state before trying again.'
+        'repeated — check the state before trying again. If the server is ' +
+        'slow rather than unreachable — a body search in a large folder, say ' +
+        '— the operator can allow more time with IMAP_COMMAND_TIMEOUT_SECONDS ' +
+        '(at most 600).'
       );
     default:
       return '';

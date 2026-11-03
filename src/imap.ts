@@ -153,7 +153,36 @@ const defaultFactory: ImapClientFactory = (config) =>
     // hostile server, or anyone in the path of IMAP_TLS=none, could answer the
     // 2 MiB partial fetch of get_message with a gigabyte.
     ...IMAP_RESPONSE_LIMITS,
+    socketTimeout: socketTimeoutFor(config),
   }) as unknown as ImapConnection;
+
+/** imapflow's own idle timeout, which ends a silent command as a dropped connection. */
+const IMAPFLOW_SOCKET_TIMEOUT_MS = 5 * 60_000;
+
+/** The longest delay a Node timer takes; past it the timer fires at once. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/** Kept past the longest deadline this server sets, so that one always fires first. */
+export function socketTimeoutFor(config: ImapConfig): number {
+  const largestPart = Math.max(
+    config.maxAttachmentBytes,
+    config.maxDownloadBytes,
+    config.maxExtractBytes
+  );
+  const longest = downloadDeadline(largestPart, config.commandTimeoutMs);
+  return Math.min(
+    MAX_TIMER_MS,
+    Math.max(IMAPFLOW_SOCKET_TIMEOUT_MS, longest + 10_000)
+  );
+}
+
+/** The command timeout plus 10 seconds per MiB the cap allows. */
+export function downloadDeadline(
+  maxBytes: number,
+  commandTimeoutMs: number
+): number {
+  return commandTimeoutMs + Math.ceil(maxBytes / (1024 * 1024)) * 10_000;
+}
 
 /**
  * The largest IMAP responses this server ever asks for. Attachments are
@@ -167,13 +196,10 @@ export const IMAP_RESPONSE_LIMITS = {
   maxResponseSize: 96 * 1024 * 1024,
 } as const;
 
-/** How long a single IMAP command may take before the call is abandoned. */
-const COMMAND_TIMEOUT_MS = 30_000;
-
 /**
  * How long opening a connection may take, LOGIN included. imapflow's own
- * connect deadline ends at the TCP handshake; after that only its five-minute
- * idle timer runs, and any line from the server re-arms it.
+ * connect deadline ends at the TCP handshake; after that only its idle timer
+ * runs, and any line from the server re-arms it.
  */
 const CONNECT_TIMEOUT_MS = 60_000;
 
@@ -183,6 +209,9 @@ const CONNECT_TIMEOUT_MS = 60_000;
  * server, so the connection is closed and the call is not repeated.
  */
 export const COMMAND_TIMEOUT = 'COMMAND_TIMEOUT';
+
+/** The code of a call the client gave up on; handled like a timeout once a command is in flight. */
+export const CANCELLED = 'CANCELLED';
 
 /**
  * How long a refused connection attempt is answered from memory.
@@ -311,7 +340,12 @@ export class ImapClient {
         client.on('error', drop);
         client.on('close', drop);
         try {
-          await withTimeout(client.connect(), 'CONNECT', CONNECT_TIMEOUT_MS);
+          await withTimeout(
+            client.connect(),
+            'CONNECT',
+            CONNECT_TIMEOUT_MS,
+            'CONNECT_TIMEOUT'
+          );
         } catch (error) {
           // A stalled LOGIN would otherwise hold every caller on this promise.
           closeQuietly(client);
@@ -347,43 +381,57 @@ export class ImapClient {
   async withMailbox<T>(
     mailbox: string | undefined,
     readOnly: boolean,
+    signal: AbortSignal | undefined,
     fn: (client: ImapConnection, path: string) => Promise<T>
   ): Promise<T> {
     const path = mailbox ?? this.config.imap.mailbox;
     const started = Date.now();
     try {
-      return await this.run(path, readOnly, fn);
+      return await this.run(path, readOnly, signal, fn);
     } catch (error) {
       if (!this.retryable(error, readOnly, started)) throw error;
-      return await this.run(path, readOnly, fn);
+      return await this.run(path, readOnly, signal, fn);
     }
   }
 
   private async run<T>(
     path: string,
     readOnly: boolean,
+    signal: AbortSignal | undefined,
     fn: (client: ImapConnection, path: string) => Promise<T>
   ): Promise<T> {
-    const client = await this.openConnection();
+    throwIfCancelled(signal);
+    // Stops waiting, not connecting: the connect is shared with every other caller.
+    const client = await unlessCancelled(this.openConnection(), signal);
+    const ms = this.commandTimeoutMs;
+    let locking: Promise<{ release(): void }> | undefined;
     let lock: { release(): void } | undefined;
     try {
-      lock = await withTimeout(
-        client.getMailboxLock(path, { readOnly }),
-        'SELECT'
-      );
+      locking = client.getMailboxLock(path, { readOnly });
+      lock = await withTimeout(unlessCancelled(locking, signal), 'SELECT', ms);
       // A NOOP before SEARCH: without it the server is free to keep reporting
       // the mailbox as it looked when the connection was opened, and mail that
       // arrived since then stays invisible.
-      await withTimeout(client.noop(), 'NOOP');
+      await withTimeout(unlessCancelled(client.noop(), signal), 'NOOP', ms);
       // imapflow's NOOP swallows a failure, and a connection that died under
       // it has dropped its selected mailbox.
       if (client.mailbox === false) {
         throw new MailError('The IMAP connection was lost', 'NoConnection');
       }
-      return await fn(client, path);
+      return await unlessCancelled(fn(client, path), signal);
     } catch (error) {
       const mailError = asMailError(error);
-      if (mailError.code === COMMAND_TIMEOUT || isConnectionError(mailError)) {
+      if (mailError.code === CANCELLED && lock === undefined) {
+        // Queued behind another call: its command is left alone, the lock handed back once granted.
+        locking?.then(
+          (granted) => granted.release(),
+          () => undefined
+        );
+      } else if (
+        mailError.code === COMMAND_TIMEOUT ||
+        mailError.code === CANCELLED ||
+        isConnectionError(mailError)
+      ) {
         this.forget(client);
       }
       throw mailError;
@@ -394,17 +442,20 @@ export class ImapClient {
 
   /** Runs `fn` without selecting a mailbox, for LIST/STATUS/CREATE style calls. */
   async withConnection<T>(
+    signal: AbortSignal | undefined,
     fn: (client: ImapConnection) => Promise<T>
   ): Promise<T> {
     const started = Date.now();
     const attempt = async (): Promise<T> => {
-      const client = await this.openConnection();
+      throwIfCancelled(signal);
+      const client = await unlessCancelled(this.openConnection(), signal);
       try {
-        return await fn(client);
+        return await unlessCancelled(fn(client), signal);
       } catch (error) {
         const mailError = asMailError(error);
         if (
           mailError.code === COMMAND_TIMEOUT ||
+          mailError.code === CANCELLED ||
           isConnectionError(mailError)
         ) {
           this.forget(client);
@@ -433,7 +484,9 @@ export class ImapClient {
   ): boolean {
     if (error instanceof ToolInputError) return false;
     const mailError = asMailError(error);
-    if (mailError.code === COMMAND_TIMEOUT) return false;
+    if (mailError.code === COMMAND_TIMEOUT || mailError.code === CANCELLED) {
+      return false;
+    }
     if (this.refused !== undefined && this.refused.at >= started) return false;
     return (
       isConnectionError(mailError) ||
@@ -452,8 +505,10 @@ export class ImapClient {
     if (this.connection === client) this.connection = undefined;
   }
 
-  async listMailboxes(): Promise<MailboxListing> {
-    return this.withConnection(async (client) => {
+  async listMailboxes(
+    signal: AbortSignal | undefined
+  ): Promise<MailboxListing> {
+    return this.withConnection(signal, async (client) => {
       const statusQuery = { messages: true, unseen: true, uidNext: true };
       // With LIST-STATUS the counters ride in the same round trip as the list.
       // Without it imapflow would issue one STATUS per folder with no ceiling
@@ -461,17 +516,23 @@ export class ImapClient {
       const listStatus = client.capabilities.has('LIST-STATUS');
       const listed = await withTimeout(
         client.list(listStatus ? { statusQuery } : undefined),
-        'LIST'
+        'LIST',
+        this.commandTimeoutMs
       );
       const entries = listed.slice(0, MAX_MAILBOXES);
       let statusOmitted = 0;
+      let stalled = false;
       if (!listStatus) {
         const deadline = Date.now() + STATUS_BUDGET_MS;
         let queried = 0;
         for (const entry of entries) {
           if (entry.flags.has('\\Noselect') || entry.flags.has('\\NonExistent'))
             continue;
-          if (queried >= MAX_STATUS_QUERIES || Date.now() >= deadline) {
+          if (
+            stalled ||
+            queried >= MAX_STATUS_QUERIES ||
+            Date.now() >= deadline
+          ) {
             statusOmitted += 1;
             continue;
           }
@@ -479,7 +540,8 @@ export class ImapClient {
           try {
             const status = await withTimeout(
               client.status(entry.path, statusQuery),
-              'STATUS'
+              'STATUS',
+              this.commandTimeoutMs
             );
             // imapflow answers a refused STATUS with false, not with an error.
             if (status === false) {
@@ -492,9 +554,12 @@ export class ImapClient {
             // dropped connection, though, is the whole listing's problem.
             if (isConnectionError(error)) throw error;
             statusOmitted += 1;
+            // A STATUS past its deadline is still queued on this connection.
+            if (asMailError(error).code === COMMAND_TIMEOUT) stalled = true;
           }
         }
       }
+      if (stalled) this.forget(client);
       return {
         mailboxes: entries.map((entry) => ({
           path: entry.path,
@@ -542,6 +607,10 @@ export class ImapClient {
     return this.config.imap.user;
   }
 
+  get commandTimeoutMs(): number {
+    return this.config.imap.commandTimeoutMs;
+  }
+
   /**
    * Reads the threading headers of one message, for linking a draft into an
    * existing conversation.
@@ -551,14 +620,20 @@ export class ImapClient {
    */
   async threadHeaders(
     mailbox: string | undefined,
-    uid: number
+    uid: number,
+    signal: AbortSignal | undefined
   ): Promise<{ messageId: string | undefined; references: string[] }> {
-    return this.withMailbox(mailbox, true, async (connection) => {
-      for await (const message of connection.fetch(
+    return this.withMailbox(mailbox, true, signal, async (connection) => {
+      const [message] = await collectFetch(
+        connection.fetch(
+          [uid],
+          { uid: true, envelope: true, headers: ['references', 'in-reply-to'] },
+          { uid: true }
+        ),
         [uid],
-        { uid: true, envelope: true, headers: ['references', 'in-reply-to'] },
-        { uid: true }
-      )) {
+        this.commandTimeoutMs
+      );
+      if (message !== undefined) {
         const { references, inReplyTo } = parseThreadHeaders(
           message.headers?.toString('utf-8') ?? ''
         );
@@ -591,7 +666,8 @@ export class ImapClient {
   ): Promise<number[]> {
     const found = await withTimeout(
       client.search(query, { uid: true }),
-      'SEARCH'
+      'SEARCH',
+      this.commandTimeoutMs
     );
     if (Array.isArray(found)) return found;
     // undefined: imapflow found no selected mailbox, so the connection is gone.
@@ -627,7 +703,8 @@ export class ImapClient {
         },
         { uid: true }
       ),
-      uids
+      uids,
+      this.commandTimeoutMs
     );
     return messages.toSorted((a, b) => b.uid - a.uid);
   }
@@ -647,7 +724,8 @@ export class ImapClient {
         client.messageFlagsAdd(uids, [this.config.imap.seenKeyword], {
           uid: true,
         }),
-        'STORE'
+        'STORE',
+        this.commandTimeoutMs
       ),
       'STORE'
     );
@@ -661,7 +739,7 @@ export class ImapClient {
    * folder of a large or shared account to find Drafts is a minute of work for
    * a path.
    */
-  async listMailboxRoles(): Promise<
+  async listMailboxRoles(signal: AbortSignal | undefined): Promise<
     Array<{
       path: string;
       specialUse: string | undefined;
@@ -669,8 +747,12 @@ export class ImapClient {
       selectable: boolean;
     }>
   > {
-    return this.withConnection(async (client) => {
-      const listed = await withTimeout(client.list(), 'LIST');
+    return this.withConnection(signal, async (client) => {
+      const listed = await withTimeout(
+        client.list(),
+        'LIST',
+        this.commandTimeoutMs
+      );
       return listed.slice(0, MAX_MAILBOXES).map((entry) => ({
         path: entry.path,
         specialUse: entry.specialUse,
@@ -780,7 +862,8 @@ export function referenceChain(
 export async function withTimeout<T>(
   promise: Promise<T>,
   command: string,
-  ms: number = COMMAND_TIMEOUT_MS
+  ms: number,
+  code: string = COMMAND_TIMEOUT
 ): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {
@@ -791,17 +874,56 @@ export async function withTimeout<T>(
           () =>
             reject(
               new MailError(
-                `IMAP ${command} timed out after ${ms / 1000} seconds`,
-                COMMAND_TIMEOUT
+                `IMAP ${command} timed out after ${describeSeconds(ms)}`,
+                code
               )
             ),
-          ms
+          Math.min(ms, MAX_TIMER_MS)
         );
       }),
     ]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
+}
+
+function describeSeconds(ms: number): string {
+  const seconds = ms / 1000;
+  return seconds === 1 ? '1 second' : `${seconds} seconds`;
+}
+
+/** Settles like `promise`, or rejects with CANCELLED once `signal` aborts; `promise` runs on. */
+export function unlessCancelled<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined
+): Promise<T> {
+  if (signal === undefined) return promise;
+  if (signal.aborted) {
+    promise.catch(() => undefined);
+    return Promise.reject(cancelledError());
+  }
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(cancelledError());
+    signal.addEventListener('abort', abort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', abort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', abort);
+        reject(error);
+      }
+    );
+  });
+}
+
+function throwIfCancelled(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) throw cancelledError();
+}
+
+function cancelledError(): MailError {
+  return new MailError('The client cancelled this call', CANCELLED);
 }
 
 const CONNECTION_ERROR_CODES = new Set([
@@ -843,7 +965,8 @@ function closeQuietly(client: ImapConnection): void {
  */
 export async function collectFetch(
   rows: AsyncIterable<FetchMessageObject>,
-  uids: readonly number[]
+  uids: readonly number[],
+  ms: number
 ): Promise<FetchMessageObject[]> {
   const wanted = new Set(uids);
   return withTimeout(
@@ -856,7 +979,8 @@ export async function collectFetch(
       }
       return found;
     })(),
-    'FETCH'
+    'FETCH',
+    ms
   );
 }
 

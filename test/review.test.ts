@@ -105,13 +105,17 @@ describe('a refused connection is answered from memory (1.7)', () => {
     const { fake, attempts } = refusing();
     const client = new ImapClient(testConfig(), () => fake);
 
-    await expect(client.listMailboxes()).rejects.toThrow(/login failed/);
+    await expect(client.listMailboxes(undefined)).rejects.toThrow(
+      /login failed/
+    );
     expect(attempts()).toBe(1);
 
     // Two more tool calls in the same second: the answer is the remembered
     // one, and the provider sees no second attempt.
     for (let i = 0; i < 2; i += 1) {
-      const error = await client.listMailboxes().catch((e: unknown) => e);
+      const error = await client
+        .listMailboxes(undefined)
+        .catch((e: unknown) => e);
       expect(String((error as Error).message)).toContain(
         'repeated from memory'
       );
@@ -123,7 +127,9 @@ describe('a refused connection is answered from memory (1.7)', () => {
     expect(attempts()).toBe(1);
 
     vi.setSystemTime(Date.now() + LOGIN_COOLDOWN_MS + 1);
-    await expect(client.listMailboxes()).rejects.toThrow(/login failed/);
+    await expect(client.listMailboxes(undefined)).rejects.toThrow(
+      /login failed/
+    );
     expect(attempts()).toBe(2);
   });
 
@@ -131,10 +137,10 @@ describe('a refused connection is answered from memory (1.7)', () => {
     const { fake, attempts } = refusing();
     const client = new ImapClient(testConfig(), () => fake);
     await expect(
-      client.withMailbox('INBOX', true, async () => 'x')
+      client.withMailbox('INBOX', true, undefined, async () => 'x')
     ).rejects.toThrow(/login failed/);
     await expect(
-      client.withMailbox('INBOX', true, async () => 'x')
+      client.withMailbox('INBOX', true, undefined, async () => 'x')
     ).rejects.toThrow(/repeated from memory/);
     expect(attempts()).toBe(1);
   });
@@ -150,9 +156,9 @@ describe('a refused connection is answered from memory (1.7)', () => {
         code: 'ENOTFOUND',
       });
     });
-    await expect(client.listMailboxes()).rejects.toThrow(/ENOTFOUND/);
+    await expect(client.listMailboxes(undefined)).rejects.toThrow(/ENOTFOUND/);
     vi.setSystemTime(Date.now() + LOGIN_COOLDOWN_MS + 1);
-    await expect(client.listMailboxes()).rejects.toThrow(/ENOTFOUND/);
+    await expect(client.listMailboxes(undefined)).rejects.toThrow(/ENOTFOUND/);
     expect(calls).toBe(2);
   });
 
@@ -179,7 +185,7 @@ describe('list_mailboxes without LIST-STATUS is bounded (1.9/1.10)', () => {
     const fake = new FakeImap(folders(MAX_STATUS_QUERIES + 150));
     fake.capabilities.delete('LIST-STATUS');
     const client = new ImapClient(testConfig(), () => fake);
-    const listing = await client.listMailboxes();
+    const listing = await client.listMailboxes(undefined);
     expect(fake.calls.filter((entry) => entry.name === 'status')).toHaveLength(
       MAX_STATUS_QUERIES
     );
@@ -199,7 +205,7 @@ describe('list_mailboxes without LIST-STATUS is bounded (1.9/1.10)', () => {
       return slow(path, query);
     };
     const client = new ImapClient(testConfig(), () => fake);
-    const listing = await client.listMailboxes();
+    const listing = await client.listMailboxes(undefined);
     expect(fake.calls.filter((entry) => entry.name === 'status')).toHaveLength(
       4
     );
@@ -217,7 +223,7 @@ describe('list_mailboxes without LIST-STATUS is bounded (1.9/1.10)', () => {
       return slow(path, query);
     };
     const client = new ImapClient(testConfig(), () => fake);
-    const listing = await client.listMailboxes();
+    const listing = await client.listMailboxes(undefined);
     expect(listing.mailboxes.map((box) => box.path)).toEqual([
       'Folder0000',
       'Folder0001',
@@ -229,7 +235,7 @@ describe('list_mailboxes without LIST-STATUS is bounded (1.9/1.10)', () => {
   it('never asks the fallback of a server that has LIST-STATUS', async () => {
     const fake = new FakeImap(folders(300));
     const client = new ImapClient(testConfig(), () => fake);
-    const listing = await client.listMailboxes();
+    const listing = await client.listMailboxes(undefined);
     expect(fake.calls.filter((entry) => entry.name === 'status')).toHaveLength(
       0
     );
@@ -240,7 +246,7 @@ describe('list_mailboxes without LIST-STATUS is bounded (1.9/1.10)', () => {
   it('caps the entries and reports the total', async () => {
     const fake = new FakeImap(folders(MAX_MAILBOXES + 7));
     const client = new ImapClient(testConfig(), () => fake);
-    const listing = await client.listMailboxes();
+    const listing = await client.listMailboxes(undefined);
     expect(listing.total).toBe(MAX_MAILBOXES + 7);
     expect(listing.mailboxes).toHaveLength(MAX_MAILBOXES);
   });

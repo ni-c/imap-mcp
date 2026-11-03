@@ -654,3 +654,26 @@ export function message(
     ...overrides,
   };
 }
+
+/** Like imapflow: a command in flight is rejected once its connection closes. */
+export function stalledUntilClosed(fake: FakeImap): Promise<never> {
+  return new Promise<never>((_resolve, reject) => {
+    fake.once('close', () =>
+      reject(
+        Object.assign(new Error('Connection not available'), {
+          code: 'NoConnection',
+        })
+      )
+    );
+  });
+}
+
+/** A FETCH that answers a row for a message nobody asked for, then hangs until the connection closes. */
+export async function* stalledFetch(
+  fake: FakeImap,
+  started: () => void = () => undefined
+): AsyncGenerator<FetchMessageObject> {
+  started();
+  yield { uid: 4_000_000_000, seq: 1 } as FetchMessageObject;
+  await stalledUntilClosed(fake);
+}

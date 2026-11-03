@@ -1,18 +1,23 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { MailError, ToolInputError } from '../src/errors.js';
+import { getEventListeners } from 'node:events';
+
 import {
+  CANCELLED,
   COMMAND_TIMEOUT,
   ImapClient,
   asMailError,
   canStoreFlag,
   collectFetch,
+  downloadDeadline,
   normalizeFlag,
+  socketTimeoutFor,
   withTimeout,
 } from '../src/imap.js';
 import { run } from '../src/result.js';
 
-import { FakeImap, message } from './fake-imap.js';
+import { FakeImap, message, stalledUntilClosed } from './fake-imap.js';
 import { testConfig } from './harness.js';
 
 function boxes() {
@@ -25,8 +30,8 @@ describe('ImapClient', () => {
     const client = new ImapClient(testConfig(), () => fake);
     expect(fake.connected).toBe(false);
 
-    await client.withMailbox('INBOX', true, async () => 'a');
-    await client.withMailbox('INBOX', true, async () => 'b');
+    await client.withMailbox('INBOX', true, undefined, async () => 'a');
+    await client.withMailbox('INBOX', true, undefined, async () => 'b');
     expect(fake.calls.filter((entry) => entry.name === 'connect')).toHaveLength(
       1
     );
@@ -38,7 +43,7 @@ describe('ImapClient', () => {
     config.imap.host = undefined;
     const client = new ImapClient(config, () => fake);
     await expect(
-      client.withMailbox('INBOX', true, async () => 'x')
+      client.withMailbox('INBOX', true, undefined, async () => 'x')
     ).rejects.toThrow(/IMAP_HOST/);
     expect(fake.connected).toBe(false);
   });
@@ -46,7 +51,12 @@ describe('ImapClient', () => {
   it('opens the default mailbox when none is given', async () => {
     const fake = new FakeImap(boxes());
     const client = new ImapClient(testConfig(), () => fake);
-    await client.withMailbox(undefined, true, async (_c, path) => path);
+    await client.withMailbox(
+      undefined,
+      true,
+      undefined,
+      async (_c, path) => path
+    );
     expect(fake.lockLog).toEqual([{ path: 'INBOX', readOnly: true }]);
   });
 
@@ -54,7 +64,7 @@ describe('ImapClient', () => {
     const fake = new FakeImap(boxes());
     const client = new ImapClient(testConfig(), () => fake);
     await expect(
-      client.withMailbox('INBOX', true, async () => {
+      client.withMailbox('INBOX', true, undefined, async () => {
         throw new Error('boom');
       })
     ).rejects.toThrow();
@@ -64,12 +74,17 @@ describe('ImapClient', () => {
   it('reconnects once after a dropped connection', async () => {
     const fake = new FakeImap(boxes());
     const client = new ImapClient(testConfig(), () => fake);
-    await client.withMailbox('INBOX', true, async () => 'warm');
+    await client.withMailbox('INBOX', true, undefined, async () => 'warm');
 
     fake.failNext = Object.assign(new Error('socket gone'), {
       code: 'ECONNRESET',
     });
-    const result = await client.withMailbox('INBOX', true, async () => 'again');
+    const result = await client.withMailbox(
+      'INBOX',
+      true,
+      undefined,
+      async () => 'again'
+    );
     expect(result).toBe('again');
     expect(fake.calls.filter((entry) => entry.name === 'connect')).toHaveLength(
       2
@@ -79,13 +94,13 @@ describe('ImapClient', () => {
   it('survives an error event on an idle connection and reconnects', async () => {
     const fake = new FakeImap(boxes());
     const client = new ImapClient(testConfig(), () => fake);
-    await client.withMailbox('INBOX', true, async () => 'warm');
+    await client.withMailbox('INBOX', true, undefined, async () => 'warm');
 
     fake.emit(
       'error',
       Object.assign(new Error('read ETIMEDOUT'), { code: 'ETIMEDOUT' })
     );
-    await client.withMailbox('INBOX', true, async () => 'again');
+    await client.withMailbox('INBOX', true, undefined, async () => 'again');
     expect(fake.calls.filter((entry) => entry.name === 'connect')).toHaveLength(
       2
     );
@@ -96,11 +111,16 @@ describe('ImapClient', () => {
     const second = new FakeImap(boxes());
     const fakes = [first, second];
     const client = new ImapClient(testConfig(), () => fakes.shift()!);
-    await client.withMailbox('INBOX', true, async () => 'warm');
+    await client.withMailbox('INBOX', true, undefined, async () => 'warm');
     const noops = first.calls.filter((entry) => entry.name === 'noop').length;
 
     first.close();
-    const result = await client.withMailbox('INBOX', true, async () => 'again');
+    const result = await client.withMailbox(
+      'INBOX',
+      true,
+      undefined,
+      async () => 'again'
+    );
     expect(result).toBe('again');
     expect(first.calls.filter((entry) => entry.name === 'noop')).toHaveLength(
       noops
@@ -115,14 +135,19 @@ describe('ImapClient', () => {
     const second = new FakeImap(boxes());
     const fakes = [first, second];
     const client = new ImapClient(testConfig(), () => fakes.shift()!);
-    await client.withMailbox('INBOX', true, async () => 'warm');
+    await client.withMailbox('INBOX', true, undefined, async () => 'warm');
 
     first.emit('error', new Error('read ETIMEDOUT'));
-    await client.withMailbox('INBOX', true, async () => 'second');
+    await client.withMailbox('INBOX', true, undefined, async () => 'second');
     // Late news from the first connection, after the second took over.
     first.emit('error', new Error('read ETIMEDOUT'));
     first.emit('close');
-    const result = await client.withMailbox('INBOX', true, async () => 'still');
+    const result = await client.withMailbox(
+      'INBOX',
+      true,
+      undefined,
+      async () => 'still'
+    );
     expect(result).toBe('still');
     expect(fakes).toHaveLength(0);
     expect(
@@ -141,7 +166,7 @@ describe('ImapClient', () => {
     };
     const closed = vi.spyOn(fake, 'close');
     const client = new ImapClient(testConfig(), () => fake);
-    await client.listMailboxes();
+    await client.listMailboxes(undefined);
 
     await expect(client.close()).resolves.toBeUndefined();
     expect(closed).toHaveBeenCalledTimes(2);
@@ -151,11 +176,11 @@ describe('ImapClient', () => {
   it('does not retry an error that is not a connection failure', async () => {
     const fake = new FakeImap(boxes());
     const client = new ImapClient(testConfig(), () => fake);
-    await client.withMailbox('INBOX', true, async () => 'warm');
+    await client.withMailbox('INBOX', true, undefined, async () => 'warm');
 
     fake.failNext = Object.assign(new Error('no permission'), { code: 'NO' });
     await expect(
-      client.withMailbox('INBOX', true, async () => 'again')
+      client.withMailbox('INBOX', true, undefined, async () => 'again')
     ).rejects.toThrow(/no permission/);
     expect(fake.calls.filter((entry) => entry.name === 'connect')).toHaveLength(
       1
@@ -165,9 +190,11 @@ describe('ImapClient', () => {
   it('reconnects for connection-less commands too', async () => {
     const fake = new FakeImap(boxes());
     const client = new ImapClient(testConfig(), () => fake);
-    await client.listMailboxes();
+    await client.listMailboxes(undefined);
     fake.failNext = Object.assign(new Error('gone'), { code: 'EPIPE' });
-    await expect(client.listMailboxes()).resolves.toMatchObject({ total: 1 });
+    await expect(client.listMailboxes(undefined)).resolves.toMatchObject({
+      total: 1,
+    });
   });
 
   it('surfaces a connect failure as a MailError', async () => {
@@ -176,7 +203,9 @@ describe('ImapClient', () => {
         code: 'ENOTFOUND',
       });
     });
-    await expect(client.listMailboxes()).rejects.toBeInstanceOf(MailError);
+    await expect(client.listMailboxes(undefined)).rejects.toBeInstanceOf(
+      MailError
+    );
   });
 
   it('reports mailbox counters from a single LIST', async () => {
@@ -184,7 +213,7 @@ describe('ImapClient', () => {
       { path: 'INBOX', messages: [message(1), message(2)] },
     ]);
     const client = new ImapClient(testConfig(), () => fake);
-    const { mailboxes } = await client.listMailboxes();
+    const { mailboxes } = await client.listMailboxes(undefined);
     expect(mailboxes[0]).toMatchObject({
       path: 'INBOX',
       messages: 2,
@@ -242,7 +271,7 @@ describe('ImapClient', () => {
   it('logs out on close and tolerates a failing logout', async () => {
     const fake = new FakeImap(boxes());
     const client = new ImapClient(testConfig(), () => fake);
-    await client.listMailboxes();
+    await client.listMailboxes(undefined);
     await client.close();
     expect(fake.connected).toBe(false);
 
@@ -251,7 +280,7 @@ describe('ImapClient', () => {
       throw new Error('connection already gone');
     };
     const second = new ImapClient(testConfig(), () => rude);
-    await second.listMailboxes();
+    await second.listMailboxes(undefined);
     await expect(second.close()).resolves.toBeUndefined();
   });
 
@@ -331,9 +360,9 @@ describe('connection hardening', () => {
       const closed = vi.spyOn(fake, 'close');
       const client = new ImapClient(testConfig(), () => fake);
       let runs = 0;
-      const pending = client.withMailbox('INBOX', true, async () => {
+      const pending = client.withMailbox('INBOX', true, undefined, async () => {
         runs += 1;
-        return withTimeout(new Promise<never>(() => {}), 'SEARCH');
+        return withTimeout(new Promise<never>(() => {}), 'SEARCH', 30_000);
       });
       const assertion = expect(pending).rejects.toMatchObject({
         code: COMMAND_TIMEOUT,
@@ -344,7 +373,7 @@ describe('connection hardening', () => {
       expect(runs).toBe(1);
       expect(closed).toHaveBeenCalled();
       // And the next call does not queue behind the abandoned command.
-      await client.withMailbox('INBOX', true, async () => 'next');
+      await client.withMailbox('INBOX', true, undefined, async () => 'next');
       expect(connects(fake)).toBe(2);
     } finally {
       vi.useRealTimers();
@@ -358,7 +387,12 @@ describe('connection hardening', () => {
       fake.connect = () => new Promise<void>(() => {});
       const closed = vi.spyOn(fake, 'close');
       const client = new ImapClient(testConfig(), () => fake);
-      const pending = client.withMailbox('INBOX', true, async () => 'x');
+      const pending = client.withMailbox(
+        'INBOX',
+        true,
+        undefined,
+        async () => 'x'
+      );
       const assertion = expect(pending).rejects.toThrow(/CONNECT timed out/);
       await vi.advanceTimersByTimeAsync(61_000);
       await assertion;
@@ -378,7 +412,7 @@ describe('connection hardening', () => {
     };
     const client = new ImapClient(testConfig(), () => fake);
     const error = (await client
-      .withMailbox('INBOX', true, async () => 'x')
+      .withMailbox('INBOX', true, undefined, async () => 'x')
       .catch((thrown: unknown) => thrown)) as Error;
     expect(error.message).not.toContain('repeated from memory');
     expect(connects(fake)).toBe(1);
@@ -400,7 +434,7 @@ describe('connection hardening', () => {
     };
     const client = new ImapClient(testConfig(), () => fake);
     await expect(
-      client.withMailbox('INBOX', true, async () => 'fine')
+      client.withMailbox('INBOX', true, undefined, async () => 'fine')
     ).resolves.toBe('fine');
     expect(connects(fake)).toBe(2);
   });
@@ -408,11 +442,11 @@ describe('connection hardening', () => {
   it('asks a read again after imapflow reports the connection closed, but not a write', async () => {
     const fake = new FakeImap(boxes());
     const client = new ImapClient(testConfig(), () => fake);
-    await expect(client.withMailbox('INBOX', true, closedOnce())).resolves.toBe(
-      'done'
-    );
     await expect(
-      client.withMailbox('INBOX', false, closedOnce())
+      client.withMailbox('INBOX', true, undefined, closedOnce())
+    ).resolves.toBe('done');
+    await expect(
+      client.withMailbox('INBOX', false, undefined, closedOnce())
     ).rejects.toMatchObject({ code: 'EConnectionClosed' });
   });
 
@@ -421,7 +455,7 @@ describe('connection hardening', () => {
     fake.capabilities.delete('LIST-STATUS');
     fake.status = async () => false;
     const client = new ImapClient(testConfig(), () => fake);
-    const listing = await client.listMailboxes();
+    const listing = await client.listMailboxes(undefined);
     expect(listing.statusOmitted).toBe(1);
     expect(listing.mailboxes[0]?.messages).toBeUndefined();
   });
@@ -436,24 +470,24 @@ describe('connection hardening', () => {
   });
 
   it('keeps only the FETCH rows that were asked for', async () => {
-    const found = await collectFetch(rows(), [1]);
+    const found = await collectFetch(rows(), [1], 30_000);
     expect(found.map((row) => row.uid)).toEqual([1]);
   });
 
   it('keeps nothing when nothing was asked for, or nothing came', async () => {
-    expect(await collectFetch(rows(), [])).toEqual([]);
-    expect(await collectFetch(noRows(), [1, 2])).toEqual([]);
+    expect(await collectFetch(rows(), [], 30_000)).toEqual([]);
+    expect(await collectFetch(noRows(), [1, 2], 30_000)).toEqual([]);
   });
 
   it('drops a row whose UID is not a whole number', async () => {
-    const found = await collectFetch(oddRows(), [1, 2]);
+    const found = await collectFetch(oddRows(), [1, 2], 30_000);
     expect(found.map((row) => row.uid)).toEqual([2]);
   });
 
   it('gives up on a FETCH that never ends', async () => {
     vi.useFakeTimers();
     try {
-      const pending = collectFetch(stalledRows(), [1]);
+      const pending = collectFetch(stalledRows(), [1], 30_000);
       const settled = expect(pending).rejects.toMatchObject({
         code: COMMAND_TIMEOUT,
       });
@@ -468,7 +502,7 @@ describe('connection hardening', () => {
     const fake = new FakeImap(boxes());
     const logout = vi.spyOn(fake, 'logout');
     const client = new ImapClient(testConfig(), () => fake);
-    const call = client.withMailbox('INBOX', true, async () => 'x');
+    const call = client.withMailbox('INBOX', true, undefined, async () => 'x');
     await client.close();
     await call.catch(() => undefined);
     await client.close();
@@ -514,7 +548,7 @@ describe('the errors imapflow really throws', () => {
 
 describe('withTimeout', () => {
   it('passes a value through', async () => {
-    await expect(withTimeout(Promise.resolve(7), 'NOOP')).resolves.toBe(7);
+    await expect(withTimeout(Promise.resolve(7), 'NOOP', 50)).resolves.toBe(7);
   });
 
   it('rejects with a MailError once the deadline passes', async () => {
@@ -617,5 +651,485 @@ describe('normalizeFlag', () => {
     expect(normalizeFlag('$Label1')).toBe('$Label1');
     expect(normalizeFlag('\\Recent')).toBe('\\Recent');
     expect(normalizeFlag('')).toBe('');
+  });
+});
+
+/** Resolves with a flag that turns true once `promise` settles either way. */
+function watch(promise: Promise<unknown>): { settled: boolean } {
+  const state = { settled: false };
+  promise.then(
+    () => (state.settled = true),
+    () => (state.settled = true)
+  );
+  return state;
+}
+
+describe('the configured command timeout', () => {
+  it('ends a SEARCH at the configured deadline, closed and not repeated', async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = new FakeImap(boxes());
+      fake.search = () => new Promise<never>(() => {});
+      const closed = vi.spyOn(fake, 'close');
+      const config = testConfig();
+      config.imap.commandTimeoutMs = 45_000;
+      const client = new ImapClient(config, () => fake);
+      let runs = 0;
+      const pending = client.withMailbox(
+        'INBOX',
+        true,
+        undefined,
+        async (connection) => {
+          runs += 1;
+          return client.search(connection, { all: true }, 'throw');
+        }
+      );
+      const state = watch(pending);
+      await vi.advanceTimersByTimeAsync(44_000);
+      expect(state.settled).toBe(false);
+      const assertion = expect(pending).rejects.toMatchObject({
+        code: COMMAND_TIMEOUT,
+        message: 'IMAP SEARCH timed out after 45 seconds',
+      });
+      await vi.advanceTimersByTimeAsync(2_000);
+      await assertion;
+      expect(runs).toBe(1);
+      expect(closed).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('gives up on a FETCH at the deadline it is handed', async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = collectFetch(stalledRows(), [1], 5_000);
+      const state = watch(pending);
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(state.settled).toBe(false);
+      const assertion = expect(pending).rejects.toMatchObject({
+        code: COMMAND_TIMEOUT,
+      });
+      await vi.advanceTimersByTimeAsync(2);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds the reply lookup of a draft, which had no deadline of its own', async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = new FakeImap(boxes());
+      fake.fetch = () => stalledRows() as never;
+      const config = testConfig();
+      config.imap.commandTimeoutMs = 2_000;
+      const client = new ImapClient(config, () => fake);
+      const pending = client.threadHeaders('INBOX', 1, undefined);
+      const assertion = expect(pending).rejects.toMatchObject({
+        code: COMMAND_TIMEOUT,
+        message: 'IMAP FETCH timed out after 2 seconds',
+      });
+      await vi.advanceTimersByTimeAsync(2_001);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('names a deadline of one second in the singular', async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = withTimeout(
+        new Promise<never>(() => {}),
+        'SEARCH',
+        1_000
+      );
+      const assertion = expect(pending).rejects.toMatchObject({
+        message: 'IMAP SEARCH timed out after 1 second',
+      });
+      await vi.advanceTimersByTimeAsync(1_001);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('carries the code it is handed, and COMMAND_TIMEOUT otherwise', async () => {
+    vi.useFakeTimers();
+    try {
+      const own = withTimeout(
+        new Promise<never>(() => {}),
+        'CONNECT',
+        50,
+        'CONNECT_TIMEOUT'
+      );
+      const plain = withTimeout(new Promise<never>(() => {}), 'NOOP', 50);
+      const first = expect(own).rejects.toMatchObject({
+        code: 'CONNECT_TIMEOUT',
+      });
+      const second = expect(plain).rejects.toMatchObject({
+        code: COMMAND_TIMEOUT,
+      });
+      await vi.advanceTimersByTimeAsync(60);
+      await first;
+      await second;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('holds a deadline longer than a timer can, instead of firing at once', async () => {
+    // Node fires a timer past 2^31 - 1 ms after one millisecond. A download
+    // cap of a few terabytes asks for a deadline that long.
+    let release!: (value: string) => void;
+    const pending = withTimeout(
+      new Promise<string>((resolve) => {
+        release = resolve;
+      }),
+      'FETCH',
+      2 ** 40
+    );
+    const state = watch(pending);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(state.settled).toBe(false);
+    release('done');
+    await expect(pending).resolves.toBe('done');
+  });
+
+  it.each([1_000, 600_000])(
+    'keeps the connect deadline at 60 seconds next to a %i ms command timeout',
+    async (commandTimeoutMs) => {
+      vi.useFakeTimers();
+      try {
+        const fake = new FakeImap(boxes());
+        let attempts = 0;
+        fake.connect = () => {
+          attempts += 1;
+          return new Promise<void>(() => {});
+        };
+        const config = testConfig();
+        config.imap.commandTimeoutMs = commandTimeoutMs;
+        const client = new ImapClient(config, () => fake);
+        const pending = client.withMailbox(
+          'INBOX',
+          true,
+          undefined,
+          async () => 'x'
+        );
+        const state = watch(pending);
+        await vi.advanceTimersByTimeAsync(59_000);
+        expect(state.settled).toBe(false);
+        const assertion = expect(pending).rejects.toMatchObject({
+          code: 'CONNECT_TIMEOUT',
+          message: 'IMAP CONNECT timed out after 60 seconds',
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await assertion;
+        // Not repeated within the call, and answered from memory right after.
+        expect(attempts).toBe(1);
+        const again = client.withMailbox(
+          'INBOX',
+          true,
+          undefined,
+          async () => 'x'
+        );
+        await expect(again).rejects.toMatchObject({ code: 'CONNECT_TIMEOUT' });
+        await expect(again).rejects.toThrow(/repeated from memory/);
+        expect(attempts).toBe(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  );
+
+  it("gives its own connect deadline the host and TLS hint, not the command timeout's", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = new FakeImap(boxes());
+      fake.connect = () => new Promise<void>(() => {});
+      const client = new ImapClient(testConfig(), () => fake);
+      const result = run(async () => {
+        await client.withMailbox('INBOX', true, undefined, async () => 'x');
+        return { content: [] };
+      });
+      await vi.advanceTimersByTimeAsync(61_000);
+      const text = JSON.stringify(await result);
+      expect(text).toContain('IMAP_TLS');
+      expect(text).not.toContain('IMAP_COMMAND_TIMEOUT_SECONDS');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('points a command timeout at IMAP_COMMAND_TIMEOUT_SECONDS', async () => {
+    const result = await run(async () => {
+      throw new MailError(
+        'IMAP SEARCH timed out after 30 seconds',
+        COMMAND_TIMEOUT
+      );
+    });
+    const text = JSON.stringify(result);
+    expect(text).toContain('IMAP_COMMAND_TIMEOUT_SECONDS');
+    expect(text).toContain('check the state');
+    expect(text).not.toContain('IMAP_TLS');
+  });
+
+  it.each(['CONNECT_TIMEOUT', 'GREETING_TIMEOUT', 'ETIMEDOUT'])(
+    'never suggests the command timeout for %s',
+    async (code) => {
+      const result = await run(async () => {
+        throw asMailError(Object.assign(new Error('x'), { code }));
+      });
+      expect(JSON.stringify(result)).not.toContain(
+        'IMAP_COMMAND_TIMEOUT_SECONDS'
+      );
+    }
+  );
+});
+
+function idleFor(
+  commandTimeoutMs: number,
+  overrides: { maxDownloadBytes?: number } = {}
+): number {
+  const config = testConfig();
+  Object.assign(config.imap, { commandTimeoutMs, ...overrides });
+  return socketTimeoutFor(config.imap);
+}
+
+describe('the idle timer handed to imapflow', () => {
+  it("stays at imapflow's five minutes for the defaults", () => {
+    expect(idleFor(30_000)).toBe(300_000);
+  });
+
+  it('grows past the longest deadline this server sets', () => {
+    // The 25 MiB download cap gives a deadline of T + 250 s; 10 s on top.
+    expect(idleFor(40_000)).toBe(300_000);
+    expect(idleFor(41_000)).toBe(301_000);
+    expect(idleFor(600_000)).toBe(860_000);
+  });
+
+  it.each([1_000, 30_000, 299_000, 600_000])(
+    'outlasts a %i ms command timeout and the largest download',
+    (commandTimeoutMs) => {
+      const config = testConfig();
+      config.imap.commandTimeoutMs = commandTimeoutMs;
+      const largest = Math.max(
+        config.imap.maxAttachmentBytes,
+        config.imap.maxDownloadBytes,
+        config.imap.maxExtractBytes
+      );
+      const idle = socketTimeoutFor(config.imap);
+      expect(idle).toBeGreaterThan(commandTimeoutMs);
+      expect(idle).toBeGreaterThan(downloadDeadline(largest, commandTimeoutMs));
+    }
+  );
+
+  it('never asks for more than a timer can hold', () => {
+    expect(idleFor(30_000, { maxDownloadBytes: 2 ** 40 })).toBe(2 ** 31 - 1);
+  });
+});
+
+describe('a call the client cancels', () => {
+  it('closes the connection under a running command and is not repeated', async () => {
+    const fake = new FakeImap(boxes());
+    let searching!: () => void;
+    const started = new Promise<void>((resolve) => {
+      searching = resolve;
+    });
+    fake.search = () => {
+      searching();
+      return stalledUntilClosed(fake);
+    };
+    const closed = vi.spyOn(fake, 'close');
+    const client = new ImapClient(testConfig(), () => fake);
+    const controller = new AbortController();
+    let runs = 0;
+    const pending = client.withMailbox(
+      'INBOX',
+      true,
+      controller.signal,
+      async (connection) => {
+        runs += 1;
+        return client.search(connection, { all: true }, 'throw');
+      }
+    );
+    await started;
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ code: CANCELLED });
+    expect(runs).toBe(1);
+    expect(closed).toHaveBeenCalled();
+    // The next call gets a fresh connection instead of queueing behind it.
+    await expect(
+      client.withMailbox('INBOX', true, undefined, async () => 'next')
+    ).resolves.toBe('next');
+    expect(connects(fake)).toBe(2);
+  });
+
+  it('does not connect at all once it is already cancelled', async () => {
+    const fake = new FakeImap(boxes());
+    const client = new ImapClient(testConfig(), () => fake);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      client.withMailbox('INBOX', true, controller.signal, async () => 'x')
+    ).rejects.toMatchObject({ code: CANCELLED });
+    await expect(client.listMailboxes(controller.signal)).rejects.toMatchObject(
+      { code: CANCELLED }
+    );
+    expect(connects(fake)).toBe(0);
+  });
+
+  it('stops waiting for a connect without ending it for another caller', async () => {
+    const fake = new FakeImap(boxes());
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    fake.connect = async () => {
+      fake.calls.push({ name: 'connect', args: [] });
+      await gate;
+      fake.connected = true;
+    };
+    const client = new ImapClient(testConfig(), () => fake);
+    const controller = new AbortController();
+    const cancelled = client.withMailbox(
+      'INBOX',
+      true,
+      controller.signal,
+      async () => 'a'
+    );
+    const other = client.withMailbox('INBOX', true, undefined, async () => 'b');
+    controller.abort();
+    await expect(cancelled).rejects.toMatchObject({ code: CANCELLED });
+    open();
+    await expect(other).resolves.toBe('b');
+    expect(connects(fake)).toBe(1);
+    // Nothing was refused, so the next call is not answered from memory.
+    await expect(
+      client.withMailbox('INBOX', true, undefined, async () => 'c')
+    ).resolves.toBe('c');
+  });
+
+  it('leaves the call it is queued behind alone and hands the lock back', async () => {
+    const fake = new FakeImap(boxes());
+    const lock = fake.getMailboxLock.bind(fake);
+    let grant!: () => void;
+    let requested = 0;
+    fake.getMailboxLock = async (path, options) => {
+      requested += 1;
+      if (requested === 2) {
+        await new Promise<void>((resolve) => {
+          grant = resolve;
+        });
+      }
+      return lock(path, options);
+    };
+    const closed = vi.spyOn(fake, 'close');
+    const client = new ImapClient(testConfig(), () => fake);
+    let finishFirst: (() => void) | undefined;
+    const first = client.withMailbox(
+      'INBOX',
+      true,
+      undefined,
+      () =>
+        new Promise<string>((resolve) => {
+          finishFirst = () => resolve('first');
+        })
+    );
+    await vi.waitFor(() => expect(finishFirst).toBeDefined());
+    const controller = new AbortController();
+    const queued = client.withMailbox(
+      'INBOX',
+      true,
+      controller.signal,
+      async () => 'second'
+    );
+    await vi.waitFor(() => expect(requested).toBe(2));
+    controller.abort();
+    await expect(queued).rejects.toMatchObject({ code: CANCELLED });
+    expect(closed).not.toHaveBeenCalled();
+    finishFirst?.();
+    await expect(first).resolves.toBe('first');
+    grant();
+    // Granted after the caller left: taken and released at once, not leaked.
+    await vi.waitFor(() => {
+      expect(fake.lockLog).toHaveLength(2);
+      expect(fake.openLocks).toBe(0);
+    });
+  });
+
+  it('closes the connection under a running listing', async () => {
+    const fake = new FakeImap(boxes());
+    let listing!: () => void;
+    const started = new Promise<void>((resolve) => {
+      listing = resolve;
+    });
+    fake.list = () => {
+      listing();
+      return stalledUntilClosed(fake);
+    };
+    const closed = vi.spyOn(fake, 'close');
+    const client = new ImapClient(testConfig(), () => fake);
+    const controller = new AbortController();
+    const pending = client.listMailboxes(controller.signal);
+    await started;
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ code: CANCELLED });
+    expect(closed).toHaveBeenCalled();
+  });
+
+  it('leaves no abort listener and no timer behind once it has answered', async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = new FakeImap(boxes());
+      const client = new ImapClient(testConfig(), () => fake);
+      const controller = new AbortController();
+      await client.withMailbox(
+        'INBOX',
+        true,
+        controller.signal,
+        async (connection) => client.search(connection, { all: true }, 'throw')
+      );
+      await client.listMailboxes(controller.signal);
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('a STATUS past its deadline', () => {
+  it('ends the STATUS fallback and closes the connection after the listing', async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = new FakeImap([
+        { path: 'INBOX', messages: [message(1)] },
+        { path: 'Archive', messages: [] },
+        { path: 'Sent', messages: [] },
+      ]);
+      fake.capabilities.delete('LIST-STATUS');
+      let statuses = 0;
+      fake.status = () => {
+        statuses += 1;
+        return new Promise<never>(() => {});
+      };
+      const closed = vi.spyOn(fake, 'close');
+      const config = testConfig();
+      config.imap.commandTimeoutMs = 1_000;
+      const client = new ImapClient(config, () => fake);
+      let omitted: number | undefined;
+      void client.listMailboxes(undefined).then((listing) => {
+        omitted = listing.statusOmitted;
+      });
+      await vi.advanceTimersByTimeAsync(1_001);
+      // The stuck STATUS is still queued, so nothing is asked behind it.
+      expect(statuses).toBe(1);
+      expect(omitted).toBe(3);
+      expect(closed).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

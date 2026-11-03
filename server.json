@@ -122,6 +122,12 @@
           "format": "number"
         },
         {
+          "name": "IMAP_COMMAND_TIMEOUT_SECONDS",
+          "description": "Seconds one IMAP command may take before the call is abandoned (default: 30, maximum: 600)",
+          "isRequired": false,
+          "format": "number"
+        },
+        {
           "name": "IMAP_ATTACHMENT_TYPES",
           "description": "Comma-separated content-type allowlist for attachments",
           "isRequired": false,
@@ -242,6 +248,12 @@
         {
           "name": "IMAP_MAX_EXTRACT_BYTES",
           "description": "Ceiling for reading a document's text with mode=text (default: 10485760, maximum: 67108864)",
+          "isRequired": false,
+          "format": "number"
+        },
+        {
+          "name": "IMAP_COMMAND_TIMEOUT_SECONDS",
+          "description": "Seconds one IMAP command may take before the call is abandoned (default: 30, maximum: 600)",
           "isRequired": false,
           "format": "number"
         },

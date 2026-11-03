@@ -142,7 +142,7 @@ export function registerWriteTools(
         removed: z.array(z.string()),
       }),
     },
-    async ({ uids, mailbox, add, remove }) =>
+    async ({ uids, mailbox, add, remove }, mcp) =>
       run(async () => {
         if (add === undefined && remove === undefined) {
           throw new ToolInputError(
@@ -165,56 +165,63 @@ export function registerWriteTools(
               'is meant instead.'
           );
         }
-        return client.withMailbox(mailbox, false, async (connection) => {
-          // imapflow drops a flag the mailbox does not list in PERMANENTFLAGS
-          // and still answers as if it had been set. Refuse before anything is
-          // written, so the result never claims a flag that is not there.
-          const permanentFlags =
-            connection.mailbox === false
-              ? undefined
-              : connection.mailbox.permanentFlags;
-          const refused = (add ?? []).filter(
-            (flag) => !canStoreFlag(permanentFlags, flag)
-          );
-          if (refused.length > 0) {
-            throw new ToolInputError(
-              `imap-mcp: this mailbox does not store ${refused.join(', ')}, so ` +
-                'nothing was changed. Call get_server_info for the flags it ' +
-                'does support.'
+        return client.withMailbox(
+          mailbox,
+          false,
+          mcp.mcpReq.signal,
+          async (connection) => {
+            // imapflow drops a flag the mailbox does not list in PERMANENTFLAGS
+            // and still answers as if it had been set. Refuse before anything is
+            // written, so the result never claims a flag that is not there.
+            const permanentFlags =
+              connection.mailbox === false
+                ? undefined
+                : connection.mailbox.permanentFlags;
+            const refused = (add ?? []).filter(
+              (flag) => !canStoreFlag(permanentFlags, flag)
             );
-          }
-          if (add !== undefined) {
-            requireOk(
-              await withTimeout(
-                connection.messageFlagsAdd(uids, add, { uid: true }),
+            if (refused.length > 0) {
+              throw new ToolInputError(
+                `imap-mcp: this mailbox does not store ${refused.join(', ')}, so ` +
+                  'nothing was changed. Call get_server_info for the flags it ' +
+                  'does support.'
+              );
+            }
+            if (add !== undefined) {
+              requireOk(
+                await withTimeout(
+                  connection.messageFlagsAdd(uids, add, { uid: true }),
+                  'STORE',
+                  client.commandTimeoutMs
+                ),
                 'STORE'
-              ),
-              'STORE'
-            );
-          }
-          if (remove !== undefined) {
-            requireOk(
-              await withTimeout(
-                connection.messageFlagsRemove(uids, remove, { uid: true }),
+              );
+            }
+            if (remove !== undefined) {
+              requireOk(
+                await withTimeout(
+                  connection.messageFlagsRemove(uids, remove, { uid: true }),
+                  'STORE',
+                  client.commandTimeoutMs
+                ),
                 'STORE'
-              ),
-              'STORE'
-            );
+              );
+            }
+            const source = mailbox ?? client.defaultMailbox;
+            audit('set_flags', {
+              mailbox: source,
+              uids,
+              added: add,
+              removed: remove,
+            });
+            return jsonResult({
+              mailbox: source,
+              uids,
+              added: add ?? [],
+              removed: remove ?? [],
+            });
           }
-          const source = mailbox ?? client.defaultMailbox;
-          audit('set_flags', {
-            mailbox: source,
-            uids,
-            added: add,
-            removed: remove,
-          });
-          return jsonResult({
-            mailbox: source,
-            uids,
-            added: add ?? [],
-            removed: remove ?? [],
-          });
-        });
+        );
       })
   );
 
@@ -278,8 +285,11 @@ export function registerWriteTools(
           );
         }
         if (!copying) {
-          await client.withMailbox(mailbox, true, (connection) =>
-            refuseStrayDeleted(client, connection, uids, 'move')
+          await client.withMailbox(
+            mailbox,
+            true,
+            mcp.mcpReq.signal,
+            (connection) => refuseStrayDeleted(client, connection, uids, 'move')
           );
         }
         // Copying is confirmed as well. The old rule — a token for "move",
@@ -341,58 +351,65 @@ export function registerWriteTools(
         }
         if (outcome.decision === 'pending') return outcome.result;
 
-        return client.withMailbox(mailbox, false, async (connection) => {
-          if (!copying) {
-            await refuseStrayDeleted(client, connection, uids, 'move');
-          }
-          const result = copying
-            ? requireOk(
-                await withTimeout(
-                  connection.messageCopy(uids, destination, { uid: true }),
+        return client.withMailbox(
+          mailbox,
+          false,
+          mcp.mcpReq.signal,
+          async (connection) => {
+            if (!copying) {
+              await refuseStrayDeleted(client, connection, uids, 'move');
+            }
+            const result = copying
+              ? requireOk(
+                  await withTimeout(
+                    connection.messageCopy(uids, destination, { uid: true }),
+                    'COPY',
+                    client.commandTimeoutMs
+                  ),
                   'COPY'
-                ),
-                'COPY'
-              )
-            : requireOk(
-                await withTimeout(
-                  connection.messageMove(uids, destination, { uid: true }),
+                )
+              : requireOk(
+                  await withTimeout(
+                    connection.messageMove(uids, destination, { uid: true }),
+                    'MOVE',
+                    client.commandTimeoutMs
+                  ),
                   'MOVE'
-                ),
-                'MOVE'
-              );
-          // A UID map smaller than the set means the server acted on fewer
-          // messages than were named: the rest were gone already. Servers
-          // without UIDPLUS send no map, and then nothing can be said.
-          const wanted = [...new Set(uids)];
-          const unconfirmed =
-            result.uidMap === undefined
-              ? []
-              : wanted.filter((uid) => !result.uidMap?.has(uid));
-          audit(copying ? 'copy' : 'move', {
-            from: source,
-            to: destination,
-            uids,
-            ...(result.uidMap === undefined
-              ? {}
-              : { confirmed: result.uidMap.size }),
-          });
-          return jsonResult({
-            action: copying ? 'copied' : 'moved',
-            source,
-            destination,
-            uids,
-            ...(unconfirmed.length === 0
-              ? {}
-              : {
-                  unconfirmed_uids: unconfirmed,
-                  note:
-                    `The server confirmed ${wanted.length - unconfirmed.length} of ` +
-                    `${wanted.length} message(s) as ${copying ? 'copied' : 'moved'}. The others ` +
-                    'were probably already gone or moved by another client; ' +
-                    'list_messages shows what is where.',
-                }),
-          });
-        });
+                );
+            // A UID map smaller than the set means the server acted on fewer
+            // messages than were named: the rest were gone already. Servers
+            // without UIDPLUS send no map, and then nothing can be said.
+            const wanted = [...new Set(uids)];
+            const unconfirmed =
+              result.uidMap === undefined
+                ? []
+                : wanted.filter((uid) => !result.uidMap?.has(uid));
+            audit(copying ? 'copy' : 'move', {
+              from: source,
+              to: destination,
+              uids,
+              ...(result.uidMap === undefined
+                ? {}
+                : { confirmed: result.uidMap.size }),
+            });
+            return jsonResult({
+              action: copying ? 'copied' : 'moved',
+              source,
+              destination,
+              uids,
+              ...(unconfirmed.length === 0
+                ? {}
+                : {
+                    unconfirmed_uids: unconfirmed,
+                    note:
+                      `The server confirmed ${wanted.length - unconfirmed.length} of ` +
+                      `${wanted.length} message(s) as ${copying ? 'copied' : 'moved'}. The others ` +
+                      'were probably already gone or moved by another client; ' +
+                      'list_messages shows what is where.',
+                  }),
+            });
+          }
+        );
       })
   );
 
@@ -429,8 +446,11 @@ export function registerWriteTools(
         const source = mailbox ?? client.defaultMailbox;
         // Before the dialog, so nobody is asked to approve what would then be
         // refused; checked again below, where it is the last word.
-        await client.withMailbox(mailbox, true, (connection) =>
-          refuseStrayDeleted(client, connection, uids, 'delete')
+        await client.withMailbox(
+          mailbox,
+          true,
+          mcp.mcpReq.signal,
+          (connection) => refuseStrayDeleted(client, connection, uids, 'delete')
         );
         const outcome = await approval.requestApproval(
           server,
@@ -459,18 +479,24 @@ export function registerWriteTools(
         }
         if (outcome.decision === 'pending') return outcome.result;
 
-        return client.withMailbox(mailbox, false, async (connection) => {
-          await refuseStrayDeleted(client, connection, uids, 'delete');
-          requireOk(
-            await withTimeout(
-              connection.messageDelete(uids, { uid: true }),
+        return client.withMailbox(
+          mailbox,
+          false,
+          mcp.mcpReq.signal,
+          async (connection) => {
+            await refuseStrayDeleted(client, connection, uids, 'delete');
+            requireOk(
+              await withTimeout(
+                connection.messageDelete(uids, { uid: true }),
+                'EXPUNGE',
+                client.commandTimeoutMs
+              ),
               'EXPUNGE'
-            ),
-            'EXPUNGE'
-          );
-          audit('delete', { mailbox: source, uids });
-          return jsonResult({ action: 'deleted', mailbox: source, uids });
-        });
+            );
+            audit('delete', { mailbox: source, uids });
+            return jsonResult({ action: 'deleted', mailbox: source, uids });
+          }
+        );
       })
   );
 
@@ -574,10 +600,14 @@ export function registerWriteTools(
           }
         }
 
-        return client.withConnection(async (connection) => {
+        return client.withConnection(mcp.mcpReq.signal, async (connection) => {
           if (action === 'create') {
             const created = requireOk(
-              await withTimeout(connection.mailboxCreate(mailbox), 'CREATE'),
+              await withTimeout(
+                connection.mailboxCreate(mailbox),
+                'CREATE',
+                client.commandTimeoutMs
+              ),
               'CREATE'
             );
             // imapflow turns ALREADYEXISTS into a normal answer. Nothing was
@@ -593,10 +623,15 @@ export function registerWriteTools(
           } else if (action === 'rename') {
             await withTimeout(
               connection.mailboxRename(mailbox, new_name as string),
-              'RENAME'
+              'RENAME',
+              client.commandTimeoutMs
             );
           } else {
-            await withTimeout(connection.mailboxDelete(mailbox), 'DELETE');
+            await withTimeout(
+              connection.mailboxDelete(mailbox),
+              'DELETE',
+              client.commandTimeoutMs
+            );
           }
           audit(`mailbox_${action}`, { mailbox, new_name });
           return jsonResult({
@@ -673,12 +708,13 @@ export function registerWriteTools(
         note: z.string(),
       }),
     },
-    async ({ to, cc, bcc, subject, body, reply_to_uid, mailbox }) =>
+    async ({ to, cc, bcc, subject, body, reply_to_uid, mailbox }, mcp) =>
       run(async () => {
+        const signal = mcp.mcpReq.signal;
         const thread =
           reply_to_uid === undefined
             ? undefined
-            : await client.threadHeaders(mailbox, reply_to_uid);
+            : await client.threadHeaders(mailbox, reply_to_uid, signal);
 
         const draft = buildDraft({
           from: client.user,
@@ -690,7 +726,7 @@ export function registerWriteTools(
           ...(thread === undefined ? {} : { thread }),
         });
 
-        const folder = await resolveDraftsMailbox(client, config);
+        const folder = await resolveDraftsMailbox(client, config, signal);
         // Selected read-write, not just connected: imapflow keeps only the
         // flags the selected mailbox lists in PERMANENTFLAGS, and a lock
         // released after a read-only call leaves that mailbox EXAMINEd, where
@@ -698,6 +734,7 @@ export function registerWriteTools(
         const flags = await client.withMailbox(
           folder,
           false,
+          signal,
           async (connection) => {
             // A Drafts folder that does not store a flag still takes the
             // draft — the text is what matters — but the result says so.
@@ -708,7 +745,11 @@ export function registerWriteTools(
             const kept = ['\\Draft', '\\Seen'].filter((flag) =>
               canStoreFlag(permanentFlags, flag)
             );
-            await withTimeout(connection.append(folder, draft, kept), 'APPEND');
+            await withTimeout(
+              connection.append(folder, draft, kept),
+              'APPEND',
+              client.commandTimeoutMs
+            );
             return kept;
           }
         );
@@ -766,12 +807,13 @@ export function registerWriteTools(
  */
 async function resolveDraftsMailbox(
   client: ImapClient,
-  config: Config
+  config: Config,
+  signal: AbortSignal | undefined
 ): Promise<string> {
   if (config.imap.draftsMailbox !== undefined) {
     return config.imap.draftsMailbox;
   }
-  const found = (await client.listMailboxRoles()).find(
+  const found = (await client.listMailboxRoles(signal)).find(
     (box) =>
       box.specialUse === '\\Drafts' &&
       box.selectable &&

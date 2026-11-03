@@ -42,7 +42,7 @@ async function construct(
   const config = testConfig();
   Object.assign(config.imap, overrides);
   const client = new ImapClient(config);
-  await client.listMailboxes();
+  await client.listMailboxes(undefined);
   expect(hoisted.constructed).toHaveLength(1);
   return hoisted.constructed[0] as Record<string, unknown>;
 }
@@ -86,5 +86,15 @@ describe('the real ImapFlow is constructed with', () => {
     const built = await construct({ user: 'me@example.net', password: 'pw' });
     expect(built.auth).toEqual({ user: 'me@example.net', pass: 'pw' });
     expect(JSON.stringify(built)).not.toContain('NODE_TLS_REJECT_UNAUTHORIZED');
+  });
+
+  // Stated, not left to the library: imapflow ends a command that is silent
+  // for this long as a dropped connection, and a dropped read is retried —
+  // so it must never fire before this server's own deadline does.
+  it('an idle timeout past every deadline of this server', async () => {
+    expect((await construct({})).socketTimeout).toBe(300_000);
+    expect((await construct({ commandTimeoutMs: 600_000 })).socketTimeout).toBe(
+      860_000
+    );
   });
 });

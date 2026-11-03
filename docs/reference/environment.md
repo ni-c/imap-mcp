@@ -17,6 +17,7 @@ All configuration is by environment variable; there is no config file.
 | `IMAP_DOWNLOAD_DIR` | no       | —          | Where attachments may be written. Unset means the filesystem is never touched |
 | `IMAP_INSECURE_TLS` | no       | `false`    | `true` accepts self-signed certificates, scoped to this connection            |
 | `IMAP_TRUSTED_AUTHSERV_ID` | no | —      | The authserv-id your provider stamps; without it every verdict is forgeable   |
+| `IMAP_COMMAND_TIMEOUT_SECONDS` | no | `30` | Seconds one IMAP command may take, from 1 to 600                          |
 | `ELICITATION`       | no       | `true`     | `false` replaces the approval dialog with the two-call token. **Not prefixed** |
 
 There are also `IMAP_MAX_MESSAGES`, `IMAP_MAX_ATTACHMENT_BYTES`,
@@ -34,6 +35,25 @@ the others. `IMAP_MAX_EXTRACT_BYTES` is the one with a hard ceiling — 64 MB �
 value above it refuses to start rather than being clamped: the other two buy a big
 answer, this one buys a buffer inside a parser working on bytes a stranger chose, so
 a typo there would leave you believing there is a limit.
+
+## `IMAP_COMMAND_TIMEOUT_SECONDS`
+
+How long one IMAP command — a SEARCH, a FETCH, a STORE — may take before the call is
+abandoned. The default is 30; values from 1 to 600 are accepted, and anything else
+stops the server at startup rather than being clamped, so a value meant as
+milliseconds (`120000`) is caught instead of becoming a deadline of hours.
+
+- It applies to **each command**, not to a tool call. `list_messages` selects the
+  folder, searches and fetches, and each of those gets the full time.
+- Opening the connection keeps its own 60 seconds, LOGIN included.
+- A download gets this plus 10 seconds for every MiB its size limit allows.
+- When it runs out, the connection is closed and the call is not repeated: the command
+  may still be running on the server, or have run.
+- A call the client cancels ends the same way once its command is on the wire.
+
+`get_server_info` reports the value as `limits.command_timeout_seconds`. Raise it for a
+server that is slow rather than unreachable — see
+[slow servers](/guide/configuration#slow-servers).
 
 ## `IMAP_TRUSTED_AUTHSERV_ID` and the `forgeable` flag
 

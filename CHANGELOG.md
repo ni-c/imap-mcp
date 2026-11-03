@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `has:attachment filename:pdf`. It is sent as `X-GM-RAW`, combined with the other filters
   and confined to the selected mailbox; a server that does not advertise `X-GM-EXT-1` gets
   an error before anything is searched. Contributed by @juriSacchetta (#72).
+- `IMAP_COMMAND_TIMEOUT_SECONDS` sets how long one IMAP command may take, from 1 to 600
+  seconds (default 30), for a server that is slow rather than unreachable — a full-text
+  `body` search over a large archive, say. A value outside that range stops the server at
+  startup instead of being clamped. The timeout hint names the variable, `get_server_info`
+  reports it as `limits.command_timeout_seconds`, and imapflow's own idle timer is kept
+  past it, so a longer deadline is not undercut by a retried "dropped connection" (#79).
+- A call the client cancels now ends its IMAP work: once its command is on the wire the
+  connection is closed, as on a timeout, and nothing is repeated, so an abandoned search no
+  longer holds the mailbox for the next call. A call still waiting for the connection or
+  for the mailbox lock only stops waiting, and the call ahead of it is left alone.
 
 ### Changed
 
@@ -93,6 +103,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `get_message`, `get_attachments`, the attachment resource and the reply lookup of
+  `save_draft` fetched their message without this server's command timeout, bounded only
+  by imapflow's idle timer. They have the deadline now, and skip unsolicited FETCH rows for
+  other messages, as the listings already did.
+- A STATUS that timed out in the per-folder fallback of `list_mailboxes` was counted as
+  omitted while it stayed queued on the connection, so every later STATUS and every later
+  call waited behind it. It now ends the fallback, and the connection is closed once the
+  listing is assembled.
 - `list_new_messages` marked the whole page as handed over before the result budget
   dropped part of it, so the dropped messages never came back. Only the messages that are
   returned are tagged now, and `list_messages` computes `returned` and `next_offset` from
