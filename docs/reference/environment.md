@@ -46,10 +46,14 @@ milliseconds (`120000`) is caught instead of becoming a deadline of hours.
 - It applies to **each command**, not to a tool call. `list_messages` selects the
   folder, searches and fetches, and each of those gets the full time.
 - Opening the connection keeps its own 60 seconds, LOGIN included.
-- A download gets this plus 10 seconds for every MiB its size limit allows.
+- A download gets this plus 10 seconds for every MiB its size limit allows, and the
+  up to 2 MiB `get_message` reads at once gets this plus 20 seconds.
 - When it runs out, the connection is closed and the call is not repeated: the command
   may still be running on the server, or have run.
-- A call the client cancels ends the same way once its command is on the wire.
+- A call that spends it waiting for a mailbox another call holds fails with
+  `MAILBOX_BUSY`; nothing was sent for it, so trying again is safe.
+- A call the client cancels stops at once and sends nothing further; its connection is
+  closed when no other call is using it, and otherwise once that call is done.
 
 `get_server_info` reports the value as `limits.command_timeout_seconds`. Raise it for a
 server that is slow rather than unreachable — see

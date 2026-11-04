@@ -26,10 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   startup instead of being clamped. The timeout hint names the variable, `get_server_info`
   reports it as `limits.command_timeout_seconds`, and imapflow's own idle timer is kept
   past it, so a longer deadline is not undercut by a retried "dropped connection" (#79).
-- A call the client cancels now ends its IMAP work: once its command is on the wire the
-  connection is closed, as on a timeout, and nothing is repeated, so an abandoned search no
-  longer holds the mailbox for the next call. A call still waiting for the connection or
-  for the mailbox lock only stops waiting, and the call ahead of it is left alone.
+- A call the client cancels now ends its IMAP work: it stops waiting at once and sends no
+  further command. When no other call is working on the connection, the connection is
+  closed, so an abandoned search no longer holds the mailbox for the next call. When
+  another call is, that call is left to finish, new calls get a fresh connection, and the
+  old one is closed once it is idle. A call still waiting for the connection or for the
+  mailbox lock only stops waiting.
 
 ### Changed
 
@@ -38,6 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   On a large All Mail folder the header search could outlast the client's timeout, and
   it missed replies Gmail itself groups into the conversation. Other servers keep the
   header search. Contributed by @juriSacchetta (#73).
+- A refused `IMAP_TRUSTED_AUTHSERV_ID` is no longer described by its length. CodeQL took
+  the length for a logged credential (code-scanning alert 8, a false positive that came
+  back with every refactor); `IMAP_HOST` keeps the description.
 
 ### Security
 
@@ -105,12 +110,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `get_message`, `get_attachments`, the attachment resource and the reply lookup of
   `save_draft` fetched their message without this server's command timeout, bounded only
-  by imapflow's idle timer. They have the deadline now, and skip unsolicited FETCH rows for
-  other messages, as the listings already did.
+  by imapflow's idle timer. They have a deadline now — `get_message`, which pulls up to
+  2 MiB of source in one FETCH, the download deadline for that size: the command timeout
+  plus 20 seconds, 50 by default — and skip unsolicited FETCH rows for other messages, as
+  the listings already did.
 - A STATUS that timed out in the per-folder fallback of `list_mailboxes` was counted as
   omitted while it stayed queued on the connection, so every later STATUS and every later
   call waited behind it. It now ends the fallback, and the connection is closed once the
-  listing is assembled.
+  listing is assembled — or, if another call is still working on it, once that call is
+  done. A STATUS gets no more than what is left of the fallback's 20-second budget, so a
+  raised `IMAP_COMMAND_TIMEOUT_SECONDS` does not stretch the listing.
+- A call that only waited for the mailbox lock another call held closed the connection
+  under that call when its own deadline passed, killing the MOVE or APPEND on the wire.
+  It now gives up with `MAILBOX_BUSY` and leaves the holder alone; nothing was sent for
+  it, so trying again is safe.
+- A write was repeated after its connection dropped even when the command had already
+  gone out: imapflow rejects the command on the wire and those queued behind it with the
+  same `NoConnection`, so a draft could be stored twice. A write is now repeated only when
+  the connection was lost before it began, or imapflow reports it never sent the command;
+  otherwise the error says it may have run.
+- A COPY, MOVE, STORE or EXPUNGE whose connection was lost was reported as refused by the
+  server, since imapflow answers both with `false`. It is now reported as possibly
+  carried out.
+- A write whose outcome is unknown — past its deadline, or with its connection lost under
+  it — now leaves an audit line with `outcome=unknown`; it used to leave none.
+  `save_draft` records its line as soon as the draft is stored, so a call cancelled after
+  that still leaves it.
 - `list_new_messages` marked the whole page as handed over before the result budget
   dropped part of it, so the dropped messages never came back. Only the messages that are
   returned are tagged now, and `list_messages` computes `returned` and `next_offset` from

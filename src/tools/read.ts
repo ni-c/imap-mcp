@@ -55,7 +55,7 @@ import {
   uidParam,
 } from '../schema.js';
 
-import { audit } from '../audit.js';
+import { audit, auditedWrite } from '../audit.js';
 import { READ_ONLY } from './annotations.js';
 import type { Config } from '../config.js';
 import { saveAttachment } from '../download.js';
@@ -63,7 +63,9 @@ import { downloadCapped } from '../stream.js';
 import { ToolInputError } from '../errors.js';
 import {
   collectFetch,
+  downloadDeadline,
   ImapClient,
+  MAX_SOURCE_BYTES,
   type ImapConnection,
   type MailboxSummary,
 } from '../imap.js';
@@ -74,8 +76,6 @@ import {
   type MessageSummary,
 } from '../message.js';
 
-/** Upper bound on the raw message pulled for a single `get_message`. */
-const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 /** How many Message-IDs of a thread are turned into search terms. */
 const MAX_THREAD_TERMS = 5;
 const MAX_THREAD_MESSAGES = MAX_THREAD_TERMS * 10;
@@ -549,12 +549,15 @@ export function registerReadTools(
               const messages = fitted.messages as typeof summaries;
               const handed = messages.map((message) => message.uid);
               if (!dryRun && handed.length > 0) {
-                await client.tagSeen(connection, handed);
-                audit('tag_seen', {
+                const details = {
                   mailbox: client.defaultMailbox,
                   keyword: client.seenKeyword,
                   uids: handed,
-                });
+                };
+                await auditedWrite('tag_seen', details, () =>
+                  client.tagSeen(connection, handed)
+                );
+                audit('tag_seen', details);
               }
               const waiting = uids.length > handed.length;
               return untrustedResult(
@@ -649,7 +652,8 @@ export function registerReadTools(
             const message = await fetchOne(
               connection,
               uid,
-              client.commandTimeoutMs,
+              // Up to 2 MiB of source: sized like a download, not a bare command.
+              downloadDeadline(MAX_SOURCE_BYTES, client.commandTimeoutMs),
               {
                 uid: true,
                 envelope: true,

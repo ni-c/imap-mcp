@@ -359,10 +359,23 @@ function hintFor(error: MailError): string {
     case 'GREETING_TIMEOUT':
     case 'TLSFAILED':
       return TLS_HINT;
+    case 'MAILBOX_BUSY':
+      return (
+        '\nHint: another call was using this mailbox for the whole deadline, so ' +
+        'nothing was sent for this one and trying again is safe. If it keeps ' +
+        'happening, a slow command is holding the mailbox — see ' +
+        'IMAP_COMMAND_TIMEOUT_SECONDS.'
+      );
+    case 'NoConnection':
+      return (
+        '\nHint: the connection to the mail server was lost. A change this call ' +
+        'was making may have gone through before it broke — check the state ' +
+        'before trying again.'
+      );
     case 'COMMAND_TIMEOUT':
       return (
         '\nHint: the server did not answer in time. The command may still have ' +
-        'run on the server, so the connection was closed and the call not ' +
+        'run on the server, so its connection was given up and the call not ' +
         'repeated — check the state before trying again. If the server is ' +
         'slow rather than unreachable — a body search in a large folder, say ' +
         '— the operator can allow more time with IMAP_COMMAND_TIMEOUT_SECONDS ' +

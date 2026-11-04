@@ -145,6 +145,11 @@ export class FakeImap extends EventEmitter implements ImapConnection {
     this.close();
   }
 
+  /** imapflow's `usable`: false once the connection has closed. */
+  get usable(): boolean {
+    return this.connected;
+  }
+
   // Like imapflow, a connection reports its end once, as 'close'.
   close(): void {
     if (!this.connected) return;
@@ -655,17 +660,91 @@ export function message(
   };
 }
 
+/** What imapflow 2.10's close() rejects a command on the wire (or queued) with. */
+export function closedUnder(): Error {
+  return Object.assign(new Error('Connection not available'), {
+    code: 'NoConnection',
+    rejectedFrom: 'pendingRequest',
+  });
+}
+
 /** Like imapflow: a command in flight is rejected once its connection closes. */
 export function stalledUntilClosed(fake: FakeImap): Promise<never> {
   return new Promise<never>((_resolve, reject) => {
-    fake.once('close', () =>
-      reject(
-        Object.assign(new Error('Connection not available'), {
-          code: 'NoConnection',
-        })
-      )
-    );
+    fake.once('close', () => reject(closedUnder()));
   });
+}
+
+/**
+ * A command that stays on the wire until the test releases it, and is rejected
+ * like imapflow's when its connection closes first. `began` settles once it was
+ * sent; `count` says how often it was.
+ */
+export function held<T>(fake: FakeImap, answer: T) {
+  let release: (() => void) | undefined;
+  let begin!: () => void;
+  const began = new Promise<void>((resolve) => {
+    begin = resolve;
+  });
+  let count = 0;
+  return {
+    began,
+    get count() {
+      return count;
+    },
+    release: () => release?.(),
+    run: (): Promise<T> => {
+      count += 1;
+      begin();
+      return new Promise<T>((resolve, reject) => {
+        release = () => resolve(answer);
+        fake.once('close', () => reject(closedUnder()));
+      });
+    },
+  };
+}
+
+/**
+ * Grants mailbox locks one at a time, as imapflow does: a request waits until
+ * every lock granted before it has been released. A queued request is
+ * rejected like imapflow's closeLocks() when the connection closes.
+ */
+export function queueLocks(fake: FakeImap): void {
+  const grant = fake.getMailboxLock.bind(fake);
+  let tail: Promise<void> = Promise.resolve();
+  fake.getMailboxLock = (path, options) => {
+    const previous = tail;
+    let done!: () => void;
+    tail = new Promise<void>((resolve) => {
+      done = resolve;
+    });
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      fake.once('close', () => {
+        if (settled) return;
+        settled = true;
+        done();
+        reject(
+          Object.assign(new Error('Connection not available'), {
+            code: 'NoConnection',
+            rejectedFrom: 'mailboxLock',
+          })
+        );
+      });
+      void previous.then(async () => {
+        if (settled) return;
+        settled = true;
+        const lock = await grant(path, options);
+        resolve({
+          path: lock.path,
+          release: () => {
+            lock.release();
+            done();
+          },
+        });
+      });
+    });
+  };
 }
 
 /** A FETCH that answers a row for a message nobody asked for, then hangs until the connection closes. */

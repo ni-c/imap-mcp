@@ -80,9 +80,11 @@ Three things to know before you raise it:
 
 When the deadline passes, the connection is closed and the call is not repeated: the
 command may still be running on the server, or have run, so nothing is sent twice.
-The same happens when the client cancels a call while its command is on the wire —
-the next call gets a fresh connection instead of waiting behind a search nobody will
-read.
+A call the client cancels stops at once and sends nothing further; the next call gets
+a fresh connection instead of waiting behind a search nobody will read, and a call
+still working on the old connection is left to finish. A call that spent the whole
+time waiting for a mailbox another call was using fails with `MAILBOX_BUSY` instead:
+nothing was sent for it, and trying again is safe.
 
 ## Read-only, and why it is the default
 

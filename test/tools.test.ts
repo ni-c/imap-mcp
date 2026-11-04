@@ -21,6 +21,7 @@ import {
   buildPdf,
   zip,
 } from './document-fixtures.js';
+import { downloadDeadline } from '../src/imap.js';
 import { MAX_RESULT_BYTES } from '../src/result.js';
 import { MAX_BODY_CHARS } from '../src/analyze.js';
 import { expectPortableToolSchemas } from 'mcp-integration-harness';
@@ -2275,16 +2276,42 @@ describe('the command timeout, end to end', () => {
     ).toBe(120);
   });
 
-  it('bounds the message fetch of get_message, which had no deadline of its own', async () => {
-    const harness = await connect({
-      config: { imap: { ...testConfig().imap, commandTimeoutMs: 50 } },
-    });
-    harness.imap.fetch = () => stalledFetch(harness.imap) as never;
-    const result = await call(harness.client, 'get_message', { uid: 1 });
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toContain('IMAP FETCH timed out after 0.05 seconds');
-    expect(textOf(result)).toContain('IMAP_COMMAND_TIMEOUT_SECONDS');
-    await harness.close();
+  // get_message pulls up to 2 MiB of source in one FETCH, so it is given the
+  // download deadline for that size: the command timeout plus 10 s per MiB.
+  it.each([
+    [30_000, 50_000, '50 seconds'],
+    [1_000, 21_000, '21 seconds'],
+  ])(
+    'bounds the message fetch of get_message: T=%i ms gives up at %i ms',
+    async (commandTimeoutMs, deadline, shown) => {
+      const harness = await connect({
+        config: { imap: { ...testConfig().imap, commandTimeoutMs } },
+      });
+      harness.imap.fetch = () => stalledFetch(harness.imap) as never;
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        let settled = false;
+        const pending = call(harness.client, 'get_message', { uid: 1 }).finally(
+          () => {
+            settled = true;
+          }
+        );
+        await vi.advanceTimersByTimeAsync(deadline - 1);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(2);
+        const result = await pending;
+        expect(result.isError).toBe(true);
+        expect(textOf(result)).toContain(`IMAP FETCH timed out after ${shown}`);
+        expect(textOf(result)).toContain('IMAP_COMMAND_TIMEOUT_SECONDS');
+      } finally {
+        vi.useRealTimers();
+        await harness.close();
+      }
+    }
+  );
+
+  it('gives the get_message fetch 620 s at the largest command timeout', () => {
+    expect(downloadDeadline(2 * 1024 * 1024, 600_000)).toBe(620_000);
   });
 });
 

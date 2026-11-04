@@ -13,12 +13,17 @@ export class ToolInputError extends Error {
  * any other remote string before it reaches the model.
  */
 export class MailError extends Error {
+  /** Nothing of the command reached the server, so repeating it cannot do anything twice. */
+  readonly neverSent: boolean;
+
   constructor(
     message: string,
     readonly code: string | undefined = undefined,
-    readonly responseText: string = ''
+    readonly responseText: string = '',
+    options: { neverSent?: boolean } = {}
   ) {
     super(message);
     this.name = 'MailError';
+    this.neverSent = options.neverSent === true;
   }
 }

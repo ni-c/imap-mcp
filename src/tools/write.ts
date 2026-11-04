@@ -13,7 +13,7 @@ import {
 } from '../schema.js';
 
 import { escapeInvisible, sanitizeText, stripInvisible } from '../analyze.js';
-import { audit } from '../audit.js';
+import { audit, auditedWrite } from '../audit.js';
 import type { Config } from '../config.js';
 import { ToolInputError } from '../errors.js';
 import {
@@ -187,27 +187,37 @@ export function registerWriteTools(
                   'does support.'
               );
             }
-            if (add !== undefined) {
-              requireOk(
-                await withTimeout(
-                  connection.messageFlagsAdd(uids, add, { uid: true }),
-                  'STORE',
-                  client.commandTimeoutMs
-                ),
-                'STORE'
-              );
-            }
-            if (remove !== undefined) {
-              requireOk(
-                await withTimeout(
-                  connection.messageFlagsRemove(uids, remove, { uid: true }),
-                  'STORE',
-                  client.commandTimeoutMs
-                ),
-                'STORE'
-              );
-            }
             const source = mailbox ?? client.defaultMailbox;
+            const details = {
+              mailbox: source,
+              uids,
+              added: add,
+              removed: remove,
+            };
+            await auditedWrite('set_flags', details, async () => {
+              if (add !== undefined) {
+                requireOk(
+                  await withTimeout(
+                    connection.messageFlagsAdd(uids, add, { uid: true }),
+                    'STORE',
+                    client.commandTimeoutMs
+                  ),
+                  'STORE',
+                  connection
+                );
+              }
+              if (remove !== undefined) {
+                requireOk(
+                  await withTimeout(
+                    connection.messageFlagsRemove(uids, remove, { uid: true }),
+                    'STORE',
+                    client.commandTimeoutMs
+                  ),
+                  'STORE',
+                  connection
+                );
+              }
+            });
             audit('set_flags', {
               mailbox: source,
               uids,
@@ -359,23 +369,34 @@ export function registerWriteTools(
             if (!copying) {
               await refuseStrayDeleted(client, connection, uids, 'move');
             }
-            const result = copying
-              ? requireOk(
-                  await withTimeout(
-                    connection.messageCopy(uids, destination, { uid: true }),
-                    'COPY',
-                    client.commandTimeoutMs
-                  ),
-                  'COPY'
-                )
-              : requireOk(
-                  await withTimeout(
-                    connection.messageMove(uids, destination, { uid: true }),
-                    'MOVE',
-                    client.commandTimeoutMs
-                  ),
-                  'MOVE'
-                );
+            const result = await auditedWrite(
+              copying ? 'copy' : 'move',
+              { from: source, to: destination, uids },
+              async () =>
+                copying
+                  ? requireOk(
+                      await withTimeout(
+                        connection.messageCopy(uids, destination, {
+                          uid: true,
+                        }),
+                        'COPY',
+                        client.commandTimeoutMs
+                      ),
+                      'COPY',
+                      connection
+                    )
+                  : requireOk(
+                      await withTimeout(
+                        connection.messageMove(uids, destination, {
+                          uid: true,
+                        }),
+                        'MOVE',
+                        client.commandTimeoutMs
+                      ),
+                      'MOVE',
+                      connection
+                    )
+            );
             // A UID map smaller than the set means the server acted on fewer
             // messages than were named: the rest were gone already. Servers
             // without UIDPLUS send no map, and then nothing can be said.
@@ -485,13 +506,16 @@ export function registerWriteTools(
           mcp.mcpReq.signal,
           async (connection) => {
             await refuseStrayDeleted(client, connection, uids, 'delete');
-            requireOk(
-              await withTimeout(
-                connection.messageDelete(uids, { uid: true }),
+            await auditedWrite('delete', { mailbox: source, uids }, async () =>
+              requireOk(
+                await withTimeout(
+                  connection.messageDelete(uids, { uid: true }),
+                  'EXPUNGE',
+                  client.commandTimeoutMs
+                ),
                 'EXPUNGE',
-                client.commandTimeoutMs
-              ),
-              'EXPUNGE'
+                connection
+              )
             );
             audit('delete', { mailbox: source, uids });
             return jsonResult({ action: 'deleted', mailbox: source, uids });
@@ -600,15 +624,22 @@ export function registerWriteTools(
           }
         }
 
+        const details = { mailbox, new_name };
         return client.withConnection(mcp.mcpReq.signal, async (connection) => {
           if (action === 'create') {
-            const created = requireOk(
-              await withTimeout(
-                connection.mailboxCreate(mailbox),
-                'CREATE',
-                client.commandTimeoutMs
-              ),
-              'CREATE'
+            const created = await auditedWrite(
+              'mailbox_create',
+              details,
+              async () =>
+                requireOk(
+                  await withTimeout(
+                    connection.mailboxCreate(mailbox),
+                    'CREATE',
+                    client.commandTimeoutMs
+                  ),
+                  'CREATE',
+                  connection
+                )
             );
             // imapflow turns ALREADYEXISTS into a normal answer. Nothing was
             // made, so there is nothing to put in the audit log either.
@@ -621,16 +652,20 @@ export function registerWriteTools(
               });
             }
           } else if (action === 'rename') {
-            await withTimeout(
-              connection.mailboxRename(mailbox, new_name as string),
-              'RENAME',
-              client.commandTimeoutMs
+            await auditedWrite('mailbox_rename', details, () =>
+              withTimeout(
+                connection.mailboxRename(mailbox, new_name as string),
+                'RENAME',
+                client.commandTimeoutMs
+              )
             );
           } else {
-            await withTimeout(
-              connection.mailboxDelete(mailbox),
-              'DELETE',
-              client.commandTimeoutMs
+            await auditedWrite('mailbox_delete', details, () =>
+              withTimeout(
+                connection.mailboxDelete(mailbox),
+                'DELETE',
+                client.commandTimeoutMs
+              )
             );
           }
           audit(`mailbox_${action}`, { mailbox, new_name });
@@ -745,22 +780,26 @@ export function registerWriteTools(
             const kept = ['\\Draft', '\\Seen'].filter((flag) =>
               canStoreFlag(permanentFlags, flag)
             );
-            await withTimeout(
-              connection.append(folder, draft, kept),
-              'APPEND',
-              client.commandTimeoutMs
+            const details = {
+              mailbox: folder,
+              recipients: to.length + (cc?.length ?? 0) + (bcc?.length ?? 0),
+              in_reply_to: thread?.messageId,
+            };
+            await auditedWrite('save_draft', details, () =>
+              withTimeout(
+                connection.append(folder, draft, kept),
+                'APPEND',
+                client.commandTimeoutMs
+              )
             );
+            // Here, not after the call: a call cancelled now has still stored the draft.
+            audit('save_draft', details);
             return kept;
           }
         );
         const dropped = ['\\Draft', '\\Seen'].filter(
           (flag) => !flags.includes(flag)
         );
-        audit('save_draft', {
-          mailbox: folder,
-          recipients: to.length + (cc?.length ?? 0) + (bcc?.length ?? 0),
-          in_reply_to: thread?.messageId,
-        });
         // The folder name is the server's, or a colleague's on a shared
         // account: it goes back the way list_mailboxes returns one, the exact
         // handle beside a sanitised copy, under the untrusted marker, and never

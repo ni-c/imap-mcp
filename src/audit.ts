@@ -1,4 +1,5 @@
 import { escapeInvisible } from './analyze.js';
+import { mayHaveRun } from './imap.js';
 
 /**
  * Records every change this server makes to the mailbox.
@@ -23,6 +24,20 @@ import { escapeInvisible } from './analyze.js';
  * string value is quoted and escaped on the way out — see {@link escapeInvisible}
  * and {@link format}. What cannot be seen must not be written here.
  */
+/** Runs an audited write; one that may or may not have happened is logged with `outcome=unknown`. */
+export async function auditedWrite<T>(
+  operation: string,
+  details: Record<string, unknown>,
+  write: () => Promise<T>
+): Promise<T> {
+  try {
+    return await write();
+  } catch (error) {
+    if (mayHaveRun(error)) audit(operation, { ...details, outcome: 'unknown' });
+    throw error;
+  }
+}
+
 export function audit(
   operation: string,
   details: Record<string, unknown>

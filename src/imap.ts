@@ -54,6 +54,8 @@ export function canStoreFlag(
 }
 
 export interface ImapConnection {
+  /** imapflow's own flag; false once the connection is gone. */
+  readonly usable: boolean;
   connect(): Promise<void>;
   logout(): Promise<void>;
   close(): void;
@@ -156,6 +158,9 @@ const defaultFactory: ImapClientFactory = (config) =>
     socketTimeout: socketTimeoutFor(config),
   }) as unknown as ImapConnection;
 
+/** Upper bound on the raw message pulled for a single `get_message`. */
+export const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
+
 /** imapflow's own idle timeout, which ends a silent command as a dropped connection. */
 const IMAPFLOW_SOCKET_TIMEOUT_MS = 5 * 60_000;
 
@@ -167,7 +172,8 @@ export function socketTimeoutFor(config: ImapConfig): number {
   const largestPart = Math.max(
     config.maxAttachmentBytes,
     config.maxDownloadBytes,
-    config.maxExtractBytes
+    config.maxExtractBytes,
+    MAX_SOURCE_BYTES
   );
   const longest = downloadDeadline(largestPart, config.commandTimeoutMs);
   return Math.min(
@@ -212,6 +218,27 @@ export const COMMAND_TIMEOUT = 'COMMAND_TIMEOUT';
 
 /** The code of a call the client gave up on; handled like a timeout once a command is in flight. */
 export const CANCELLED = 'CANCELLED';
+
+/** The code of a call that waited out its deadline behind another call's mailbox lock. */
+export const MAILBOX_BUSY = 'MAILBOX_BUSY';
+
+/** The code of a call whose connection was set aside while it waited; nothing was sent, so it is retried. */
+const RETIRED = 'RETIRED';
+
+/** The calls working on one connection, each counted until its work has settled. */
+interface Usage {
+  holders: number;
+  lockless: number;
+  /** Detached from new calls; closed once the last call on it is done. */
+  retired: boolean;
+  /** Calls waiting here for a mailbox lock, sent elsewhere once the connection is retired. */
+  waiters: Set<(error: MailError) => void>;
+}
+
+/** One attempt of a call: how many of its writes may have reached the server. */
+interface Attempt {
+  sent: number;
+}
 
 /**
  * How long a refused connection attempt is answered from memory.
@@ -278,6 +305,9 @@ export interface MailboxListing {
 export class ImapClient {
   private connection: ImapConnection | undefined;
   private connecting: Promise<ImapConnection> | undefined;
+  private readonly usage = new WeakMap<ImapConnection, Usage>();
+  /** Connections set aside while calls still worked on them; closed with the client too. */
+  private readonly retired = new Set<ImapConnection>();
   /**
    * The last refused connection attempt, answered from memory for
    * {@link LOGIN_COOLDOWN_MS}. Deliberately not cleared by {@link forget}: the
@@ -389,7 +419,7 @@ export class ImapClient {
     try {
       return await this.run(path, readOnly, signal, fn);
     } catch (error) {
-      if (!this.retryable(error, readOnly, started)) throw error;
+      if (!this.retryable(error, started)) throw error;
       return await this.run(path, readOnly, signal, fn);
     }
   }
@@ -401,14 +431,28 @@ export class ImapClient {
     fn: (client: ImapConnection, path: string) => Promise<T>
   ): Promise<T> {
     throwIfCancelled(signal);
-    // Stops waiting, not connecting: the connect is shared with every other caller.
-    const client = await unlessCancelled(this.openConnection(), signal);
+    const client = await this.connectionFor(signal);
+    const usage = this.usageOf(client);
+    const attempt: Attempt = { sent: 0 };
     const ms = this.commandTimeoutMs;
     let locking: Promise<{ release(): void }> | undefined;
     let lock: { release(): void } | undefined;
+    let leave: (() => void) | undefined;
+    let work: Promise<T> | undefined;
+    let moved!: (error: MailError) => void;
+    const elsewhere = new Promise<never>((_resolve, reject) => {
+      moved = reject;
+    });
+    usage.waiters.add(moved);
     try {
       locking = client.getMailboxLock(path, { readOnly });
-      lock = await withTimeout(unlessCancelled(locking, signal), 'SELECT', ms);
+      lock = await withTimeout(
+        unlessCancelled(Promise.race([locking, elsewhere]), signal),
+        'SELECT',
+        ms
+      );
+      usage.waiters.delete(moved);
+      leave = this.enter(client, 'holders');
       // A NOOP before SEARCH: without it the server is free to keep reporting
       // the mailbox as it looked when the connection was opened, and mail that
       // arrived since then stays invisible.
@@ -418,26 +462,66 @@ export class ImapClient {
       if (client.mailbox === false) {
         throw new MailError('The IMAP connection was lost', 'NoConnection');
       }
-      return await unlessCancelled(fn(client, path), signal);
+      work = fn(guard(client, signal, attempt), path);
+      return await unlessCancelled(work, signal);
     } catch (error) {
+      usage.waiters.delete(moved);
       const mailError = asMailError(error);
-      if (mailError.code === CANCELLED && lock === undefined) {
-        // Queued behind another call: its command is left alone, the lock handed back once granted.
-        locking?.then(
-          (granted) => granted.release(),
-          () => undefined
-        );
-      } else if (
-        mailError.code === COMMAND_TIMEOUT ||
-        mailError.code === CANCELLED ||
-        isConnectionError(mailError)
-      ) {
+      if (lock === undefined) {
+        throw marked(this.failedWaiting(client, mailError, locking), attempt);
+      }
+      if (mailError.code === CANCELLED) {
+        this.abandon(client, this.active(client) - 1);
+      } else if (mailError.code === COMMAND_TIMEOUT || isLost(mailError)) {
+        // Gone, or past its own deadline: whatever was sent ahead of it expired first.
         this.forget(client);
       }
-      throw mailError;
+      throw marked(mailError, attempt);
     } finally {
-      lock?.release();
+      if (lock !== undefined) {
+        const held = lock;
+        const done = () => {
+          held.release();
+          leave?.();
+        };
+        // Held until a cancelled call's command is done: a SELECT slipping in would move its EXPUNGE.
+        if (work === undefined) done();
+        else work.then(done, done);
+      }
     }
+  }
+
+  /** A call that never got its lock; what is on the wire belongs to someone else unless nobody is here. */
+  private failedWaiting(
+    client: ImapConnection,
+    error: MailError,
+    locking: Promise<{ release(): void }> | undefined
+  ): MailError {
+    const giveBack = () =>
+      locking?.then(
+        (granted) => granted.release(),
+        () => undefined
+      );
+    if (error.code === RETIRED) {
+      giveBack();
+      return error;
+    }
+    if (error.code !== CANCELLED && error.code !== COMMAND_TIMEOUT) {
+      if (isLost(error)) this.forget(client);
+      return error;
+    }
+    giveBack();
+    if (this.usageOf(client).holders > 0) {
+      return error.code === CANCELLED
+        ? error
+        : new MailError(
+            `Another call held the mailbox for ${describeSeconds(this.commandTimeoutMs)}, ` +
+              'so this one gave up before sending anything',
+            MAILBOX_BUSY
+          );
+    }
+    this.abandon(client, this.active(client));
+    return error;
   }
 
   /** Runs `fn` without selecting a mailbox, for LIST/STATUS/CREATE style calls. */
@@ -446,51 +530,66 @@ export class ImapClient {
     fn: (client: ImapConnection) => Promise<T>
   ): Promise<T> {
     const started = Date.now();
-    const attempt = async (): Promise<T> => {
+    const once = async (): Promise<T> => {
       throwIfCancelled(signal);
-      const client = await unlessCancelled(this.openConnection(), signal);
+      const client = await this.connectionFor(signal);
+      const attempt: Attempt = { sent: 0 };
+      const leave = this.enter(client, 'lockless');
+      let work: Promise<T> | undefined;
       try {
-        return await unlessCancelled(fn(client), signal);
+        work = fn(guard(client, signal, attempt));
+        return await unlessCancelled(work, signal);
       } catch (error) {
         const mailError = asMailError(error);
-        if (
-          mailError.code === COMMAND_TIMEOUT ||
-          mailError.code === CANCELLED ||
-          isConnectionError(mailError)
-        ) {
+        if (mailError.code === CANCELLED) {
+          this.abandon(client, this.active(client) - 1);
+        } else if (mailError.code === COMMAND_TIMEOUT || isLost(mailError)) {
           this.forget(client);
         }
-        throw mailError;
+        throw marked(mailError, attempt);
+      } finally {
+        if (work === undefined) leave();
+        else work.then(leave, leave);
       }
     };
     try {
-      return await attempt();
+      return await once();
     } catch (error) {
-      if (!this.retryable(error, false, started)) throw error;
-      return await attempt();
+      if (!this.retryable(error, started)) throw error;
+      return await once();
     }
+  }
+
+  /** The shared connection, or a fresh one if it was set aside while this call waited for it. */
+  private async connectionFor(
+    signal: AbortSignal | undefined
+  ): Promise<ImapConnection> {
+    // Stops waiting, not connecting: the connect is shared with every other caller.
+    const client = await unlessCancelled(this.openConnection(), signal);
+    if (!this.usageOf(client).retired) return client;
+    return unlessCancelled(this.openConnection(), signal);
   }
 
   /**
    * Whether a failed call gets its one retry: only a connection that dropped
    * under it. Never this server's own command timeout — the command may have
    * run on the server — and never a connect that was itself refused during
-   * this call, which the retry would only answer from memory.
+   * this call, which the retry would only answer from memory. Never once a
+   * write of the call may have reached the server.
    */
-  private retryable(
-    error: unknown,
-    readOnly: boolean,
-    started: number
-  ): boolean {
+  private retryable(error: unknown, started: number): boolean {
     if (error instanceof ToolInputError) return false;
     const mailError = asMailError(error);
-    if (mailError.code === COMMAND_TIMEOUT || mailError.code === CANCELLED) {
+    if (
+      mailError.code === COMMAND_TIMEOUT ||
+      mailError.code === CANCELLED ||
+      mailError.code === MAILBOX_BUSY
+    ) {
       return false;
     }
     if (this.refused !== undefined && this.refused.at >= started) return false;
     return (
-      isConnectionError(mailError) ||
-      (readOnly && READ_RETRY_CODES.has(mailError.code ?? ''))
+      (isLost(mailError) || mailError.code === RETIRED) && mailError.neverSent
     );
   }
 
@@ -503,6 +602,68 @@ export class ImapClient {
     if (client === undefined) return;
     closeQuietly(client);
     if (this.connection === client) this.connection = undefined;
+    this.retired.delete(client);
+  }
+
+  /** After a call gave up: closed at once if nobody else works on it, else set aside until they are done. */
+  private abandon(client: ImapConnection, others: number): void {
+    if (others <= 0) {
+      this.forget(client);
+      return;
+    }
+    if (this.connection === client) this.connection = undefined;
+    const usage = this.usageOf(client);
+    usage.retired = true;
+    this.retired.add(client);
+    for (const move of usage.waiters) {
+      move(
+        new MailError(
+          'The connection was set aside while this call waited for the mailbox',
+          RETIRED,
+          '',
+          { neverSent: true }
+        )
+      );
+    }
+    usage.waiters.clear();
+    this.closeIfIdle(client);
+  }
+
+  /** Counts a call on a connection until the returned function is called, once. */
+  private enter(
+    client: ImapConnection,
+    role: 'holders' | 'lockless'
+  ): () => void {
+    const usage = this.usageOf(client);
+    usage[role] += 1;
+    let left = false;
+    return () => {
+      if (left) return;
+      left = true;
+      usage[role] -= 1;
+      this.closeIfIdle(client);
+    };
+  }
+
+  private closeIfIdle(client: ImapConnection): void {
+    const usage = this.usageOf(client);
+    if (usage.retired && usage.holders + usage.lockless === 0) {
+      this.forget(client);
+    }
+  }
+
+  private active(client: ImapConnection): number {
+    const usage = this.usageOf(client);
+    return usage.holders + usage.lockless;
+  }
+
+  private usageOf(client: ImapConnection): Usage {
+    let usage = this.usage.get(client);
+    if (usage === undefined) {
+      usage = { holders: 0, lockless: 0, retired: false, waiters: new Set() };
+      this.usage.set(client, usage);
+    }
+    return usage;
   }
 
   async listMailboxes(
@@ -541,7 +702,10 @@ export class ImapClient {
             const status = await withTimeout(
               client.status(entry.path, statusQuery),
               'STATUS',
-              this.commandTimeoutMs
+              Math.max(
+                1,
+                Math.min(this.commandTimeoutMs, deadline - Date.now())
+              )
             );
             // imapflow answers a refused STATUS with false, not with an error.
             if (status === false) {
@@ -559,7 +723,11 @@ export class ImapClient {
           }
         }
       }
-      if (stalled) this.forget(client);
+      if (stalled) {
+        // That STATUS is still queued; the calls around it are left to finish.
+        const connection = unguarded(client);
+        this.abandon(connection, this.active(connection) - 1);
+      }
       return {
         mailboxes: entries.map((entry) => ({
           path: entry.path,
@@ -727,7 +895,8 @@ export class ImapClient {
         'STORE',
         this.commandTimeoutMs
       ),
-      'STORE'
+      'STORE',
+      client
     );
   }
 
@@ -767,6 +936,8 @@ export class ImapClient {
     // A connect still in flight would otherwise set `this.connection` after
     // the close and keep the session open.
     await this.connecting?.catch(() => undefined);
+    for (const retired of this.retired) closeQuietly(retired);
+    this.retired.clear();
     // Held locally: a logout ends in a 'close' event, which already clears
     // `this.connection` before a failed logout gets to the fallback.
     const connection = this.connection;
@@ -790,9 +961,18 @@ export class ImapClient {
  */
 export function requireOk<T>(
   result: T | false | undefined | null,
-  command: string
+  command: string,
+  connection?: Pick<ImapConnection, 'usable'>
 ): T {
   if (result === false || result === undefined || result === null) {
+    // imapflow answers a command its connection dropped under with `false` as well.
+    if (connection?.usable === false) {
+      throw new MailError(
+        `IMAP ${command} lost its connection before the server answered, so it ` +
+          'may have been carried out or not — check the mailbox before trying again.',
+        'NoConnection'
+      );
+    }
     throw new MailError(
       `IMAP ${command} was refused by the mail server, so the change was not ` +
         'made in full. List the mailbox to see what state it is in before ' +
@@ -922,6 +1102,71 @@ function throwIfCancelled(signal: AbortSignal | undefined): void {
   if (signal?.aborted === true) throw cancelledError();
 }
 
+const guarded = new WeakMap<ImapConnection, ImapConnection>();
+
+/** What a call's `fn` works on: nothing goes out once it is cancelled, and every write it starts is counted. */
+function guard(
+  client: ImapConnection,
+  signal: AbortSignal | undefined,
+  attempt: Attempt
+): ImapConnection {
+  const proxy = new Proxy(client, {
+    get(target, property) {
+      const value: unknown = Reflect.get(target, property, target);
+      if (typeof value !== 'function') return value;
+      const write = typeof property === 'string' && WRITES.has(property);
+      return (...args: unknown[]) => {
+        throwIfCancelled(signal);
+        const result: unknown = (
+          value as (...rest: unknown[]) => unknown
+        ).apply(target, args);
+        if (write) {
+          attempt.sent += 1;
+          if (result instanceof Promise) {
+            result.catch((error: unknown) => {
+              if (rejectedBeforeSending(error)) attempt.sent -= 1;
+            });
+          }
+        }
+        return result;
+      };
+    },
+  });
+  guarded.set(proxy, client);
+  return proxy;
+}
+
+function unguarded(connection: ImapConnection): ImapConnection {
+  return guarded.get(connection) ?? connection;
+}
+
+function rejectedBeforeSending(error: unknown): boolean {
+  const site = (error as { rejectedFrom?: unknown } | null)?.rejectedFrom;
+  return typeof site === 'string' && NEVER_SENT.has(site);
+}
+
+/** The connection is gone, whichever way imapflow says so. */
+function isLost(error: MailError): boolean {
+  return isConnectionError(error) || READ_RETRY_CODES.has(error.code ?? '');
+}
+
+/** Marks an error of an attempt none of whose writes reached the server. */
+function marked(error: MailError, attempt: Attempt): MailError {
+  if (attempt.sent > 0 || error.neverSent) return error;
+  return new MailError(error.message, error.code, error.responseText, {
+    neverSent: true,
+  });
+}
+
+/** Whether a failed write may still have been carried out on the server. */
+export function mayHaveRun(error: unknown): boolean {
+  if (error instanceof ToolInputError || rejectedBeforeSending(error)) {
+    return false;
+  }
+  const mailError = asMailError(error);
+  return mailError.code === COMMAND_TIMEOUT || isLost(mailError);
+}
+
 function cancelledError(): MailError {
   return new MailError('The client cancelled this call', CANCELLED);
 }
@@ -946,6 +1191,30 @@ const READ_RETRY_CODES = new Set([
   'StateLogout',
   'ETIMEOUT',
   'ECONNABORTED',
+]);
+
+/** Where imapflow rejects a command it never put on the wire. */
+const NEVER_SENT = new Set([
+  'execClosed',
+  'execNoSocket',
+  'noSocket',
+  'writeNoSocket',
+  'writeAfterLogout',
+  'sendAfterLogout',
+  'preCheckWaiter',
+]);
+
+/** The methods of a connection that change the mailbox. */
+const WRITES = new Set([
+  'append',
+  'messageFlagsAdd',
+  'messageFlagsRemove',
+  'messageMove',
+  'messageCopy',
+  'messageDelete',
+  'mailboxCreate',
+  'mailboxRename',
+  'mailboxDelete',
 ]);
 
 function closeQuietly(client: ImapConnection): void {

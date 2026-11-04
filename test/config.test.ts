@@ -402,3 +402,44 @@ describe('IMAP_COMMAND_TIMEOUT_SECONDS', () => {
     ).not.toContain('30 seconds');
   });
 });
+
+describe('IMAP_TRUSTED_AUTHSERV_ID', () => {
+  // CodeQL (js/clear-text-logging, alert 8) reads this variable as a credential
+  // because of "AUTH" in its name. Its refusal therefore carries nothing derived
+  // from the value — not the value, and not its length either.
+  it.each([
+    'mx.example net',
+    'mx.example.net:25',
+    'https://mx.example.net',
+    'm'.repeat(254),
+  ])('refuses %j without a word about the value', (raw) => {
+    const message = refuses({ IMAP_TRUSTED_AUTHSERV_ID: raw });
+    expect(message).toContain('IMAP_TRUSTED_AUTHSERV_ID');
+    expect(message).toContain('plain hostname');
+    expect(message).not.toContain('character');
+    expect(message).not.toMatch(/\d/);
+    expect(message).not.toContain(raw);
+  });
+
+  it.each(['mx.example.net', '192.0.2.1', '2001:db8::1', 'm'.repeat(253)])(
+    'accepts %j',
+    (raw) => {
+      expect(
+        loadConfig(env({ IMAP_TRUSTED_AUTHSERV_ID: raw })).imap
+          .trustedAuthservId
+      ).toBe(raw);
+    }
+  );
+
+  it.each(['', '   '])('treats %j as unset', (raw) => {
+    expect(
+      loadConfig(env({ IMAP_TRUSTED_AUTHSERV_ID: raw })).imap.trustedAuthservId
+    ).toBeUndefined();
+  });
+
+  it('still describes a refused IMAP_HOST by its length', () => {
+    expect(refuses({ IMAP_HOST: 'imap.example.net:993' })).toContain(
+      'a 20-character value'
+    );
+  });
+});

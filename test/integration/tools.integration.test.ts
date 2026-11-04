@@ -1,4 +1,5 @@
 import { readdir } from 'node:fs/promises';
+import { createConnection, createServer, type AddressInfo } from 'node:net';
 
 import {
   expectEveryToolDeclaresOutputSchema,
@@ -401,6 +402,105 @@ describe('the refusals, against a server that would have obeyed', () => {
     // And nothing reached the directory the operator named.
     const files = await readdir(sandbox.downloadDir);
     expect(files.some((name) => name.includes('Rechnung'))).toBe(false);
+  });
+});
+
+/**
+ * Sits between a server and GreenMail and holds back the first server answer
+ * that matches `answer` once armed — the command has run, its reply has not
+ * arrived — so a second call can be made while it is on the wire.
+ */
+async function holdingProxy(answer: RegExp, ms: number) {
+  let armed = false;
+  let caught!: () => void;
+  const holding = new Promise<void>((resolve) => {
+    caught = resolve;
+  });
+  const proxy = createServer((down) => {
+    const up = createConnection({
+      host: '127.0.0.1',
+      port: Number(sandbox.env.IMAP_PORT),
+    });
+    let waiting = false;
+    const queued: Buffer[] = [];
+    down.on('data', (chunk) => up.write(chunk));
+    up.on('data', (chunk: Buffer) => {
+      if (!waiting && armed && answer.test(chunk.toString('latin1'))) {
+        armed = false;
+        waiting = true;
+        queued.push(chunk);
+        caught();
+        setTimeout(() => {
+          waiting = false;
+          for (const held of queued.splice(0)) {
+            if (!down.destroyed) down.write(held);
+          }
+        }, ms);
+        return;
+      }
+      if (waiting) queued.push(chunk);
+      else if (!down.destroyed) down.write(chunk);
+    });
+    const end = () => {
+      down.destroy();
+      up.destroy();
+    };
+    for (const socket of [down, up]) {
+      socket.on('error', end);
+      socket.on('close', end);
+    }
+  });
+  await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+  return {
+    port: (proxy.address() as AddressInfo).port,
+    arm: () => {
+      armed = true;
+    },
+    holding,
+    close: () => proxy.close(),
+  };
+}
+
+describe('a call the client cancels, against a real imapflow', () => {
+  // imapflow keeps one command on the wire and queues the others behind it. A
+  // cancelled list_mailboxes whose LIST waited behind a save_draft's APPEND
+  // used to close the shared connection; imapflow rejected the APPEND, which
+  // had already been stored, and it was sent a second time.
+  it('leaves exactly one draft when a listing queued behind it is cancelled', async () => {
+    const proxy = await holdingProxy(/^\S+ OK[^\r\n]*APPEND/im, 2_000);
+    const held = await startServer({
+      env: { ...sandbox.env, IMAP_PORT: String(proxy.port) },
+    });
+    try {
+      await held.call('list_mailboxes');
+      const subject = `Cancelled listing ${Date.now()}`;
+      proxy.arm();
+      const draft = held.call('save_draft', {
+        to: ['someone@example.net'],
+        subject,
+        body: 'Stored once.',
+      });
+      await proxy.holding;
+      const controller = new AbortController();
+      const listing = held.client
+        .callTool(
+          { name: 'list_mailboxes', arguments: {} },
+          { signal: controller.signal }
+        )
+        .catch(() => 'cancelled');
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      controller.abort();
+      await Promise.all([draft, listing]);
+      const drafts = parse<Listing>(
+        await plain.call('list_messages', { mailbox: 'Drafts', limit: 50 })
+      );
+      expect(drafts.messages.filter((m) => m.subject === subject)).toHaveLength(
+        1
+      );
+    } finally {
+      await held.close();
+      proxy.close();
+    }
   });
 });
 

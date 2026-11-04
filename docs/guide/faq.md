@@ -27,3 +27,10 @@ rather than unreachable — a `body` search over a large folder is the usual cas
 raise `IMAP_COMMAND_TIMEOUT_SECONDS`, and check your client's own deadline first; see
 [slow servers](/guide/configuration#slow-servers). If even a small folder times out,
 the server is not answering, and more time will not help.
+
+## A call fails with `MAILBOX_BUSY`
+
+Another call was using the same mailbox for longer than `IMAP_COMMAND_TIMEOUT_SECONDS`
+allows, so this one gave up before sending anything — trying again is safe. If it keeps
+happening, a slow command such as a `body` search or a large download is holding the
+mailbox; see [slow servers](/guide/configuration#slow-servers).

@@ -211,15 +211,25 @@ possible.
 20-second budget and lists the rest without them, counted in the answer. imapflow's own fallback is
 one STATUS per folder with no ceiling, and the command timeout around the call does not stop the
 commands: they run to the end of the list on the same connection, and every later call waits.
-A STATUS that outlives the command timeout ends the fallback too, and the connection is closed
-once the listing is assembled, since that STATUS is still queued on it.
+A STATUS gets at most what is left of that budget. One that outlives its deadline ends the
+fallback too, and the connection is closed once the listing is assembled — or, if another call is
+still working on it, once that call is done — since that STATUS is still queued on it.
 
 `IMAP_COMMAND_TIMEOUT_SECONDS` is a whole number from 1 to 600. Past 600 the server refuses to
 start instead of clamping, so a value typed in milliseconds does not quietly become a deadline of
 hours. imapflow's own idle timer is set past the longest deadline this server sets: it ends a
 silent command as a dropped connection, a dropped read is retried, and the retry would turn one
-abandoned command into two. A call the client cancels is ended like one that ran out of time once
-its command is on the wire, so an abandoned search does not hold the mailbox for the next call.
+abandoned command into two.
+
+Calls share one IMAP connection, and imapflow keeps one command on the wire with the others queued
+behind it; closing the connection ends all of them, and imapflow reports the one on the wire and
+the queued ones with the same `NoConnection`. So a call the client cancels stops at once and sends
+nothing further, but the connection is closed at once only when no other call is working on it.
+Otherwise it is detached — new calls get a fresh one, so an abandoned search does not hold the
+mailbox for the next call — and closed when the last call on it is done. A call that only waited
+for the mailbox lock another call holds gives up with `MAILBOX_BUSY` and closes nothing. A write
+is repeated after a lost connection only when nothing of it was sent; when the command may have
+gone out, the error says so and the audit log records the attempt with `outcome=unknown`.
 
 ## Attachments
 

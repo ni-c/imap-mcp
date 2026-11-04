@@ -11,6 +11,7 @@ import {
   canStoreFlag,
   collectFetch,
   downloadDeadline,
+  MAX_SOURCE_BYTES,
   normalizeFlag,
   socketTimeoutFor,
   withTimeout,
@@ -445,9 +446,32 @@ describe('connection hardening', () => {
     await expect(
       client.withMailbox('INBOX', true, undefined, closedOnce())
     ).resolves.toBe('done');
+    // A STORE that may have reached the server is not sent a second time.
+    const add = fake.messageFlagsAdd.bind(fake);
+    let stores = 0;
+    fake.messageFlagsAdd = async (...args) => {
+      stores += 1;
+      if (stores === 1) {
+        throw Object.assign(new Error('Connection not available'), {
+          code: 'EConnectionClosed',
+        });
+      }
+      return add(...args);
+    };
+    await expect(
+      client.withMailbox('INBOX', false, undefined, (connection) =>
+        connection.messageFlagsAdd([1], ['\\Flagged'], { uid: true })
+      )
+    ).rejects.toMatchObject({ code: 'EConnectionClosed' });
+    expect(stores).toBe(1);
+  });
+
+  it('asks a write call again when none of its writes had gone out', async () => {
+    const fake = new FakeImap(boxes());
+    const client = new ImapClient(testConfig(), () => fake);
     await expect(
       client.withMailbox('INBOX', false, undefined, closedOnce())
-    ).rejects.toMatchObject({ code: 'EConnectionClosed' });
+    ).resolves.toBe('done');
   });
 
   it('counts a STATUS the server refused as omitted', async () => {
@@ -925,6 +949,19 @@ describe('the idle timer handed to imapflow', () => {
     }
   );
 
+  it('outlasts the get_message fetch when every byte limit is smaller', () => {
+    const config = testConfig();
+    Object.assign(config.imap, {
+      commandTimeoutMs: 600_000,
+      maxAttachmentBytes: 1024 * 1024,
+      maxDownloadBytes: 1024 * 1024,
+      maxExtractBytes: 1024 * 1024,
+    });
+    expect(socketTimeoutFor(config.imap)).toBeGreaterThan(
+      downloadDeadline(MAX_SOURCE_BYTES, 600_000)
+    );
+  });
+
   it('never asks for more than a timer can hold', () => {
     expect(idleFor(30_000, { maxDownloadBytes: 2 ** 40 })).toBe(2 ** 31 - 1);
   });
@@ -1100,7 +1137,100 @@ describe('a call the client cancels', () => {
   });
 });
 
+// The fallback has a budget of its own (STATUS_BUDGET_MS, 20 s). A command
+// timeout raised past it must not stretch the listing: each STATUS gets what
+// is left of the budget, or the command timeout if that is shorter.
+function statusFixture(answer: (calls: number) => Promise<never | false>) {
+  const fake = new FakeImap([
+    { path: 'INBOX', messages: [message(1)] },
+    { path: 'Archive', messages: [] },
+    { path: 'Sent', messages: [] },
+  ]);
+  fake.capabilities.delete('LIST-STATUS');
+  let statuses = 0;
+  fake.status = () => {
+    statuses += 1;
+    return answer(statuses);
+  };
+  return { fake, statuses: () => statuses };
+}
+
 describe('a STATUS past its deadline', () => {
+  it.each([
+    [60_000, 20_000],
+    [600_000, 20_000],
+    [20_001, 20_000],
+  ])(
+    'with a %i ms command timeout gives up at the %i ms budget',
+    async (commandTimeoutMs, budget) => {
+      vi.useFakeTimers();
+      try {
+        const { fake, statuses } = statusFixture(
+          () => new Promise<never>(() => {})
+        );
+        const config = testConfig();
+        config.imap.commandTimeoutMs = commandTimeoutMs;
+        const client = new ImapClient(config, () => fake);
+        let omitted: number | undefined;
+        void client.listMailboxes(undefined).then((listing) => {
+          omitted = listing.statusOmitted;
+        });
+        await vi.advanceTimersByTimeAsync(budget - 1);
+        expect(omitted).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(2);
+        expect(statuses()).toBe(1);
+        expect(omitted).toBe(3);
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  );
+
+  it('gives a later STATUS only what is left of the budget', async () => {
+    vi.useFakeTimers();
+    try {
+      // The first STATUS is refused after 15 s, the second never answers: it
+      // gets the remaining 5 s, not another 30.
+      const { fake, statuses } = statusFixture((calls) =>
+        calls === 1
+          ? new Promise<false>((resolve) => {
+              setTimeout(() => resolve(false), 15_000);
+            })
+          : new Promise<never>(() => {})
+      );
+      const client = new ImapClient(testConfig(), () => fake);
+      let omitted: number | undefined;
+      void client.listMailboxes(undefined).then((listing) => {
+        omitted = listing.statusOmitted;
+      });
+      await vi.advanceTimersByTimeAsync(19_999);
+      expect(omitted).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(2);
+      expect(statuses()).toBe(2);
+      expect(omitted).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a command timeout shorter than the budget', async () => {
+    vi.useFakeTimers();
+    try {
+      const { fake } = statusFixture(() => new Promise<never>(() => {}));
+      const config = testConfig();
+      config.imap.commandTimeoutMs = 5_000;
+      const client = new ImapClient(config, () => fake);
+      let omitted: number | undefined;
+      void client.listMailboxes(undefined).then((listing) => {
+        omitted = listing.statusOmitted;
+      });
+      await vi.advanceTimersByTimeAsync(5_001);
+      expect(omitted).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('ends the STATUS fallback and closes the connection after the listing', async () => {
     vi.useFakeTimers();
     try {

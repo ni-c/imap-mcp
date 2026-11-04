@@ -215,8 +215,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     assertMailboxName(draftsMailbox, 'IMAP_DRAFTS_MAILBOX');
   }
   const trustedAuthservId = env.IMAP_TRUSTED_AUTHSERV_ID?.trim() || undefined;
-  if (trustedAuthservId !== undefined) {
-    assertSafeHost(trustedAuthservId, 'IMAP_TRUSTED_AUTHSERV_ID');
+  if (trustedAuthservId !== undefined && !isSafeHost(trustedAuthservId)) {
+    // Not even its length: CodeQL reads any trace of this value as a credential.
+    console.error(
+      'imap-mcp: IMAP_TRUSTED_AUTHSERV_ID must be a plain hostname or IP ' +
+        'address without scheme, port, credentials or whitespace'
+    );
+    process.exit(1);
   }
 
   const config: Config = {
@@ -495,7 +500,7 @@ function normalizeHost(value: string, name: string): string {
     if (!isIPv6(unbracketed)) failHost(value, name);
     return unbracketed;
   }
-  assertSafeHost(value, name);
+  if (!isSafeHost(value)) failHost(value, name);
   return value;
 }
 
@@ -507,21 +512,14 @@ function failHost(value: string, name: string): never {
   process.exit(1);
 }
 
-function assertSafeHost(value: string, name: string): void {
+function isSafeHost(value: string): boolean {
   // A hostname or IPv4 address — or an IPv6 address, which is the only place
   // a colon is legal. Allowing ":" everywhere would silently accept
   // "imap.example.net:993", which the error message promises to reject.
   // The length is checked first: nothing below walks a value longer than a
   // hostname can be.
-  const hostname = /^[A-Za-z0-9._-]+$/.test(value);
-  const ipv6 = value.length <= MAX_HOST_LENGTH && isIPv6(value);
-  if (value.length > MAX_HOST_LENGTH || (!hostname && !ipv6)) {
-    console.error(
-      `imap-mcp: ${name} must be a plain hostname or IP address without ` +
-        `scheme, port, credentials or whitespace (got ${describeValue(value)})`
-    );
-    process.exit(1);
-  }
+  if (value.length > MAX_HOST_LENGTH) return false;
+  return /^[A-Za-z0-9._-]+$/.test(value) || isIPv6(value);
 }
 
 /** Spaces are fine in a mailbox name; a line break would end the command. */
