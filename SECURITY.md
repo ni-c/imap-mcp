@@ -377,7 +377,8 @@ it calls the five functions named above and nothing else, and `test/review.test.
 unpdf 1.9.0 and with it PDF.js 6.4.299, outside the range; no published advisory covers that
 version. unpdf 1.9.1, a metadata fix, still bundles PDF.js 6.4.299 (checked 2026-10-26 against
 the advisory database: no `pdfjs-dist` advisory covers it), and so does unpdf 2.1.0, which 0.6.0
-ships (checked 2026-11-02, same result). The call-set test stays, because the next advisory will
+ships (checked 2026-11-02, same result). unpdf 2.2.1 moves to PDF.js 6.5.438, which no
+`pdfjs-dist` advisory covers either (checked 2026-11-23). The call-set test stays, because the next advisory will
 not announce itself either. The
 same test pins the bundled PDF.js version, so the next unpdf release fails it and this paragraph
 is revisited rather than outlived.
