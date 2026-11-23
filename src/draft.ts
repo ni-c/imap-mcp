@@ -16,6 +16,8 @@ export interface DraftInput {
   bcc?: string[];
   subject: string;
   body: string;
+  /** An HTML alternative to `body`; the draft becomes multipart/alternative. */
+  html?: string;
   thread?: ThreadHeaders;
   /** Injected by the tests; real calls stamp the current time. */
   date?: Date;
@@ -73,26 +75,56 @@ export function buildDraft(input: DraftInput): Buffer {
   }
 
   headers.push(['MIME-Version', '1.0']);
-  headers.push(['Content-Type', 'text/plain; charset=utf-8']);
-  headers.push(['Content-Transfer-Encoding', 'base64']);
+
+  let content: string;
+  if (input.html === undefined) {
+    headers.push(['Content-Type', 'text/plain; charset=utf-8']);
+    headers.push(['Content-Transfer-Encoding', 'base64']);
+    content = encodeBody(input.body);
+  } else {
+    // Both parts are base64, whose alphabet has no "-", so no line of either
+    // can be mistaken for the boundary.
+    const boundary = `----=_imap-mcp_${randomUUID()}`;
+    headers.push([
+      'Content-Type',
+      `multipart/alternative; boundary="${boundary}"`,
+    ]);
+    content = [
+      `--${boundary}`,
+      'Content-Type: text/plain; charset=utf-8',
+      'Content-Transfer-Encoding: base64',
+      '',
+      encodeBody(input.body),
+      `--${boundary}`,
+      'Content-Type: text/html; charset=utf-8',
+      'Content-Transfer-Encoding: base64',
+      '',
+      encodeBody(input.html),
+      `--${boundary}--`,
+    ].join('\r\n');
+  }
 
   const lines = headers.map(([name, value]) => {
     assertHeaderSafe(name, value);
     return `${name}: ${value}`;
   });
 
-  // base64 for the body: it survives any charset, cannot contain a line that
-  // looks like a header, and keeps lines inside the 998-octet limit. Line
-  // breaks are made CRLF first: text/plain on the wire is CRLF text, and a
-  // client decoding the part would otherwise show bare LFs as it received them.
-  const text = input.body.replace(/\r\n|\r|\n/g, '\r\n');
-  const encoded = (
+  return Buffer.from(`${lines.join('\r\n')}\r\n\r\n${content}\r\n`, 'utf-8');
+}
+
+/**
+ * base64 for a body: it survives any charset, cannot contain a line that looks
+ * like a header or a boundary, and keeps lines inside the 998-octet limit. Line
+ * breaks are made CRLF first: text on the wire is CRLF text, and a client
+ * decoding the part would otherwise show bare LFs as it received them.
+ */
+function encodeBody(body: string): string {
+  const text = body.replace(/\r\n|\r|\n/g, '\r\n');
+  return (
     Buffer.from(text, 'utf-8')
       .toString('base64')
       .match(/.{1,76}/g) ?? []
   ).join('\r\n');
-
-  return Buffer.from(`${lines.join('\r\n')}\r\n\r\n${encoded}\r\n`, 'utf-8');
 }
 
 /** Keep every folded header line under the RFC 5322 hard limit of 998 octets. */

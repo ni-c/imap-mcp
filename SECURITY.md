@@ -43,6 +43,20 @@ kind. `save_draft` writes into the mailbox it already has open; the message then
 until a person opens their own mail client and sends it. The human's mail client is the gate,
 and it is a gate no text in a message can talk its way past.
 
+A draft with `format: "markdown"` carries an HTML part, and HTML is where a message can say
+less than it does: a tracking pixel, a script, a link whose text names another site. The HTML
+is therefore never taken from the caller. It is rendered from the Markdown body with every
+character of the source escaped, so the only tags in it are the renderer's own; images become
+links, links are limited to `https`, `http` and a single plain `mailto` address, a link whose
+text names a different host shows its destination instead, and the rendered HTML is checked
+against a fixed list of tags and attributes before anything is stored. Character references
+and reference-style links stay as text: the first would let the HTML show characters the
+plain-text part does not, the second would let a few characters of source repeat a long
+destination thousands of times. What remains is what
+any link carries: a plain link with ordinary text, such as `[agenda](https://…?id=…)`, still
+hides its query string behind the word "agenda" until someone hovers over it. The
+`text/plain` part shows the full destination, and so does the mail client before sending.
+
 **What this does not cover.** The property holds for _this server_, not for the session it runs
 in. If the same agent also has a web-fetch tool, a shell, or another MCP server that can post
 somewhere, the three conditions are satisfied again at the session level and mail read through

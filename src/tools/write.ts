@@ -23,6 +23,7 @@ import {
   withTimeout,
   type ImapConnection,
 } from '../imap.js';
+import { bodyParam, composeBodies, formatParam } from '../compose-body.js';
 import { buildDraft, fromIsAddress } from '../draft.js';
 import { untrustedFields } from '../output-schema.js';
 import { errorResult, jsonResult, run, untrustedResult } from '../result.js';
@@ -683,7 +684,8 @@ export function registerWriteTools(
     {
       title: 'Save a draft',
       description:
-        'Composes a plain-text message and stores it in the Drafts folder. ' +
+        'Composes a message — plain text, or Markdown with an HTML ' +
+        'alternative rendered from it — and stores it in the Drafts folder. ' +
         'This server cannot send mail — the draft waits in the mailbox until a ' +
         'person opens it in their own mail client and sends it from there. ' +
         'That is deliberate: it keeps the composing useful while leaving the ' +
@@ -697,11 +699,8 @@ export function registerWriteTools(
           .max(500)
           .refine((v) => !/[\r\n]/.test(v), 'must not contain line breaks')
           .describe('Subject line.'),
-        body: z
-          .string()
-          .min(1)
-          .max(100_000)
-          .describe('Plain-text body of the message.'),
+        body: bodyParam,
+        format: formatParam,
         reply_to_uid: uidParam
           .optional()
           .describe(
@@ -737,15 +736,26 @@ export function registerWriteTools(
           .optional()
           .describe('Present when mailbox and display_name differ invisibly.'),
         recipients: z.array(z.string()),
+        format: z
+          .enum(['text', 'markdown'])
+          .describe(
+            'How the body was stored: plain text, or with an HTML part.'
+          ),
         flags: z
           .array(z.string())
           .describe('The flags the draft was stored with.'),
         note: z.string(),
       }),
     },
-    async ({ to, cc, bcc, subject, body, reply_to_uid, mailbox }, mcp) =>
+    async (
+      { to, cc, bcc, subject, body, format, reply_to_uid, mailbox },
+      mcp
+    ) =>
       run(async () => {
         const signal = mcp.mcpReq.signal;
+        // Before any IMAP work: a body that cannot be rendered is the caller's
+        // to fix, and nothing should be looked up or locked for it.
+        const composed = composeBodies({ body, format });
         const thread =
           reply_to_uid === undefined
             ? undefined
@@ -757,7 +767,8 @@ export function registerWriteTools(
           ...(cc === undefined ? {} : { cc }),
           ...(bcc === undefined ? {} : { bcc }),
           subject,
-          body,
+          body: composed.text,
+          ...(composed.html === undefined ? {} : { html: composed.html }),
           ...(thread === undefined ? {} : { thread }),
         });
 
@@ -783,6 +794,7 @@ export function registerWriteTools(
             const details = {
               mailbox: folder,
               recipients: to.length + (cc?.length ?? 0) + (bcc?.length ?? 0),
+              format,
               in_reply_to: thread?.messageId,
             };
             await auditedWrite('save_draft', details, () =>
@@ -817,6 +829,7 @@ export function registerWriteTools(
                   `characters. As written: ${escapeInvisible(folder).slice(0, MAILBOX_NAME_MAX)}`,
               }),
           recipients: [...to, ...(cc ?? []), ...(bcc ?? [])],
+          format,
           flags,
           note:
             'The draft is stored but not sent. This server has no way to send mail; open it in your mail client to send it.' +
@@ -825,7 +838,8 @@ export function registerWriteTools(
               : ` The Drafts folder does not store ${dropped.join(' or ')}, so the draft was saved without it; some mail clients may then not list it as a draft.`) +
             (fromIsAddress(client.user ?? '')
               ? ''
-              : ' The IMAP login is not an email address, so the draft has no From header; the mail client sets the sender when it is sent.'),
+              : ' The IMAP login is not an email address, so the draft has no From header; the mail client sets the sender when it is sent.') +
+            composed.notes.map((note) => ` ${note}`).join(''),
         });
       })
   );

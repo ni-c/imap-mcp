@@ -23,6 +23,10 @@ name: Dependabot auto-merge
 # and therefore cannot be a required check on every PR — so auto-merge would not wait
 # for it, and a bad VitePress bump could reach the published site unseen. That is one
 # PR a week at most; it can have a human look.
+#
+# markdown-it is excluded as well. It renders the HTML part of a message from
+# caller-written Markdown, so a change in it is a change to what reaches a
+# recipient; its tests are strong, but this one gets read before it merges.
 
 on: pull_request
 
@@ -49,6 +53,7 @@ jobs:
         if: |
           steps.metadata.outputs.package-ecosystem != 'github_actions' &&
           steps.metadata.outputs.directory != '/docs' &&
+          !contains(steps.metadata.outputs.dependency-names, 'markdown-it') &&
           (steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
            steps.metadata.outputs.update-type == 'version-update:semver-minor')
         run: gh pr merge --auto --squash "$PR_URL"

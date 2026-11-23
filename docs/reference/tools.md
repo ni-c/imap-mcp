@@ -30,7 +30,7 @@ Registered only when `IMAP_READ_ONLY=false`.
 | `set_message_flags`    | Set or clear flags and keywords — read, flagged, and the assistant's own. **essential**  |
 | `move_messages` 👤     | Move or copy messages between folders. **essential**                                     |
 | `delete_messages` 👤   | Delete: sets `\Deleted` and expunges. Not the same as moving to Trash                    |
-| `save_draft`           | Append a draft to the drafts folder. This server never **sends** anything                |
+| `save_draft`           | Append a draft to the drafts folder, as plain text or Markdown. This server never **sends** anything |
 | `manage_mailbox` 👤    | Create, rename and delete folders — 👤 for `delete`, 🔒 for `rename`, nothing for `create` |
 
 👤 **asks a person** through MCP elicitation, a dialog the model cannot answer on its
@@ -81,6 +81,53 @@ This exposes Gmail's search syntax; it does not add semantic search or guarantee
 that a broad query will be fast.
 
 See [Google's IMAP extensions](https://developers.google.com/workspace/gmail/imap/imap-extensions#extension_of_the_search_command_x-gm-raw).
+
+## Formatted drafts
+
+`save_draft` takes `format: "text"` (the default) or `format: "markdown"`. With
+`markdown` the draft is `multipart/alternative`: the `text/plain` part is the body
+exactly as written, and the `text/html` part is rendered from it. The rendering is
+the same code as `smtp-mcp` uses for a message it sends, so a draft and a sent
+message come out alike.
+
+```json
+{
+  "to": ["anna@example.net"],
+  "subject": "Next steps",
+  "body": "Thanks for today.\n\n- **Contract:** draft by Friday\n- Agenda: [shared doc](https://docs.example/agenda)",
+  "format": "markdown"
+}
+```
+
+What the HTML part can contain is fixed: paragraphs, line breaks, emphasis, lists,
+inline links, headings, block quotes, code and rules. Nothing the caller writes
+becomes markup of its own:
+
+- **Raw HTML is text.** `<script>`, `<img>`, `<style>` or an `onerror=` appear in the
+  draft as the characters typed, escaped rather than removed, so there is nothing to
+  get past. Character references such as `&#x202E;` stay as written too, so the HTML
+  part never shows a character the plain-text part does not, and an autolink such as
+  `<https://…>` shows its destination exactly as written rather than percent-decoded.
+- **Nothing loads by itself.** An image becomes a link to the image; the draft has no
+  `<img>`, no style and no remote resource, so it cannot carry a tracking pixel.
+- **Links go to `https`, `http` or one plain `mailto` address.** Anything else —
+  `javascript:`, `data:`, a relative path, credentials in the URL, a `mailto` with a
+  query that would fill in `cc` or a body — stays as text, and the result's `note`
+  says so. Reference-style links (`[text][label]`) stay as text as well; write the
+  destination inline.
+- **Link text cannot pretend to be another destination.** When the text of a link
+  names any host, address or IP other than the one it points to — on its own, inside
+  a sentence, in quotes or glued to punctuation, with lookalike dots or fullwidth
+  letters — or points at an internationalised domain, or contains invisible or
+  direction-changing characters, the HTML shows the destination itself instead, and
+  the `note` counts it.
+- **The HTML is checked after rendering.** Every tag must come from the fixed list,
+  with `href` as the only attribute on a link, and the HTML can be no more than a
+  fixed multiple of the body; anything else refuses the draft rather than storing it.
+
+A Markdown body may be at most 100 000 characters (a plain-text one 500 000), and
+block quotes and lists nested deeper than the renderer follows are refused rather
+than cut off. The result reports `format`.
 
 ## Conversations
 
