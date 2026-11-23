@@ -54,8 +54,32 @@ const TAG = new RegExp(
 );
 const ATTRIBUTE = / ([a-z]+)="([^"<>]*)"/g;
 
-/** Invisible format characters: bidi controls, zero-width joiners, soft hyphens. */
-const FORMAT_CHARACTER = /\p{Cf}/u;
+/**
+ * Format characters that change what a reader sees without being seen: bidi
+ * overrides and isolates, zero-width space, word joiner, BOM, soft hyphen.
+ * Joiners and direction marks (U+200C, U+200D, U+200E, U+200F) are not on the
+ * list — emoji sequences and Persian, Indic, Arabic and Hebrew text need them —
+ * and are removed before looking for hosts instead.
+ */
+const DECEPTIVE_FORMAT =
+  /[\u00ad\u200b\u2060\ufeff\u202a-\u202e\u2066-\u2069]/u;
+const ANY_FORMAT = /\p{Cf}/gu;
+/**
+ * Last labels that are file extensions and no top-level domain: `Node.js` or
+ * `logo.png` name no host. Extensions that are also TLDs (`md`, `py`, `zip`,
+ * `mov`) stay off this list on purpose.
+ */
+const NOT_A_TLD = new Set(
+  (
+    'js mjs cjs jsx ts tsx json jsonc yaml yml toml ini cfg conf lock log txt ' +
+    'csv tsv png jpg jpeg gif svg webp bmp ico heic tiff psd pdf doc docx xls ' +
+    'xlsx ppt pptx odt ods htm html xhtml xml css scss sass java kt swift cpp ' +
+    'hpp rb php sql tar gz tgz exe dll bak tmp wav ogg flac'
+  ).split(' ')
+);
+/** TLDs that are also common file extensions — see the file-name rule in misleads. */
+const FILE_LIKE_TLDS = new Set(['md', 'py', 'sh', 'rs', 'pl', 'zip', 'mov']);
+const ADDRESS = /^(?:mailto:)?[^@\s]+@([^@\s]+\.[^@\s.]+)$/i;
 /** What separates host-shaped runs in link text; a split on it is linear. */
 const NOT_HOST_CHARACTER = /[^\p{L}\p{N}\p{M}.-]+/u;
 /**
@@ -65,7 +89,7 @@ const NOT_HOST_CHARACTER = /[^\p{L}\p{N}\p{M}.-]+/u;
  */
 const LOOKALIKE_DOTS = /[。｡·⸳∙⋅‧・܁܂ꞏꓸᐧ]/g;
 /** A bracketed IPv6 literal, as it would appear inside a URL. */
-const IPV6_LITERAL = /\[[0-9a-f:.]+\]/i;
+const IPV6_LITERAL = /\[[0-9a-f.]*:[0-9a-f:.]*\]/i;
 const SCHEME_CHARACTER = /[a-z0-9+.-]/i;
 const IPV4 = /^\d{1,3}(?:\.\d{1,3}){3}$/;
 const ALNUM = /[\p{L}\p{N}]/u;
@@ -178,8 +202,10 @@ function trimToAlnum(word: string): string {
  *
  * A run is a stretch of letters, digits, marks, dots and hyphens. It names a
  * host when, with dots and hyphens trimmed from its ends, it has a dot between
- * two labels and its last label is two characters or more with a letter in
- * it — `docs.example` and `bank.example-login`, not `1.2.3` or `e.g`. An IPv4 address counts too.
+ * two labels and its last label could be a top-level domain: two letters or
+ * more, or punycode, and not a file extension that is no TLD. So
+ * `docs.example` and `bank.example-login` count, `1.2.3`, `e.g`, `3.5mm`,
+ * `Node.js` and `logo.png` do not. An IPv4 address counts too.
  */
 function hostOf(run: string): string | undefined {
   let start = 0;
@@ -192,9 +218,34 @@ function hostOf(run: string): string | undefined {
   const labels = candidate.split('.');
   if (labels.length < 2 || labels.some((label) => label === ''))
     return undefined;
-  // No top-level domain is a single character, so `e.g` names nothing.
-  const last = labels.at(-1) ?? '';
-  return last.length >= 2 && /\p{L}/u.test(last) ? candidate : undefined;
+  let last = (labels.at(-1) ?? '').toLowerCase();
+  let named = candidate;
+  // `bank.example-login` reads as the host `bank.example` with a suffix.
+  const hyphen = last.indexOf('-');
+  if (hyphen > 0 && !last.startsWith('xn--')) {
+    named = candidate.slice(0, candidate.length - last.length + hyphen);
+    last = last.slice(0, hyphen);
+  }
+  const tldShaped = /^(?:[\p{L}\p{M}]{2,63}|xn--[a-z0-9-]+)$/u.test(last);
+  return tldShaped && !NOT_A_TLD.has(last) ? named : undefined;
+}
+
+/** A host without a leading `www.`, which names the same site for a reader. */
+function sameSite(host: string): string {
+  return host.startsWith('www.') ? host.slice(4) : host;
+}
+
+/** Whether the text names exactly the file the link points at (`README.md`). */
+function namesLinkedFile(named: string, href: string): boolean {
+  const last = named.toLowerCase().split('.').at(-1) ?? '';
+  if (!FILE_LIKE_TLDS.has(last) || /^mailto:/i.test(href)) return false;
+  const path = new URL(href).pathname.toLowerCase();
+  return path.endsWith(`/${named.toLowerCase()}`);
+}
+
+/** Whether text uses formatting characters that hide what it says. */
+export function hasDeceptiveFormatting(text: string): boolean {
+  return DECEPTIVE_FORMAT.test(text);
 }
 
 /**
@@ -205,31 +256,49 @@ function hostOf(run: string): string | undefined {
  * and so does anything that can make text look like what it is not.
  */
 function misleads(text: string, href: string): boolean {
-  if (FORMAT_CHARACTER.test(text)) return true;
+  if (hasDeceptiveFormatting(text)) return true;
   const host = hrefHost(href);
   if (host.split('.').some((label) => label.startsWith('xn--'))) return true;
+  const site = sameSite(host);
   const isMailto = /^mailto:/i.test(href);
   // NFKC folds lookalike dots and fullwidth letters into what a URL parser
-  // reads; the text the recipient sees is left as written.
-  const folded = text.normalize('NFKC').replace(LOOKALIKE_DOTS, '.');
+  // reads, and the harmless format characters go; the text the recipient sees
+  // is left as written.
+  const folded = text
+    .normalize('NFKC')
+    .replace(ANY_FORMAT, '')
+    .replace(LOOKALIKE_DOTS, '.');
 
   for (const word of folded.split(/\s+/)) {
     // Numeric and bracketed hosts (`127.1`, `0x7f000001`, `[2001:db8::1]`)
     // have no letter to find below; the URL parser reads them as a browser does.
     const written = urlHostIn(word);
-    if (written === null || (written !== undefined && written !== host)) {
+    if (
+      written === null ||
+      (written !== undefined && sameSite(written) !== site)
+    ) {
       return true;
     }
-    if (!word.includes('@')) continue;
-    // An address in the text must be the very address a mailto link goes to.
+    // An address in the text must be the very address a mailto link goes to,
+    // or on a web link at least the site it opens. `@alice` is not an address.
     const address = trimToAlnum(word).toLowerCase();
-    if (!isMailto || `mailto:${address}` !== href.toLowerCase()) return true;
+    const shaped = ADDRESS.exec(address);
+    if (shaped === null) continue;
+    if (isMailto) {
+      if (`mailto:${address.replace(/^mailto:/, '')}` !== href.toLowerCase()) {
+        return true;
+      }
+    } else if (sameSite(domainToASCII(shaped[1] ?? '')) !== site) {
+      return true;
+    }
   }
   for (const run of folded.split(NOT_HOST_CHARACTER)) {
     const named = hostOf(run);
     if (named === undefined) continue;
     const ascii = domainToASCII(named.toLowerCase());
-    if (ascii === '' || ascii !== host) return true;
+    if (ascii !== '' && sameSite(ascii) === site) continue;
+    if (namesLinkedFile(named, href)) continue;
+    return true;
   }
   return false;
 }
@@ -559,6 +628,9 @@ export function composeBodies(input: BodyInput): ComposedBody {
     htmlParts.push(`<div>-- <br>\n${escapedLines(input.signature)}</div>\n`);
   }
   const fragment = htmlParts.join('');
+  // Nothing to render: an HTML part of an empty page would be the message's
+  // only part when the text is empty too, and say nothing either way.
+  if (fragment === '') return { text, notes: rendered.notes, links: [] };
   checkRenderedHtml(fragment);
   return {
     text,

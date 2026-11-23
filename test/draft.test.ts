@@ -453,12 +453,12 @@ describe('save_draft format', () => {
     expect(result.isError).toBeFalsy();
   });
 
-  it('stores an empty Markdown body as text plus an HTML shell', async () => {
+  it('stores an empty Markdown body as an empty plain-text draft', async () => {
     const { result, raw } = await saved({ body: '', format: 'markdown' });
     expect(result.isError).toBeFalsy();
-    const parsed = await simpleParser(raw ?? Buffer.alloc(0));
-    expect(parsed.text ?? '').toBe('');
-    expect(parsed.html).toContain('<body>');
+    expect(headersOf(raw ?? Buffer.alloc(0))).toContain(
+      'Content-Type: text/plain'
+    );
   });
 
   it('threads a Markdown reply like a plain one', async () => {

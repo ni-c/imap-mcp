@@ -11,6 +11,7 @@ import {
   checkRenderedHtml,
   composeBodies,
   formatParam,
+  hasDeceptiveFormatting,
   isAllowedHref,
   renderMarkdown,
 } from '../src/compose-body.js';
@@ -27,7 +28,7 @@ import { ToolInputError } from '../src/errors.js';
  * module in both repositories, then this constant in both.
  */
 const MODULE_SHA256 =
-  '6387acc46a57a04e3abbb4f09dda427006ee0c311fa5b28b9a1cf6aa9406e515';
+  '26e1b07bca8e95dde782f02bd3cef9f0f1011371a296894d19644dc3914b29b8';
 
 const REFUSED = /left as text/;
 
@@ -309,7 +310,7 @@ describe('renderMarkdown: links whose text misleads', () => {
     ],
     [
       'a subdomain of the destination',
-      '[www.evil.example](https://evil.example)',
+      '[login.evil.example](https://evil.example)',
     ],
     [
       'a URL with a port and path',
@@ -397,6 +398,26 @@ describe('renderMarkdown: links whose text misleads', () => {
       'a scheme glued to a word',
       '[Login:https://bank.example](https://evil.example/)',
     ],
+    [
+      'a zero-width joiner inside a domain',
+      '[bank‍.example](https://evil.example)',
+    ],
+    [
+      'a TLD that is also a file extension',
+      '[paypal.md](https://evil.example/x)',
+    ],
+    [
+      'a domain named after the path',
+      '[bank.de](https://evil.example/bank.de)',
+    ],
+    [
+      'a file name the link does not point at',
+      '[README.md](https://evil.example/other.md)',
+    ],
+    [
+      'a domain under a www destination',
+      '[paypal.com](https://www.evil.example)',
+    ],
   ])('shows the destination for %s', (_name, source) => {
     const out = renderMarkdown(source);
     const href = hrefsOf(out.html)[0] ?? '';
@@ -435,6 +456,38 @@ describe('renderMarkdown: links whose text misleads', () => {
       '[see https://docs.example.](https://docs.example)',
     ],
     ['the same IPv4 address', '[http://192.0.2.1/](http://192.0.2.1/x)'],
+    ['an emoji with a zero-width joiner', '[👩‍💻 Dev](https://example.net/a)'],
+    [
+      'Persian with a zero-width non-joiner',
+      '[سلام‌دنیا](https://example.net/a)',
+    ],
+    ['Hebrew with a direction mark', '[‎שלום](https://example.net/a)'],
+    ['the linked file name', '[README.md](https://example.net/x/README.md)'],
+    ['a file name in code', '[`foo.py`](https://example.net/foo.py)'],
+    ['a product name', '[Node.js](https://nodejs.org)'],
+    ['a release with a suffix', '[Release 1.2.3-rc1](https://example.net)'],
+    ['a measurement', '[3.5mm jack](https://example.net)'],
+    ['an academic title', '[Dr.-Ing. X](https://example.net)'],
+    [
+      'an image file name as alt text',
+      '![logo.png](https://example.net/logo.png)',
+    ],
+    ['a handle', '[@alice](https://github.com/alice)'],
+    ['a lone at sign', '[Meet @ 5](https://example.net)'],
+    [
+      'the mailto URL itself',
+      '[mailto:anna@example.net](mailto:anna@example.net)',
+    ],
+    ['a footnote marker', '[[1]](https://example.net/a)'],
+    ['the bare domain of a www host', '[example.net](https://www.example.net)'],
+    [
+      'the www host of a bare domain',
+      '[www.example.net](https://example.net/)',
+    ],
+    [
+      'an address on its own site',
+      '[support@example.net](https://example.net/contact)',
+    ],
   ])('keeps the text for %s', (_name, source) => {
     expect(renderMarkdown(source).notes).toEqual([]);
   });
@@ -497,6 +550,22 @@ describe('checkRenderedHtml', () => {
     '<p',
   ])('refuses %s', (fragment) => {
     expect(() => checkRenderedHtml(fragment)).toThrow(/failed its own check/);
+  });
+});
+
+describe('hasDeceptiveFormatting', () => {
+  it.each([
+    ['a bidi override', 'a\u202eb', true],
+    ['a bidi isolate', 'a\u2066b', true],
+    ['a zero-width space', 'a\u200bb', true],
+    ['a soft hyphen', 'a\u00adb', true],
+    ['an emoji joiner', '👩‍💻', false],
+    ['a non-joiner', 'سلام‌دنیا', false],
+    ['a direction mark', '\u200eשלום', false],
+    ['plain text', 'hello', false],
+    ['nothing', '', false],
+  ])('%s → %s', (_name, text, expected) => {
+    expect(hasDeceptiveFormatting(text)).toBe(expected);
   });
 });
 
@@ -563,6 +632,17 @@ describe('composeBodies', () => {
     expect(composed.html).toContain(
       '<div>-- <br>\nAnna &amp; Co<br>\n[site](https://example.com)</div>\n'
     );
+  });
+
+  it('adds no HTML part when there is nothing to render', () => {
+    expect(composeBodies({ body: '', format: 'markdown' })).toEqual({
+      text: '',
+      notes: [],
+      links: [],
+    });
+    expect(
+      composeBodies({ body: '', format: 'markdown', quote: 'q' }).html
+    ).toContain('<blockquote>q</blockquote>');
   });
 
   it('ignores an empty quote', () => {
