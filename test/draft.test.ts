@@ -1,3 +1,4 @@
+import { simpleParser } from 'mailparser';
 import { describe, expect, it } from 'vitest';
 
 import { buildDraft, encodeHeaderValue, fromIsAddress } from '../src/draft.js';
@@ -304,6 +305,182 @@ describe('the References chain of a reply', () => {
     expect(raw).toContain(`In-Reply-To: ${parent}`);
     expect(raw).toContain(`References: ${a} ${b} ${c} ${parent}\r\n`);
     await harness.close();
+  });
+});
+
+function boundary(draft: Buffer): string | undefined {
+  return /boundary="([^"]+)"/.exec(draft.toString('utf-8'))?.[1];
+}
+
+describe('buildDraft with an HTML part', () => {
+  const html = '<p>Hi <strong>there</strong></p>\n';
+
+  it('is multipart/alternative with the text part first', async () => {
+    const draft = buildDraft({ ...base, body: 'Hi **there**', html });
+    const headers = headersOf(draft);
+    expect(headers).toMatch(
+      /Content-Type: multipart\/alternative; boundary="----=_imap-mcp_[0-9a-f-]{36}"/
+    );
+    const parsed = await simpleParser(draft);
+    expect(parsed.text).toBe('Hi **there**');
+    expect(parsed.html).toBe(html);
+    const raw = draft.toString('utf-8');
+    expect(raw.indexOf('text/plain')).toBeLessThan(raw.indexOf('text/html'));
+  });
+
+  it('takes a fresh boundary per draft', () => {
+    expect(boundary(buildDraft({ ...base, html }))).not.toBe(
+      boundary(buildDraft({ ...base, html }))
+    );
+  });
+
+  it('cannot be split by a body that spells out a boundary', async () => {
+    const draft = buildDraft({ ...base, html });
+    const hostile = `--${boundary(draft)}\nContent-Type: text/html\n\n<script>x</script>\n--${boundary(draft)}--`;
+    const parsed = await simpleParser(
+      buildDraft({ ...base, body: hostile, html })
+    );
+    expect(parsed.text).toBe(hostile);
+    expect(parsed.html).toBe(html);
+  });
+
+  it('keeps every line of both parts inside the line-length limit, CRLF only', () => {
+    const draft = buildDraft({
+      ...base,
+      body: 'x'.repeat(5_000),
+      html: `<p>${'y'.repeat(5_000)}</p>`,
+    });
+    const raw = draft.toString('utf-8');
+    for (const line of raw.split('\r\n')) expect(line.length).toBeLessThan(999);
+    expect(raw.replace(/\r\n/g, '')).not.toMatch(/[\r\n]/);
+  });
+
+  it('carries non-ASCII text and every line-break style in both parts', async () => {
+    const draft = buildDraft({
+      ...base,
+      body: 'Grüße\r\nAlex\rund 日本\nTeam',
+      html: '<p>Grüße 日本</p>\n',
+    });
+    const raw = draft.toString('utf-8');
+    expect(raw.replace(/\r\n/g, '')).not.toMatch(/[\r\n]/);
+    const parsed = await simpleParser(draft);
+    expect(parsed.text).toBe('Grüße\nAlex\nund 日本\nTeam');
+    expect(parsed.html).toBe('<p>Grüße 日本</p>\n');
+  });
+
+  it('writes an empty HTML part as a well-formed empty part', async () => {
+    const draft = buildDraft({ ...base, body: '', html: '' });
+    expect(headersOf(draft)).toContain('multipart/alternative');
+    const parsed = await simpleParser(draft);
+    expect(parsed.text ?? '').toBe('');
+  });
+
+  it('leaves a text-only draft exactly as before', () => {
+    const plain = buildDraft(base).toString('utf-8');
+    expect(plain).toContain('Content-Type: text/plain; charset=utf-8');
+    expect(plain).not.toContain('multipart');
+  });
+});
+
+async function saved(args: Record<string, unknown>) {
+  const harness = await connect({ config: { readOnly: false } });
+  const result = await call(harness.client, 'save_draft', {
+    to: ['anna@example.net'],
+    subject: 'Plan',
+    ...args,
+  });
+  const raw = harness.imap.appended[0]?.content;
+  await harness.close();
+  return { result, raw };
+}
+
+interface DraftResult {
+  format: string;
+  note: string;
+}
+
+describe('save_draft format', () => {
+  it('stores plain text by default and says so', async () => {
+    const { result, raw } = await saved({ body: 'Hi **there**' });
+    expect((jsonOf(result) as DraftResult).format).toBe('text');
+    const parsed = await simpleParser(raw ?? Buffer.alloc(0));
+    expect(parsed.text?.trim()).toBe('Hi **there**');
+    expect(parsed.html).toBe(false);
+  });
+
+  it('stores Markdown as text plus rendered HTML', async () => {
+    const body =
+      '# Plan\n\n- **one**\n- [two](https://example.com)\n\n<script>x</script>';
+    const { result, raw } = await saved({ body, format: 'markdown' });
+    expect(result.isError).toBeFalsy();
+    expect((jsonOf(result) as DraftResult).format).toBe('markdown');
+    const parsed = await simpleParser(raw ?? Buffer.alloc(0));
+    expect(parsed.text?.trim()).toBe(body);
+    expect(parsed.html).toContain('<h1>Plan</h1>');
+    expect(parsed.html).toContain('<a href="https://example.com">two</a>');
+    expect(parsed.html).toContain('&lt;script&gt;x&lt;/script&gt;');
+    expect(parsed.html).not.toContain('<script');
+  });
+
+  it('reports a rewritten link in the note, without the link text', async () => {
+    const { result } = await saved({
+      body: '[bank.example](https://evil.example)',
+      format: 'markdown',
+    });
+    const note = (jsonOf(result) as DraftResult).note;
+    expect(note).toMatch(/1 link showed text that did not match/);
+    expect(note).not.toContain('bank.example');
+  });
+
+  it('refuses a Markdown body over the ceiling before storing anything', async () => {
+    const { result, raw } = await saved({
+      body: 'a'.repeat(100_001),
+      format: 'markdown',
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/at most 100000 characters/);
+    expect(raw).toBeUndefined();
+  });
+
+  it('refuses a format it does not know', async () => {
+    const { result, raw } = await saved({ body: 'x', format: 'html' });
+    expect(result.isError).toBe(true);
+    expect(raw).toBeUndefined();
+  });
+
+  it('stores an empty body, as smtp-mcp sends one', async () => {
+    const { result } = await saved({ body: '' });
+    expect(result.isError).toBeFalsy();
+  });
+
+  it('stores an empty Markdown body as an empty plain-text draft', async () => {
+    const { result, raw } = await saved({ body: '', format: 'markdown' });
+    expect(result.isError).toBeFalsy();
+    expect(headersOf(raw ?? Buffer.alloc(0))).toContain(
+      'Content-Type: text/plain'
+    );
+  });
+
+  it('threads a Markdown reply like a plain one', async () => {
+    const mailboxes = defaultMailboxes();
+    mailboxes[0]!.messages.push(
+      message(7, { messageId: '<parent@example.net>' })
+    );
+    const harness = await connect({ config: { readOnly: false }, mailboxes });
+    await call(harness.client, 'save_draft', {
+      to: ['anna@example.net'],
+      subject: 'Re: x',
+      body: '**Yes.**',
+      format: 'markdown',
+      reply_to_uid: 7,
+    });
+    const raw = harness.imap.appended[0]?.content ?? Buffer.alloc(0);
+    await harness.close();
+    expect(headersOf(raw)).toContain('In-Reply-To: <parent@example.net>');
+    expect(headersOf(raw)).toContain('multipart/alternative');
+    const parsed = await simpleParser(raw);
+    expect(parsed.inReplyTo).toBe('<parent@example.net>');
+    expect(parsed.html).toContain('<strong>Yes.</strong>');
   });
 });
 

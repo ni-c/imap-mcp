@@ -12,6 +12,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      last in the file so the link definitions come along. -->
 <!-- #region changelog -->
 
+## [Unreleased]
+
+### Added
+
+- `save_draft` takes `format: "markdown"` and stores the draft as `multipart/alternative`:
+  the body exactly as written in `text/plain`, and an HTML part rendered from it (#87).
+  The HTML is never taken from the caller. Raw HTML in the body is escaped, images become
+  links, links are limited to `https`, `http` and one plain `mailto` address, link text
+  that names another host or address is replaced by the destination, character
+  references and reference-style links stay as text, and the rendered HTML is checked
+  against a fixed list of tags and a size ceiling before the draft is stored. `format: "text"` stays
+  the default and produces the same message as before. The rendering module is shared
+  byte for byte with `smtp-mcp`, so a draft and a sent message look alike.
+
+### Changed
+
+- `save_draft` accepts a body of up to 500 000 characters (was 100 000) and an empty
+  one, the same limits `smtp-mcp` applies. A Markdown body is capped at 100 000.
+
+### Dependencies
+
+- `markdown-it` 15.0.3, pinned exactly, with its six dependencies (`argparse`,
+  `entities`, `linkify-it`, `mdurl`, `punycode.js`, `uc.micro`). It renders the HTML
+  part; updates are reviewed by hand rather than merged automatically.
+
 ## [0.7.0] - 2026-11-04
 
 ### Added
@@ -854,6 +879,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Every change to the mailbox is logged to stderr with UIDs and folder, never
   subjects.
 
+[Unreleased]: https://github.com/ni-c/imap-mcp/compare/v0.7.0...HEAD
 [0.7.0]: https://github.com/ni-c/imap-mcp/releases/tag/v0.7.0
 [0.6.0]: https://github.com/ni-c/imap-mcp/releases/tag/v0.6.0
 [0.5.3]: https://github.com/ni-c/imap-mcp/releases/tag/v0.5.3

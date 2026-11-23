@@ -11,8 +11,17 @@ import {
 } from 'mcp-integration-harness';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { ImapFlow } from 'imapflow';
+import { simpleParser } from 'mailparser';
+
 import { ALL_TOOLS } from '../../src/tools/catalogue.js';
-import { bootstrap, SUBJECTS, type Sandbox } from './bootstrap.js';
+import {
+  bootstrap,
+  PASSWORD,
+  SUBJECTS,
+  USER,
+  type Sandbox,
+} from './bootstrap.js';
 
 /**
  * Every tool in the catalogue, against a real IMAP server in Docker.
@@ -274,6 +283,53 @@ describe('flags, mailboxes and moving', () => {
       limit: 10,
     });
     expect(drafts).toContain('Integration draft');
+  });
+
+  it('saves a Markdown draft as text plus HTML the server stores intact', async () => {
+    const body =
+      '# Next steps\n\n- **one**\n- [two](https://example.com)\n\n![pixel](https://t.example/p.gif) <script>x</script>';
+    await asking.call('save_draft', {
+      to: ['someone@example.net'],
+      subject: 'Integration markdown draft',
+      body,
+      format: 'markdown',
+    });
+    const client = new ImapFlow({
+      host: sandbox.env.IMAP_HOST ?? '127.0.0.1',
+      port: Number(sandbox.env.IMAP_PORT),
+      secure: false,
+      auth: { user: USER, pass: PASSWORD },
+      logger: false,
+    });
+    await client.connect();
+    let source: Buffer | undefined;
+    try {
+      const lock = await client.getMailboxLock('Drafts');
+      try {
+        const found = await client.search({
+          subject: 'Integration markdown draft',
+        });
+        const uid = Array.isArray(found) ? found.at(-1) : undefined;
+        if (uid !== undefined) {
+          const fetched = await client.fetchOne(String(uid), {
+            source: true,
+          });
+          source = fetched === false ? undefined : fetched.source;
+        }
+      } finally {
+        lock.release();
+      }
+    } finally {
+      await client.logout();
+    }
+    const parsed = await simpleParser(source ?? Buffer.alloc(0));
+    expect(parsed.text?.trim()).toBe(body);
+    expect(parsed.html).toContain('<h1>Next steps</h1>');
+    expect(parsed.html).toContain('<a href="https://example.com">two</a>');
+    expect(parsed.html).toContain(
+      '<a href="https://t.example/p.gif">pixel</a>'
+    );
+    expect(parsed.html).not.toMatch(/<(img|script)/);
   });
 });
 
